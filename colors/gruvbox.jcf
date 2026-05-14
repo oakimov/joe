@@ -86,6 +86,26 @@
 =diff.DelLine		[bg0]/[dark_red]
 =Ignore			[dark_gray]
 
+# Markdown colors (256-color palette fallback)
+=MdH1			[light_yellow] bold underline
+=MdH2			[light_blue] bold
+=MdH3			[light_green] bold
+=MdH4			[light_purple] underline
+=MdH5			[fg] italic
+=MdH6			[fg4] dim
+=MdBold			bold
+=MdItalic		dim italic
+=MdStrike		dim
+=MdCode			[fg2]/[bg1]
+=MdBlockquote		[light_gray] italic
+=MdList			[fg]
+=MdRule			[light_aqua]
+=MdLinkText		[light_blue]
+=MdLinkUrl		[light_purple]
+=MdImageAlt		[light_aqua] bold
+=MdCodeBlock		[fg2]/[bg1]
+=MdCodeFence		[light_aqua]
+
 # Terminal colors
 -term  0 [bg0]
 -term  1 [dark_red]
@@ -187,6 +207,42 @@
 =diff.AddLine		[bg0]/[light_green]
 =diff.DelLine		[bg0]/[dark_red]
 =Ignore			[dark_gray]
+
+# Markdown colors (256-color palette fallback)
+=MdH1			[light_yellow] bold underline
+=MdH2			[light_blue] bold
+=MdH3			[light_green] bold
+=MdH4			[light_purple] underline
+=MdH5			[fg] italic
+=MdH6			[fg4] dim
+=MdBold			bold
+=MdItalic		dim italic
+=MdStrike		dim
+=MdCode			[fg2]/[bg1]
+=MdBlockquote		[light_gray] italic
+=MdList			[fg]
+=MdRule			[light_aqua]
+=MdLinkText		[light_blue]
+=MdLinkUrl		[light_purple]
+=MdImageAlt		[light_aqua] bold
+=MdCodeBlock		[fg2]/[bg1]
+=MdCodeFence		[light_aqua]
+
+# Markdown colors (truecolor vibrant version with background tint)
+.set md_h1		$FFD700
+.set md_h2		$87CEEB
+.set md_h3		$98FB98
+.set md_h4		$DDA0DD
+.set md_h5		$F0E68C
+.set md_h6		$C0C0C0
+.set md_bg_tint	$404040
+
+=MdH1			$[md_h1]/[md_bg_tint] bold underline
+=MdH2			$[md_h2]/[md_bg_tint] bold
+=MdH3			$[md_h3]/[md_bg_tint] bold
+=MdH4			$[md_h4]/[md_bg_tint] underline
+=MdH5			$[md_h5]/[md_bg_tint] italic
+=MdH6			$[md_h6]/[md_bg_tint] dim
 
 # Terminal colors
 -term  0 [bg0]

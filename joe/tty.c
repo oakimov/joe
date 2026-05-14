@@ -306,7 +306,7 @@ void tickon(void)
 			tim = 1;
 		tim *= 1000;
 		val.it_value.tv_sec = 0;
-		val.it_value.tv_usec = tim;
+		val.it_value.tv_usec = (suseconds_t)tim;
 	} else {
 		val.it_value.tv_sec = 1;
 		val.it_value.tv_usec = 0;

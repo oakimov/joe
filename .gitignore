@@ -23,3 +23,6 @@ charmaps/klingon
 /depcomp
 /install-sh
 /missing
+
+.claude/
+.pytest_cache/

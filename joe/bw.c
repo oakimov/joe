@@ -431,7 +431,28 @@ static void end_osc8(const struct state_debug_data *oldstate, int opt)
 
 /* Update a single line */
 
+static int lgen_core(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,HIGHLIGHT_STATE st,BW *bw);
+static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,HIGHLIGHT_STATE st,BW *bw);
+
+/* When set, lgen_core skips re-parsing and uses the already-populated attr_buf.
+ * This allows lgen_view to parse, modify attr_buf, then delegate rendering. */
+static int viewmode_skip_parse = 0;
+
+/* Bitmap for view mode: when viewmode_skip_parse is set, characters with
+ * a set bit in viewmode_hide[] are rendered as spaces (hidden delimiters).
+ */
+static char *viewmode_hide = NULL;
+static int viewmode_hide_size = 0;
+
 static int lgen(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,HIGHLIGHT_STATE st,BW *bw)
+{
+	if (bw->o.viewmode)
+		return lgen_view(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
+	else
+		return lgen_core(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
+}
+
+static int lgen_core(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,HIGHLIGHT_STATE st,BW *bw)
 
 
             			/* Screen line address */
@@ -471,12 +492,14 @@ static int lgen(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, ptrdiff
 	ansi_init(&ansi_sm);
 
 	if(st.state!=-1) {
-		tmp=pdup(p, "lgen");
-		p_goto_bol(tmp);
-		parse(bw->o.syntax,tmp,st,p->b->o.charmap);
+		if (!viewmode_skip_parse) {
+			tmp=pdup(p, "lgen");
+			p_goto_bol(tmp);
+			parse(bw->o.syntax,tmp,st,p->b->o.charmap);
+			prm(tmp);
+		}
 		syn = attr_buf;
 		syndebug = syndebug_buf;
-		prm(tmp);
 	}
 
 /* Initialize bp and amnt from p */
@@ -504,6 +527,8 @@ static int lgen(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, ptrdiff
 				if (syndebug)
 					atr_state = syndebug[idx];
 				++idx;
+				if (viewmode_skip_parse && viewmode_hide && idx <= viewmode_hide_size && viewmode_hide[idx - 1])
+					bc = ' ';
 				if (!(atr & BG_MASK))
 					atr |= defatr & BG_MASK;
 				if (!(atr & FG_MASK))
@@ -641,6 +666,8 @@ static int lgen(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, ptrdiff
 				if (syndebug)
 					atr_state = syndebug[idx];
 				++idx;
+				if (viewmode_skip_parse && viewmode_hide && idx <= viewmode_hide_size && viewmode_hide[idx - 1])
+					bc = ' ';
 				if (!(atr & BG_MASK))
 					atr |= defatr & BG_MASK;
 				if (!(atr & FG_MASK))
@@ -835,6 +862,269 @@ static int lgen(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, ptrdiff
 	return 0;
 }
 
+/* Markdown view mode rendering */
+/* Features 1.3-1.8: Hide/transform markdown delimiters in view mode */
+static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,HIGHLIGHT_STATE st,BW *bw)
+{
+	/* Only process if syntax highlighting is active */
+	if (st.state == -1 || !bw->o.syntax) {
+		return lgen_core(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
+	}
+
+	/* Parse the line to populate attr_buf */
+	P *tmp = pdup(p, "lgen_view");
+	p_goto_bol(tmp);
+	(void)parse(bw->o.syntax, tmp, st, p->b->o.charmap);
+	prm(tmp);
+
+	/* Read line bytes into a local buffer */
+	tmp = pdup(p, "lgen_view2");
+	p_goto_bol(tmp);
+
+	int line_len = 0;
+	int line_cap = 1024;
+	unsigned char *line = (unsigned char *)joe_malloc(line_cap);
+	int c;
+	while ((c = pgetb(tmp)) != NO_MORE_DATA && c != '\n') {
+		if (line_len >= line_cap) {
+			line_cap *= 2;
+			line = (unsigned char *)joe_realloc(line, line_cap);
+		}
+		line[line_len++] = (unsigned char)c;
+	}
+	prm(tmp);
+
+	/* Ensure viewmode_hide is the right size */
+	if (!viewmode_hide || viewmode_hide_size != line_len) {
+		viewmode_hide_size = line_len > 0 ? line_len : 1;
+		if (viewmode_hide)
+			joe_free(viewmode_hide);
+		viewmode_hide = (char *)joe_malloc(viewmode_hide_size);
+	}
+	memset(viewmode_hide, 0, viewmode_hide_size);
+
+	/* --- Detect line type and hide delimiters --- */
+
+	/* Feature 1.3: Heading — hide # run and trailing space */
+	{
+		int i = 0;
+		while (i < line_len && line[i] == '#')
+			++i;
+		if (i > 0 && i <= 6) {
+			if (i < line_len && (line[i] == ' ' || line[i] == '\t')) {
+				int j;
+				for (j = 0; j <= i; j++)
+					viewmode_hide[j] = 1;
+			} else if (i == line_len) {
+				int j;
+				for (j = 0; j < i; j++)
+					viewmode_hide[j] = 1;
+			}
+			goto done;
+		}
+	}
+
+	/* Feature 1.5: Fenced code block fence — hide ``` or ~~~ lines */
+	{
+		int i = 0;
+		while (i < line_len && (line[i] == ' ' || line[i] == '\t'))
+			++i;
+		if (i + 2 < line_len && line[i] == '`' && line[i+1] == '`' && line[i+2] == '`') {
+			int j = i;
+			while (j < line_len)
+				viewmode_hide[j++] = 1;
+			goto done;
+		}
+		if (i + 2 < line_len && line[i] == '~' && line[i+1] == '~' && line[i+2] == '~') {
+			int j = i;
+			while (j < line_len)
+				viewmode_hide[j++] = 1;
+			goto done;
+		}
+	}
+
+	/* Feature 1.7: Blockquote — hide > and following space */
+	{
+		int i = 0;
+		while (i < line_len && line[i] == '>') {
+			viewmode_hide[i] = 1;
+			++i;
+			if (i < line_len && line[i] == ' ') {
+				viewmode_hide[i] = 1;
+				++i;
+			}
+		}
+		if (i > 0)
+			goto done;
+	}
+
+	/* Feature 1.8: Horizontal rule - hide entire line (3+ matching chars with spaces) */
+	{
+		int i = 0;
+		while (i < line_len && (line[i] == ' ' || line[i] == '\t'))
+			++i;
+		if (i < line_len && (line[i] == '-' || line[i] == '*' || line[i] == '+')) {
+			unsigned char rule_char = line[i];
+			int count = 0;
+			int j = i;
+			int is_rule = 1;
+			while (j < line_len) {
+				if (line[j] == rule_char)
+					++count;
+				else if (line[j] != ' ' && line[j] != '\t') {
+					is_rule = 0;
+					break;
+				}
+				++j;
+			}
+			if (is_rule && count >= 3) {
+				for (j = 0; j < line_len; j++)
+					viewmode_hide[j] = 1;
+				goto done;
+			}
+		}
+	}
+
+	/* Feature 1.4: Bold/italic/strikethrough delimiters
+	 * Skip list markers: * - + followed by space at line start.
+	 */
+	{
+		int i = 0;
+
+		/* Skip over leading whitespace */
+		while (i < line_len && (line[i] == ' ' || line[i] == '\t'))
+			++i;
+		/* Check for list marker: * - + followed by space */
+		if (i < line_len &&
+		    (line[i] == '*' || line[i] == '-' || line[i] == '+') &&
+		    i + 1 < line_len && (line[i+1] == ' ' || line[i+1] == '\t')) {
+			/* List marker — skip inline emphasis processing */
+			goto skip_emphasis;
+		}
+
+		/* Process inline delimiters */
+		while (i < line_len) {
+			if (line[i] == '*' && i + 1 < line_len && line[i+1] == '*') {
+				/* ** bold */
+				viewmode_hide[i] = 1;
+				viewmode_hide[i+1] = 1;
+				i += 2;
+				while (i < line_len) {
+					if (line[i] == '*' && i + 1 < line_len && line[i+1] == '*') {
+						viewmode_hide[i] = 1;
+						viewmode_hide[i+1] = 1;
+						i += 2;
+						break;
+					}
+					++i;
+				}
+			} else if (line[i] == '_' && i + 1 < line_len && line[i+1] == '_') {
+				/* __ bold */
+				viewmode_hide[i] = 1;
+				viewmode_hide[i+1] = 1;
+				i += 2;
+				while (i < line_len) {
+					if (line[i] == '_' && i + 1 < line_len && line[i+1] == '_') {
+						viewmode_hide[i] = 1;
+						viewmode_hide[i+1] = 1;
+						i += 2;
+						break;
+					}
+					++i;
+				}
+			} else if (line[i] == '~' && i + 1 < line_len && line[i+1] == '~') {
+				/* ~~ strikethrough */
+				viewmode_hide[i] = 1;
+				viewmode_hide[i+1] = 1;
+				i += 2;
+				while (i < line_len) {
+					if (line[i] == '~' && i + 1 < line_len && line[i+1] == '~') {
+						viewmode_hide[i] = 1;
+						viewmode_hide[i+1] = 1;
+						i += 2;
+						break;
+					}
+					++i;
+				}
+			} else if (line[i] == '*' || line[i] == '_') {
+				/* Single * or _ for italic */
+				viewmode_hide[i] = 1;
+				char delim = (char)line[i];
+				++i;
+				while (i < line_len) {
+					if (line[i] == delim) {
+						viewmode_hide[i] = 1;
+						++i;
+						break;
+					}
+					++i;
+				}
+			} else {
+				++i;
+			}
+		}
+	}
+skip_emphasis:
+
+	/* Feature 1.5: Inline code backticks */
+	{
+		int i = 0;
+		while (i < line_len) {
+			if (line[i] == '`') {
+				viewmode_hide[i] = 1;
+				++i;
+				while (i < line_len) {
+					if (line[i] == '`') {
+						viewmode_hide[i] = 1;
+						++i;
+						break;
+					}
+					++i;
+				}
+			} else {
+				++i;
+			}
+		}
+	}
+
+	/* Feature 1.6: Link delimiters [text](url) — hide brackets and parens */
+	{
+		int i = 0;
+		while (i < line_len) {
+			if (line[i] == '[') {
+				int j = i + 1;
+				while (j < line_len && line[j] != ']') ++j;
+				if (j < line_len && j + 1 < line_len && line[j+1] == '(') {
+					int k = j + 2;
+					while (k < line_len && line[k] != ')') ++k;
+					if (k < line_len) {
+						viewmode_hide[i] = 1;    /* [ */
+						viewmode_hide[j] = 1;   /* ] */
+						viewmode_hide[j+1] = 1; /* ( */
+						viewmode_hide[k] = 1;   /* ) */
+						i = k + 1;
+						continue;
+					}
+				}
+			}
+			++i;
+		}
+	}
+
+done:
+	joe_free(line);
+
+	/* Render with our modified hide map */
+	viewmode_skip_parse = 1;
+	int result = lgen_core(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
+	viewmode_skip_parse = 0;
+
+	/* Clear hide map for next line */
+	if (viewmode_hide)
+		memset(viewmode_hide, 0, viewmode_hide_size);
+
+	return result;
+}
 static void gennum(BW *w, int (*screen)[COMPOSE], int *attr, SCRN *t, ptrdiff_t y, int *comp)
 {
 	char buf[24];

@@ -27,6 +27,28 @@ joe_SOURCES = b.c blocks.c bw.c cmd.c hash.c help.c kbd.c macro.c main.c menu.c 
 	builtins.c vt.c mmenu.c state.c options.c unicode.c \
 	cclass.c frag.c colors.c unicat-@UNICODE_VERSION@.c
 
+# Files that get embedded into builtins.c by stringify
+# Note: rc/joerc is generated from rc/joerc.in by configure; ../rc/joerc is
+# relative to joe/ where make runs from.
+# Extra files to embed (can be overridden via configure --enable-extra-builtins
+# or make EXTRA_BUILTINS="..." for ad-hoc additions)
+EXTRA_BUILTINS = @EXTRA_BUILTINS@
+
+BUILTINS_INPUTS = \
+	../rc/joerc \
+	../rc/ftyperc \
+	../syntax/c.jsf \
+	../colors/default.jcf \
+	../syntax/comment_todo.jsf \
+	../syntax/filename.jsf \
+	../syntax/context.jsf \
+	../syntax/md.jsf \
+	$(EXTRA_BUILTINS)
+
+# Regenerate builtins.c from source files
+builtins.c: $(BUILTINS_INPUTS) util/stringify$(EXEEXT)
+	$(AM_V_GEN)util/stringify$(EXEEXT) $(BUILTINS_INPUTS) > builtins.c.tmp && mv builtins.c.tmp builtins.c
+
 distclean-local:
 	rm -f *~
 

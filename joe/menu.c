@@ -648,7 +648,7 @@ MENU *mkmenu(W *w, W *targ, char **s, int (*func)(MENU *m, ptrdiff_t cursor, voi
 	W *neww;
 	MENU *m;
 	ptrdiff_t lines;
-	ptrdiff_t h = (w->main->h*40) / 100; /* 40% of window size */
+	ptrdiff_t h = (w->main->h*60) / 100; /* 60% of window size */
 	if (!h)
 		h = 1;
 

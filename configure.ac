@@ -81,6 +81,14 @@ if test "$termcap" = "yes"; then
 	search_libs="$search_libs termcap"
 fi
 
+# Extra builtin files to embed into builtins.c via stringify
+AC_ARG_ENABLE(extra-builtins,
+[  --enable-extra-builtins="file1 file2 ..."
+                          additional files to embed into builtins.c
+                          (paths relative to joe/ directory)],
+	EXTRA_BUILTINS=$enableval, EXTRA_BUILTINS="")
+AC_SUBST([EXTRA_BUILTINS])
+
 # Select Unicode version
 AC_ARG_VAR(UNICODE_VERSION,
 [  Select Unicode version: 8.0.0, 9.0.0, 10.0.0, 15.0.0, 15.1.0, 16.0.0 or 17.0.0  Default is 17.0.0 ])

@@ -110,6 +110,7 @@ struct options {
 	int	semi_comment;	/* Ignore text after ; comments */
 	int	tex_comment;	/* Ignore text after % comments */
 	int	hex;		/* Hex edit mode */
+	int	viewmode;	/* Markdown view mode */
 	int	ansi;		/* Hide ANSI sequences mode */
 	int	title;		/* Enable status line context display */
 	const char *text_delimiters;	/* Define word delimiters */

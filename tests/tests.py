@@ -5,4 +5,5 @@ from editing import *
 from encoding import *
 from find import *
 from format import *
+from viewmode import *
 from window import *

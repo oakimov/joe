@@ -1,153 +1,570 @@
 # JOE syntax highlight file for Markdown
-# by Christian Nicolai (http://mycrobase.de)
+#
+# DFA state machine for Markdown syntax highlighting.
+# Design principles:
+#   - line_start: dispatches based on first character (heading, blockquote, list, etc.)
+#   - idle: inline content (bold, italic, code, links, escape sequences)
+#   - Content states (bold, italic, code, etc.) loop on \n to themselves or line_start
+#   - Every state has a * default transition (no DFA-stuck bugs)
+#
+# Known limitations:
+#   - * is overloaded (italic marker vs bullet). In idle, * followed by space
+#     cancels emphasis (per CommonMark left-flanking rule). List markers are
+#     only detected at line_start.
+#   - Nested bold/italic not fully supported (*** handled as bold then italic)
+#   - Fenced code blocks: backticks in code may trigger false end detection
+#     (inherent DFA limitation without line-position tracking)
 
-# And yes, this *is* a joke :p
-
-# bold parsing is not that perfect since this works: **bold__
-
+# Color class definitions
 =Idle
-=Tag		+DefinedFunction +DefinedIdent
-=Escape
 =Bad
 
-=Bold		+Keyword
-=Headline	+Title +Preproc +Statement
-=Quote		+Comment
-=Code		+String +Constant
-=List		+TagName +Tag
-=LinkDesc	+Title +String
-=Link		+Number +Constant
-=Rule		+Preproc
+# Heading colors (H1-H6)
+=MdH1		+Title +Preproc +Keyword
+=MdH2		+Title +Preproc
+=MdH3		+Title +Preproc
+=MdH4		+Title
+=MdH5		+Title
+=MdH6		+Title
 
+# Inline formatting
+=MdBold		+Keyword +Bold
+=MdItalic	+Keyword +Italic
+=MdStrike	+Keyword +Stricken
+=MdCode		+String +Constant
+=MdEscape	+Escape
+
+# Delimiter color (for chars that are structural but not content)
+=MdDelim	+Preproc
+
+# Block elements
+=MdBlockquote	+Comment
+=MdList		+TagName +Tag
+=MdRule		+Preproc
+
+# Links and images
+=MdLinkText	+Title +String
+=MdLinkUrl	+Number +Constant
+=MdImageAlt	+Type
+
+# Code blocks
+=MdCodeBlock	+String +Constant
+=MdCodeFence	+Preproc
+
+# ============================================================
+# Initial state: beginning of each line
+# ============================================================
 :line_start Idle
 	*		idle		noeat
-	"#"		headline_prefix recolor=-1
-	">"		quote		recolor=-1
-	" "		maybe_code1
-	"\t"		code
-	"-*"		maybe_list
+	"#"		atx_h1		recolor=-1
+	">"		blockquote	recolor=-1
+	" \t"		maybe_code
+	"-+"		maybe_list_minus
+	"*"		maybe_list_star
+	"0-9"		ordered_list	recolor=-1
+	"|"		table_row	recolor=-1
+	"`"		fence_bt_s	recolor=-1
+	"~"		fence_tl_s	recolor=-1
 
+# ============================================================
+# Idle state: inline content processing
+# ============================================================
 :idle Idle
 	*		idle
 	"\n"		line_start
-	"<"		tag		recolor=-1
 	"\\"		escape		recolor=-1
-	"*_"		maybe_bold1
-	"["		maybe_link_desc1
-	"`"		backtick	buffer noeat
+	"`"		inline_code_s	mark recolor=-1
+	"["		maybe_link_or_image	recolor=-1
+	"~"		maybe_strike_s	recolor=-1
+	"*"		star1		recolor=-1
+	"_"		under1		recolor=-1
 
-:headline_prefix Idle
-	*		headline
-	"#"		headline_prefix
+# ============================================================
+# ATX headings (# H1 through ###### H6)
+# ============================================================
+:atx_h1 MdH1
+	"#"		atx_h2		noeat
+	" \t"		h1_content
+	*		h1_content
 
-:headline Headline
-	*		headline
+:atx_h2 MdH2
+	"#"		atx_h3		noeat
+	" \t"		h2_content
+	*		h2_content
+
+:atx_h3 MdH3
+	"#"		atx_h4		noeat
+	" \t"		h3_content
+	*		h3_content
+
+:atx_h4 MdH4
+	"#"		atx_h5		noeat
+	" \t"		h4_content
+	*		h4_content
+
+:atx_h5 MdH5
+	"#"		atx_h6		noeat
+	" \t"		h5_content
+	*		h5_content
+
+:atx_h6 MdH6
+	" \t"		h6_content
+	*		h6_content
+
+:h1_content MdH1
+	*		h1_content
 	"\n"		line_start
 
-:quote Quote
-	*		quote
+:h2_content MdH2
+	*		h2_content
 	"\n"		line_start
 
-:maybe_code1 Idle
-	*		idle
-	" "		maybe_code2
+:h3_content MdH3
+	*		h3_content
+	"\n"		line_start
+
+:h4_content MdH4
+	*		h4_content
+	"\n"		line_start
+
+:h5_content MdH5
+	*		h5_content
+	"\n"		line_start
+
+:h6_content MdH6
+	*		h6_content
+	"\n"		line_start
+
+# ============================================================
+# Bold/Italic: * and ** and *** and _ and __
+# ============================================================
+# After first * in idle:
+:star1 Idle
+	"*"		star2		recolor=-1
+	" \t\n"	idle		noeat
+	*		italic		noeat
+
+# After second *:
+:star2 MdBold
+	"*"		star3		recolor=-1
+	*		bold
+
+# After third *: bold+italic (treat as bold for now)
+:star3 MdBold
+	*		bold
+
+# After first _ in idle:
+:under1 Idle
+	"_"		under2		recolor=-1
+	" \t\n"	idle		noeat
+	*		underline_italic	noeat
+
+# After second _:
+:under2 MdBold
+	*		underline_bold
+
+# Bold state (** ... **)
+:bold MdBold
+	*		bold
+	"\n"		line_start
+	"*"		bold_star
+
+:underline_bold MdBold
+	*		underline_bold
+	"\n"		line_start
+	"_"		underline_bold_end
+
+# After * inside bold: might be closing **
+:bold_star MdBold
+	"*"		end_bold	recolor=-2
+	*		bold
+
+# After _ inside underline_bold: might be closing __
+:underline_bold_end MdBold
+	"_"		end_underline_bold	recolor=-2
+	*		underline_bold
+
+:end_bold Idle
+	*		idle		noeat
+
+:end_underline_bold Idle
+	*		idle		noeat
+
+# Italic state (* ... *)
+:italic MdItalic
+	*		italic
+	"\n"		line_start
+	"*"		end_italic	recolor=-1
+
+:end_italic Idle
+	*		idle		noeat
+
+:underline_italic MdItalic
+	*		underline_italic
+	"\n"		line_start
+	"_"		end_underline_italic	recolor=-1
+
+:end_underline_italic Idle
+	*		idle		noeat
+
+# ============================================================
+# Strikethrough: ~~text~~
+# ============================================================
+:maybe_strike_s Idle
+	"~"		strike_start	recolor=-1
+	*		idle		noeat
+
+:strike_start Idle
+	"~"		strike		recolor=-1
+	*		idle		noeat
+
+:strike MdStrike
+	*		strike
+	"\n"		line_start
+	"~"		strike_maybe_end
+
+:strike_maybe_end MdStrike
+	"~"		end_strike	recolor=-2
+	*		strike
+
+:end_strike Idle
+	*		idle		noeat
+
+# ============================================================
+# Inline code: `code` and ``code``
+# ============================================================
+:inline_code_s MdCode
+	"`"		inline_code_d	mark
+	*		inline_code	mark
+
+:inline_code MdCode
+	*		inline_code
+	"`"		end_inline_code	markend recolormark
+	"\n"		line_start
+
+# Double backtick code span
+:inline_code_d MdCode
+	"`"		inline_code_d2
+	*		inline_code_d
+
+:inline_code_d2 MdCode
+	"`"		end_inline_code_d	markend recolormark
+	*		inline_code_d
+
+:end_inline_code MdCode
+	*		idle		noeat
+
+:end_inline_code_d MdCode
+	*		idle		noeat
+
+# ============================================================
+# Fenced code blocks: ```lang ... ``` or ~~~lang ... ~~~
+# ============================================================
+
+# Backtick fence from line_start (column 0)
+:fence_bt_s MdCodeFence
+	"`"		fence_bt_2
+	*		inline_code	noeat recolor=-1
+
+:fence_bt_2 MdCodeFence
+	"`"		fence_bt_3
+	*		idle		noeat
+
+:fence_bt_3 MdCodeFence
+	"`"		fence_bt_lang	noeat
+	*		fence_bt_lang	noeat
+
+# Tilde fence from line_start (column 0)
+:fence_tl_s MdCodeFence
+	"~"		fence_tl_2
+	*		idle		noeat
+
+:fence_tl_2 MdCodeFence
+	"~"		fence_tl_3
+	*		idle		noeat
+
+:fence_tl_3 MdCodeFence
+	"~"		fence_tl_lang	noeat
+	*		fence_tl_lang	noeat
+
+# After whitespace + backtick (indented fences)
+:maybe_code Idle
+	" \t"		maybe_code2
+	"`"		fence_bt_ws	recolor=-1
+	"~"		fence_tl_ws	recolor=-1
+	*		idle		noeat
 
 :maybe_code2 Idle
-	*		idle
-	" "		maybe_code3
+	" \t"		maybe_code3
+	"`"		fence_bt_ws	recolor=-1
+	"~"		fence_tl_ws	recolor=-1
+	*		idle		noeat
 
 :maybe_code3 Idle
-	*		idle
-	" "		code		recolor=-4
-
-:code Code
-	*		code
-	"\n"		line_start
-
-:maybe_list Idle
-	*		idle
-	" "		list
-	"-*"		maybe_rule1
-
-:list List
-	*		list
-	"\n"		line_start
-
-:maybe_rule1 Idle
-	*		idle
-	"-*"		rule		recolor=-3
-
-:rule Rule
-	*		rule
-	"\n"		line_start
-
-:tag Tag
-	*		idle
-	"a-z0-9 /"	tag
-	">"		idle
-
-# do escaping of *_ and so on
-:escape Escape
-	*		idle
-
-:maybe_bold1 Idle
-	*		idle		noeat
-	"*_"		bold		recolor=-2
-
-:bold Bold
-	*		bold
-	"\n"		line_start	# end if we reach newline during bold
-	"*_"		maybe_end_bold
-
-:maybe_end_bold Bold
-	*		bold
-	"*_"		end_bold
-
-:end_bold Bold
+	" \t"		maybe_code4
+	"`"		fence_bt_ws	recolor=-1
+	"~"		fence_tl_ws	recolor=-1
+	"-*+"		maybe_list_or_rule
 	*		idle		noeat
 
-:maybe_link_desc1 Idle
-	*		maybe_link_desc	mark
+:maybe_code4 Idle
+	" \t"		indented_code	recolor=-5
+	"`"		fence_bt_ws	recolor=-1
+	"~"		fence_tl_ws	recolor=-1
+	"-*+"		maybe_list_or_rule
+	*		idle		noeat
 
-:maybe_link_desc Idle
-	*		maybe_link_desc
-	"]"		maybe_end_link_desc	markend
+# Indented backtick fence
+:fence_bt_ws MdCodeFence
+	"`"		fence_bt_ws_2
+	*		idle		noeat
 
-:maybe_end_link_desc Idle
-	*		idle
-	"("		link_inline1	recolormark
-	"["		link_ref1	recolormark
+:fence_bt_ws_2 MdCodeFence
+	"`"		fence_bt_ws_3
+	*		idle		noeat
 
-:link_inline1 LinkDesc
-	*		link_inline	noeat
+:fence_bt_ws_3 MdCodeFence
+	"`"		fence_bt_lang	noeat
+	*		fence_bt_lang	noeat
 
-:link_inline Link
-	*		link_inline
+# Indented tilde fence
+:fence_tl_ws MdCodeFence
+	"~"		fence_tl_ws_2
+	*		idle		noeat
+
+:fence_tl_ws_2 MdCodeFence
+	"~"		fence_tl_ws_3
+	*		idle		noeat
+
+:fence_tl_ws_3 MdCodeFence
+	"~"		fence_tl_lang	noeat
+	*		fence_tl_lang	noeat
+
+# Language identifier on opening fence line
+:fence_bt_lang MdCodeFence
+	*		fence_bt_lang
+	"\n"		fence_bt_body
+
+:fence_bt_body MdCodeBlock
+	*		fence_bt_body
+	"`"		fence_bt_e1
+	"\n"		fence_bt_body
+
+:fence_bt_e1 MdCodeFence
+	"`"		fence_bt_e2
+	*		fence_bt_body
+
+:fence_bt_e2 MdCodeFence
+	"`"		fence_bt_e3
+	*		fence_bt_body
+
+:fence_bt_e3 MdCodeFence
+	"`"		fence_bt_e4
+	" \t"		fence_bt_e3
+	"\n"		line_start	noeat
+	*		fence_bt_body
+
+:fence_bt_e4 MdCodeFence
+	"`"		fence_bt_e5
+	" \t"		fence_bt_e4
+	"\n"		line_start	noeat
+	*		fence_bt_body
+
+:fence_bt_e5 MdCodeFence
+	"`"		fence_bt_e6
+	" \t"		fence_bt_e5
+	"\n"		line_start	noeat
+	*		fence_bt_body
+
+:fence_bt_e6 MdCodeFence
+	" \t"		fence_bt_e6
+	"\n"		line_start	noeat
+	*		fence_bt_body
+
+:fence_tl_lang MdCodeFence
+	*		fence_tl_lang
+	"\n"		fence_tl_body
+
+:fence_tl_body MdCodeBlock
+	*		fence_tl_body
+	"~"		fence_tl_e1
+	"\n"		fence_tl_body
+
+:fence_tl_e1 MdCodeFence
+	"~"		fence_tl_e2
+	*		fence_tl_body
+
+:fence_tl_e2 MdCodeFence
+	"~"		fence_tl_e3
+	*		fence_tl_body
+
+:fence_tl_e3 MdCodeFence
+	"~"		fence_tl_e4
+	" \t"		fence_tl_e3
+	"\n"		line_start	noeat
+	*		fence_tl_body
+
+:fence_tl_e4 MdCodeFence
+	"~"		fence_tl_e5
+	" \t"		fence_tl_e4
+	"\n"		line_start	noeat
+	*		fence_tl_body
+
+:fence_tl_e5 MdCodeFence
+	"~"		fence_tl_e6
+	" \t"		fence_tl_e5
+	"\n"		line_start	noeat
+	*		fence_tl_body
+
+:fence_tl_e6 MdCodeFence
+	" \t"		fence_tl_e6
+	"\n"		line_start	noeat
+	*		fence_tl_body
+
+# Indented code (4+ spaces or 1+ tab)
+:indented_code MdCodeBlock
+	*		indented_code
+	"\n"		line_start
+
+# ============================================================
+# Blockquotes
+# ============================================================
+:blockquote MdBlockquote
+	*		blockquote
+	"\n"		line_start
+
+# ============================================================
+# Lists
+# ============================================================
+
+# * at line start: could be list or start of italic/bold
+:maybe_list_star Idle
+	" \t"		list		recolor=-2
+	"*"		maybe_list_star2
+	*		star1		noeat recolor=-1
+
+:maybe_list_star2 Idle
+	" \t"		list		recolor=-2
+	"*"		maybe_list_star3
+	*		star2		noeat recolor=-1
+
+:maybe_list_star3 Idle
+	" \t"		list		recolor=-3
+	*		idle		noeat
+
+# - or + at line start: list or horizontal rule
+:maybe_list_minus Idle
+	" \t"		list		recolor=-2
+	"-+"		maybe_rule2
+	*		idle		noeat
+
+:maybe_rule2 Idle
+	" \t"		rule		recolor=-2
+	"-+"		maybe_rule3
+	*		idle		noeat
+
+:maybe_rule3 Idle
+	" \t"		rule		recolor=-3
+	"-+"		rule
+	*		idle		noeat
+
+# List marker after 4-space indent (e.g., "    * item")
+:maybe_list_or_rule Idle
+	" \t"		list		recolor=-2
+	"-*+"		maybe_list_or_rule2
+	*		idle		noeat
+
+:maybe_list_or_rule2 Idle
+	" \t"		list		recolor=-3
+	"-*+"		maybe_list_or_rule3
+	*		idle		noeat
+
+:maybe_list_or_rule3 Idle
+	" \t"		list		recolor=-4
+	"-*+"		rule
+	*		idle		noeat
+
+:list_content Idle
+	*		idle		noeat
+
+:list MdList
+	*		list_content	noeat
+	"\n"		line_start
+
+:ordered_list MdList
+	"0-9"		ordered_list
+	"."		ordered_mark	recolor=-1
+	*		idle		noeat
+
+:ordered_mark Idle
+	" \t"		list_content
+	*		idle		noeat
+
+# Horizontal rule: --- or +++ or *** (3+ chars, all same, only spaces between)
+:rule MdRule
+	"-+* \t"	rule
+	"\n"		line_start
+	*		idle		noeat
+
+# ============================================================
+# Links and images
+# ============================================================
+:maybe_link_or_image Idle
+	"!"		image_alt	mark recolor=-1
+	*		link_text	mark recolor=-1
+
+:link_text MdLinkText
+	*		link_text
+	"]"		link_text_end	markend
+
+:link_text_end Idle
+	"("		link_url	recolormark
+	"["		link_ref	recolormark
+	*		idle		noeat
+
+:link_url MdLinkUrl
+	*		link_url
 	")"		link_end	noeat
 
-:link_ref1 LinkDesc
-	*		link_ref	noeat
-
-:link_ref Link
+:link_ref MdLinkText
 	*		link_ref
 	"]"		link_end	noeat
 
+:image_alt MdImageAlt
+	*		image_alt
+	"]"		image_alt_end	markend
+
+:image_alt_end Idle
+	"("		image_url	recolormark
+	"["		image_ref	recolormark
+	*		idle		noeat
+
+:image_url MdLinkUrl
+	*		image_url
+	")"		link_end	noeat
+
+:image_ref MdLinkText
+	*		image_ref
+	"]"		link_end	noeat
+
 :link_end Idle
-	*		idle
+	*		idle		noeat
 
-:backtick Quote
-	*		backtick_body   save_s noeat
-	"`"		backtick
+# ============================================================
+# Tables (basic)
+# ============================================================
+:table_row Idle
+	*		table_row
+	"\n"		line_start
+	"|"		table_cell
 
-:backtick_body Code
-	*		backtick_body
-        "`"		backtick_end_maybe      buffer
+:table_cell Idle
+	*		table_cell
+	"|"		table_cell	recolor=-1
+	"\n"		line_start
 
-:backtick_end_maybe Code
-	*		backtick_body   strings
-	"&"		backtick_end
-done
-	"`"		backtick_end_maybe
-
-:backtick_end Quote
-	*		idle            noeat
+# ============================================================
+# Escape sequences
+# ============================================================
+:escape MdEscape
+	*		idle		noeat

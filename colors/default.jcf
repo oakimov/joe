@@ -26,6 +26,26 @@
 =TODO		default/default inverse
 =Title		bold
 
+# Markdown colors (16-color fallback)
+=MdH1		bold
+=MdH2		bold
+=MdH3		bold
+=MdH4		bold
+=MdH5		bold
+=MdH6		dim
+=MdBold		bold
+=MdItalic	dim
+=MdStrike	dim
+=MdCode		cyan
+=MdBlockquote	green
+=MdList		blue
+=MdRule		blue
+=MdLinkText	cyan
+=MdLinkUrl	magenta
+=MdImageAlt	bold cyan
+=MdCodeBlock	cyan
+=MdCodeFence	blue
+
 =diff.DelLine	red
 =diff.AddLine	green
 =diff.ChgLine	magenta

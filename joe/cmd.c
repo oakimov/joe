@@ -407,7 +407,7 @@ int execmd(const CMD *cmd, int k)
 	if (cmd->flag & ECHKXCOL) {
 		if (bw->o.hex)
 			bw->cursor->xcol = piscol(bw->cursor);
-		else if (bw->cursor->xcol != piscol(bw->cursor))
+		else if (!bw->o.viewmode && bw->cursor->xcol != piscol(bw->cursor))
 			goto skip;
 	}
 
@@ -461,7 +461,8 @@ int execmd(const CMD *cmd, int k)
 	/* Make displayed cursor column equal the actual cursor column
 	 * for commands which arn't simple vertical movements */
 	if ((cmd->flag & EFIXXCOL) && (maint->curwin->watom->what & (TYPETW | TYPEPW)))
-		bw->cursor->xcol = piscol(bw->cursor);
+		if (!bw->o.viewmode)
+			bw->cursor->xcol = piscol(bw->cursor);
 
 	/* Recenter cursor to middle of screen */
 	if (cmd->flag & EMID) {

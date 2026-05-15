@@ -59,6 +59,8 @@ int uhome(W *w, int k)
 
 	pset(bw->cursor, p);
 	prm(p);
+	if (bw->o.viewmode)
+		bw->cursor->valcol = 0;
 	return 0;
 }
 
@@ -76,6 +78,8 @@ int u_goto_eol(W *w, int k)
 			pfwrd(bw->cursor, 15 - bw->cursor->byte%16);
 	} else
 		p_goto_eol(bw->cursor);
+	if (bw->o.viewmode)
+		bw->cursor->valcol = 0;
 	return 0;
 }
 
@@ -128,14 +132,24 @@ int u_goto_left(W *w, int k)
 			return -1;
 	} else {
 		/* Have to do ECHKXCOL here because of picture mode */
-		if (bw->cursor->xcol != piscol(bw->cursor)) {
-			bw->cursor->xcol = piscol(bw->cursor);
-			return 0;
-		} else if (prgetc(bw->cursor) != NO_MORE_DATA) {
-			bw->cursor->xcol = piscol(bw->cursor);
-			return 0;
+		if (bw->o.viewmode) {
+			/* In view mode, xcol is display column, not buffer column */
+			if (prgetc(bw->cursor) != NO_MORE_DATA) {
+				bw->cursor->valcol = 0;
+				return 0;
+			} else {
+				return -1;
+			}
 		} else {
-			return -1;
+			if (bw->cursor->xcol != piscol(bw->cursor)) {
+				bw->cursor->xcol = piscol(bw->cursor);
+				return 0;
+			} else if (prgetc(bw->cursor) != NO_MORE_DATA) {
+				bw->cursor->xcol = piscol(bw->cursor);
+				return 0;
+			} else {
+				return -1;
+			}
 		}
 	}
 }
@@ -161,13 +175,14 @@ int u_goto_right(W *w, int k)
 	} else {
 		int rtn;
 		if (pgetc(bw->cursor) != NO_MORE_DATA) {
-			bw->cursor->xcol = piscol(bw->cursor);
+			if (!bw->o.viewmode)
+				bw->cursor->xcol = piscol(bw->cursor);
 			rtn = 0;
 		} else {
 			rtn = -1;
 		}
 		/* Have to do EFIXXCOL here because of picture mode */
-		if (bw->cursor->xcol != piscol(bw->cursor))
+		if (!bw->o.viewmode && bw->cursor->xcol != piscol(bw->cursor))
 			bw->cursor->xcol = piscol(bw->cursor);
 		return rtn;
 	}

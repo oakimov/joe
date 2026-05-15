@@ -30,6 +30,7 @@
 # Inline formatting
 =MdBold		+Keyword +Bold
 =MdItalic	+Keyword +Italic
+=MdBoldItalic	+Keyword +Bold +Italic
 =MdStrike	+Keyword +Stricken
 =MdCode		+String +Constant
 =MdEscape	+Escape
@@ -46,6 +47,12 @@
 =MdLinkText	+Title +String
 =MdLinkUrl	+Number +Constant
 =MdImageAlt	+Type
+
+# Tables
+=MdTableHeader	+Keyword +Bold
+=MdTableSeparator	+Comment +Dim
+=MdTableBody	+Idle
+=MdTableAlign	+Comment +Dim
 
 # Code blocks
 =MdCodeBlock	+String +Constant
@@ -149,9 +156,9 @@
 	"*"		star3		recolor=-1
 	*		bold
 
-# After third *: bold+italic (treat as bold for now)
-:star3 MdBold
-	*		bold
+# After third *: bold+italic
+:star3 MdBoldItalic
+	*		bold_italic
 
 # After first _ in idle:
 :under1 Idle
@@ -161,7 +168,12 @@
 
 # After second _:
 :under2 MdBold
+	"_"		under3		recolor=-1
 	*		underline_bold
+
+# After third _: underline bold+italic
+:under3 MdBoldItalic
+	*		underline_bold_italic
 
 # Bold state (** ... **)
 :bold MdBold
@@ -188,6 +200,40 @@
 	*		idle		noeat
 
 :end_underline_bold Idle
+	*		idle		noeat
+
+# Bold+Italic state (*** ... ***)
+:bold_italic MdBoldItalic
+	*		bold_italic
+	"\n"		line_start
+	"*"		bold_italic_s1
+
+:bold_italic_s1 MdBoldItalic
+	"*"		bold_italic_s2	recolor=-1
+	*		bold_italic
+
+:bold_italic_s2 MdBoldItalic
+	"*"		end_bold_italic	recolor=-2
+	*		bold_italic
+
+:end_bold_italic Idle
+	*		idle		noeat
+
+# Underline Bold+Italic state (___ ... ___)
+:underline_bold_italic MdBoldItalic
+	*		underline_bold_italic
+	"\n"		line_start
+	"_"		underline_bold_italic_s1
+
+:underline_bold_italic_s1 MdBoldItalic
+	"_"		underline_bold_italic_s2	recolor=-1
+	*		underline_bold_italic
+
+:underline_bold_italic_s2 MdBoldItalic
+	"_"		end_underline_bold_italic	recolor=-2
+	*		underline_bold_italic
+
+:end_underline_bold_italic Idle
 	*		idle		noeat
 
 # Italic state (* ... *)
@@ -553,12 +599,12 @@
 # ============================================================
 # Tables (basic)
 # ============================================================
-:table_row Idle
+:table_row MdTableBody
 	*		table_row
 	"\n"		line_start
 	"|"		table_cell
 
-:table_cell Idle
+:table_cell MdTableBody
 	*		table_cell
 	"|"		table_cell	recolor=-1
 	"\n"		line_start

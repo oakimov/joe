@@ -56,6 +56,7 @@ BW *bwmk(W *window, B *b, int prompt);
 void bwmove(BW *w, ptrdiff_t x, ptrdiff_t y);
 void bwresz(BW *w, ptrdiff_t wi, ptrdiff_t he);
 void bwrm(BW *w);
+void viewmode_cleanup(void);
 int ustat(W *w, int k);
 int ucrawll(W *w, int k);
 int ucrawlr(W *w, int k);

@@ -331,6 +331,9 @@ int main(int argc, char **real_argv, const char * const *envv)
 	joe_iswinit();
 	joe_locale();
 
+	/* Register cleanup for view mode static globals */
+	atexit(viewmode_cleanup);
+
 	mainenv = envv;
 
 	vmem = vtmp();

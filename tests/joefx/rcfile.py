@@ -13,7 +13,7 @@ GLOBAL_OPTS = set([
     'joe_state', 'mouse', 'joexterm', 'brpaste', 'pastehack', 'square', 'text_color',
     'status_color', 'help_color', 'menu_color', 'prompt_color', 'msg_color', 'restore',
     'search_prompting', 'regex', 'lmsg', 'rmsg', 'smsg', 'zmsg', 'xmsg', 'highlight', 'istep',
-    'wordwrap', 'autoindent', 'aborthint', 'helphint'
+    'wordwrap', 'autoindent', 'aborthint', 'helphint', 'parserr_homeonly'
 ])
 
 FILE_OPTS = set([

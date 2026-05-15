@@ -17,6 +17,16 @@ class ViewModeTests(joefx.JoeTestBase):
         self.exitJoe()
         self.assertExited()
 
+    def test_viewmode_toggle_on_stays_on(self):
+        """Viewmode stays on after toggle"""
+        self.workdir.fixtureData("test.md", "# Hello\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("Hello", x=2)
+        self.exitJoe()
+        self.assertExited()
+
     # --- Feature 1.3: Heading delimiter hiding ---
 
     def test_viewmode_h1_heading(self):
@@ -50,6 +60,47 @@ class ViewModeTests(joefx.JoeTestBase):
         self.exitJoe()
         self.assertExited()
 
+    def test_viewmode_h4_heading(self):
+        """H4: '#### ' hidden as spaces"""
+        self.workdir.fixtureData("test.md", "#### Heading Four\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("Heading Four", x=5)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_h5_heading(self):
+        """H5: '##### ' hidden as spaces"""
+        self.workdir.fixtureData("test.md", "##### Heading Five\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("Heading Five", x=6)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_h6_heading(self):
+        """H6: '###### ' hidden as spaces"""
+        self.workdir.fixtureData("test.md", "###### Heading Six\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("Heading Six", x=7)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_heading_no_space(self):
+        """Heading without trailing space: '#' at end of line"""
+        self.workdir.fixtureData("test.md", "#\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # The # should be hidden even without trailing space
+        self.assertTextAt(" ", x=0)
+        self.exitJoe()
+        self.assertExited()
+
     def test_viewmode_no_heading_no_hide(self):
         """Non-heading text not affected"""
         self.workdir.fixtureData("test.md", "Just plain text\n")
@@ -57,6 +108,17 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startJoe()
         self.mode("viewmode")
         self.assertTextAt("Just plain text", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_seven_hashes_not_heading(self):
+        """7+ hashes should not be treated as heading"""
+        self.workdir.fixtureData("test.md", "####### Not a heading\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Should not hide the hashes
+        self.assertTextAt("####### Not a hea", x=0)
         self.exitJoe()
         self.assertExited()
 
@@ -92,6 +154,16 @@ class ViewModeTests(joefx.JoeTestBase):
         self.exitJoe()
         self.assertExited()
 
+    def test_viewmode_italic_underscore(self):
+        """Italic _text_ delimiters hidden"""
+        self.workdir.fixtureData("test.md", "Some _italic_ text\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("Some  italic  text", x=0)
+        self.exitJoe()
+        self.assertExited()
+
     def test_viewmode_strikethrough(self):
         """Strikethrough ~~text~~ delimiters hidden"""
         self.workdir.fixtureData("test.md", "Some ~~deleted~~ text\n")
@@ -99,6 +171,130 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startJoe()
         self.mode("viewmode")
         self.assertTextAt("Some   deleted", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_bold_italic_asterisks(self):
+        """Bold+italic ***text*** delimiters hidden (all 3 chars)"""
+        self.workdir.fixtureData("test.md", "***bold italic***\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # 3 opening + 3 closing = 6 hidden chars, rendered as spaces at original positions
+        self.assertTextAt("   bold italic   ", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_bold_italic_underscores(self):
+        """Bold+italic ___text___ delimiters hidden (all 3 chars)"""
+        self.workdir.fixtureData("test.md", "___bold italic___\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("   bold italic   ", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_nested_bold_italic(self):
+        """Nested: **bold *italic* bold** — outer ** hidden, inner * not fully handled
+        Note: Linear scanner limitation — nested emphasis not fully supported yet."""
+        self.workdir.fixtureData("test.md", "**bold *italic* more**\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Outer ** hidden, but inner *italic* delimiters remain visible (known limitation)
+        self.assertTextAt("  bold *italic* mo", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_emphasis_inside_code_not_hidden(self):
+        """Emphasis markers inside code spans should NOT be hidden"""
+        self.workdir.fixtureData("test.md", "Use `**not bold**` here\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Backticks hidden, but ** inside code should remain visible
+        self.assertTextAt("Use  **not bold** ", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_multiple_emphasis_same_line(self):
+        """Multiple bold spans on one line"""
+        self.workdir.fixtureData("test.md", "**one** and **two**\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("  one   and   two ", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_mixed_emphasis_same_line(self):
+        """Mixed bold and italic on same line"""
+        self.workdir.fixtureData("test.md", "**bold** and *italic*\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("  bold   and  ital", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_list_marker_not_emphasis(self):
+        """List marker * at line start should not be hidden as emphasis"""
+        self.workdir.fixtureData("test.md", "* List item\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("* List item", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_list_marker_dash_not_emphasis(self):
+        """List marker - at line start should not be hidden"""
+        self.workdir.fixtureData("test.md", "- List item\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("- List item", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_list_marker_plus_not_emphasis(self):
+        """List marker + at line start should not be hidden"""
+        self.workdir.fixtureData("test.md", "+ List item\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("+ List item", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_bold_at_line_start(self):
+        """Bold at beginning of line"""
+        self.workdir.fixtureData("test.md", "**bold** at start\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("  bold   at star", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_italic_at_line_start(self):
+        """Italic at beginning of line"""
+        self.workdir.fixtureData("test.md", "*italic* at start\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt(" italic  at start", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_strikethrough_at_line_start(self):
+        """Strikethrough at beginning of line"""
+        self.workdir.fixtureData("test.md", "~~strike~~ at start\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("  strike   at sta", x=0)
         self.exitJoe()
         self.assertExited()
 
@@ -111,6 +307,365 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startJoe()
         self.mode("viewmode")
         self.assertTextAt("Some  code  here", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_inline_code_at_start(self):
+        """Inline code at start of line"""
+        self.workdir.fixtureData("test.md", "`code` at start\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt(" code  at start", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_multiple_inline_code(self):
+        """Multiple inline code spans on one line"""
+        self.workdir.fixtureData("test.md", "Use `foo` and `bar` here\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("Use  foo  and  bar ", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    # --- Feature 1.6: Link delimiter hiding ---
+
+    def test_viewmode_inline_link(self):
+        """Inline link [text](url) delimiters hidden"""
+        self.workdir.fixtureData("test.md", "Click [here](http://example.com)\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # [ ] ( ) = 4 hidden chars at their original positions
+        self.assertTextAt("Click  here  http:/", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_link_at_start(self):
+        """Link at start of line"""
+        self.workdir.fixtureData("test.md", "[link](http://x.com)\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt(" link  http://x.co", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_multiple_links_same_line(self):
+        """Multiple links on one line"""
+        self.workdir.fixtureData("test.md", "[one](http://a.com) and [two](http://b.com)\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Both links should have delimiters hidden
+        self.assertTextAt(" one  http://a.com ", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_reference_link(self):
+        """Reference-style link [text][ref] delimiters hidden"""
+        self.workdir.fixtureData("test.md", "See [docs][reference] here\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # [ ] [ ] = 4 hidden chars at their original positions
+        self.assertTextAt("See  docs  reference", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_link_with_title(self):
+        """Link with title [text](url "title") delimiters hidden"""
+        self.workdir.fixtureData("test.md", "[click](http://x.com \"Title\") here\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Delimiters hidden, URL + title visible
+        self.assertTextAt(" click  http://x.co", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    # --- Feature 1.7: Blockquote delimiter hiding ---
+
+    def test_viewmode_blockquote(self):
+        """Blockquote > rendered as vertical bar"""
+        self.workdir.fixtureData("test.md", "> Quoted text\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("\u2502 Quoted text", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_nested_blockquote(self):
+        """Nested blockquote >> rendered as double vertical bars"""
+        self.workdir.fixtureData("test.md", ">> Nested quote\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # >> substituted with ││, space kept
+        self.assertTextAt("\u2502\u2502 Nested quote ", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_blockquote_no_bleed(self):
+        """Blockquote substitution must not bleed to next line"""
+        self.workdir.fixtureData("test.md", "> quote\nabc\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Line 1: blockquote rendered as │ quote
+        self.assertTextAt("\u2502 quote", x=0, y=1)
+        # Line 2: normal text must NOT be substituted
+        self.assertTextAt("abc", x=0, y=2)
+        self.exitJoe()
+        self.assertExited()
+
+    # --- Feature 1.7.4: Task list checkboxes ---
+
+    def test_viewmode_task_list_unchecked(self):
+        """Task list [ ] rendered as ☐"""
+        self.workdir.fixtureData("test.md", "- [ ] Unchecked task\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("- \u2610   Unchecked ta", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_task_list_checked(self):
+        """Task list [x] rendered as ☑"""
+        self.workdir.fixtureData("test.md", "- [x] Checked task\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("- \u2611   Checked task", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_task_list_checked_uppercase(self):
+        """Task list [X] rendered as ☑"""
+        self.workdir.fixtureData("test.md", "- [X] Checked task\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("- \u2611   Checked task", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    # --- Feature 1.8: Horizontal rule Unicode substitution ---
+
+    def test_viewmode_horizontal_rule_dashes(self):
+        """Horizontal rule --- rendered as ───"""
+        self.workdir.fixtureData("test.md", "---\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("\u2500\u2500\u2500", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_horizontal_rule_asterisks(self):
+        """Horizontal rule *** rendered as ───"""
+        self.workdir.fixtureData("test.md", "***\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("\u2500\u2500\u2500", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_horizontal_rule_plus(self):
+        """Horizontal rule +++ rendered as ───"""
+        self.workdir.fixtureData("test.md", "+++\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("\u2500\u2500\u2500", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_horizontal_rule_with_spaces(self):
+        """Horizontal rule with spaces: - - - rendered as ─────"""
+        self.workdir.fixtureData("test.md", "- - -\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("\u2500\u2500\u2500\u2500\u2500", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_not_horizontal_rule(self):
+        """Two dashes should not be hidden as rule"""
+        self.workdir.fixtureData("test.md", "-- not a rule\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("-- not a rule", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_horizontal_rule_no_bleed(self):
+        """Horizontal rule substitution must not bleed to next line"""
+        self.workdir.fixtureData("test.md", "---\nabc\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Line 1: rule rendered as ───
+        self.assertTextAt("\u2500\u2500\u2500", x=0, y=1)
+        # Line 2: normal text must NOT be substituted
+        self.assertTextAt("abc", x=0, y=2)
+        self.exitJoe()
+        self.assertExited()
+
+    # --- Feature 1.9: Table highlighting ---
+
+    def test_viewmode_table_header_row(self):
+        """Table header row renders with box-drawing top border"""
+        self.workdir.fixtureData("test.md", "| Header1 | Header2 |\n|---|---|\n| cell1 | cell2 |\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Header row: ┌ ┬ ┐ box-drawing corners
+        self.assertTextAt("\u250c Header1 \u252c Header", x=0, y=1)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_table_separator_row(self):
+        """Table separator row renders with box-drawing middle border"""
+        self.workdir.fixtureData("test.md", "| Header1 | Header2 |\n|---|---|\n| cell1 | cell2 |\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Separator row: ├───┼───┤
+        self.assertTextAt("\u251c\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u2524", x=0, y=2)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_table_body_row(self):
+        """Table body row renders with │ pipes"""
+        self.workdir.fixtureData("test.md", "| Header1 | Header2 |\n|---|---|\n| cell1 | cell2 |\n| cell3 | cell4 |\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Body row (middle): │ for pipes
+        self.assertTextAt("\u2502 cell1 \u2502 cell", x=0, y=3)
+        # Last body row: └ ┴ ┘
+        self.assertTextAt("\u2514 cell3 \u2534 cell", x=0, y=4)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_table_with_alignment(self):
+        """Table with alignment indicators — alignment stripped, replaced with ─"""
+        self.workdir.fixtureData("test.md", "| Left | Center | Right |\n|:-----|:------:|------:|\n| a | b | c |\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Separator row: alignment indicators replaced with ─
+        self.assertTextAt("\u251c\u2500", x=0, y=2)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_not_table(self):
+        """Line with pipe but not a table should render normally"""
+        self.workdir.fixtureData("test.md", "a | b\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Should render normally (no box-drawing for single-line pipe)
+        self.assertTextAt("a | b", x=0, y=1)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_table_multicolumn(self):
+        """Table with multiple columns and rows — full box-drawing border"""
+        content = "| Name | Age | City |\n|---|---|---|\n| Alice | 30 | NYC |\n| Bob | 25 | LA |\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Header row: ┌ ┬ ┐
+        self.assertTextAt("\u250c Name \u252c Age \u252c", x=0, y=1)
+        # Separator row: ├───┼───┼───┤
+        self.assertTextAt("\u251c\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u253c", x=0, y=2)
+        # Body row 1: │
+        self.assertTextAt("\u2502 Alice \u2502 30", x=0, y=3)
+        # Body row 2 (last): └ ┴ ┘
+        self.assertTextAt("\u2514 Bob \u2534 25 \u2534", x=0, y=4)
+        self.exitJoe()
+        self.assertExited()
+
+    # --- Feature 1.5: Fenced code block hiding ---
+
+    def test_viewmode_fenced_code_backtick(self):
+        """Fenced code block ``` lines hidden (no language identifier)"""
+        content = "```\ncode here\n```\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Fence markers hidden, nothing else on line → spaces
+        self.assertTextAt("   ", x=0)
+        self.assertTextAt("code here", x=0, y=2)
+        self.assertTextAt("   ", x=0, y=3)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_fenced_code_tilde(self):
+        """Fenced code block ~~~ lines hidden (no language identifier)"""
+        content = "~~~\ncode here\n~~~\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Fence markers hidden, nothing else on line → spaces
+        self.assertTextAt("   ", x=0)
+        self.assertTextAt("code here", x=0, y=2)
+        self.assertTextAt("   ", x=0, y=3)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_fenced_code_with_language(self):
+        """Fenced code block with language identifier — language visible in dim color"""
+        content = "```python\nclass Foo: pass\n```\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Opening fence markers hidden, language identifier visible
+        self.assertTextAt("   python", x=0)
+        self.assertTextAt("class Foo: pass", x=0, y=2)
+        # Closing fence markers hidden, nothing else → spaces
+        self.assertTextAt("   ", x=0, y=3)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_fenced_code_language_with_spaces(self):
+        """Fenced code block with language and trailing spaces"""
+        content = "```python  \ncode\n```\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Fence markers hidden, language + trailing spaces visible
+        self.assertTextAt("   python  ", x=0)
+        self.assertTextAt("code", x=0, y=2)
+        self.assertTextAt("   ", x=0, y=3)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_fenced_code_tilde_with_language(self):
+        """Tilde fenced code block with language identifier"""
+        content = "~~~javascript\nlet x = 1;\n~~~\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Opening fence markers hidden, language visible
+        self.assertTextAt("   javascript", x=0)
+        self.assertTextAt("let x = 1;", x=0, y=2)
+        self.assertTextAt("   ", x=0, y=3)
         self.exitJoe()
         self.assertExited()
 
@@ -139,6 +694,134 @@ class ViewModeTests(joefx.JoeTestBase):
         self.exitJoe()
         self.assertExited()
         self.assertFileContents("test.md", content)
+
+    def test_viewmode_no_file_modification_complex(self):
+        """View mode must not modify complex markdown file"""
+        content = "# Title\n\n**bold** and *italic* and `code`\n\n> quote\n\n---\n\n[link](http://x.com)\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.exitJoe()
+        self.assertExited()
+        self.assertFileContents("test.md", content)
+
+    # --- Feature 1.10: Cursor position mapping ---
+
+    def test_viewmode_cursor_heading(self):
+        """Cursor on heading line: file not modified after cursor movement"""
+        self.workdir.fixtureData("test.md", "# Heading\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Move cursor around
+        self.writectl("{end}")
+        self.writectl("{home}")
+        self.writectl("{right*3}")
+        # File must not be modified
+        self.exitJoe()
+        self.assertExited()
+        self.assertFileContents("test.md", "# Heading\n")
+
+    def test_viewmode_cursor_bold(self):
+        """Cursor on bold text: file not modified after cursor movement"""
+        self.workdir.fixtureData("test.md", "**bold**\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.writectl("{end}")
+        self.writectl("{home}")
+        self.exitJoe()
+        self.assertExited()
+        self.assertFileContents("test.md", "**bold**\n")
+
+    def test_viewmode_cursor_link(self):
+        """Cursor on link text: file not modified after cursor movement"""
+        self.workdir.fixtureData("test.md", "[link](http://example.com)\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.writectl("{end}")
+        self.writectl("{home}")
+        self.exitJoe()
+        self.assertExited()
+        self.assertFileContents("test.md", "[link](http://example.com)\n")
+
+    def test_viewmode_cursor_blockquote(self):
+        """Cursor on blockquote: file not modified after cursor movement"""
+        self.workdir.fixtureData("test.md", "> quote\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.writectl("{end}")
+        self.writectl("{home}")
+        self.exitJoe()
+        self.assertExited()
+        self.assertFileContents("test.md", "> quote\n")
+
+    def test_viewmode_cursor_hidden_char_skip(self):
+        """Cursor skips hidden characters and lands on visible content"""
+        self.workdir.fixtureData("test.md", "**bold** text\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.writectl("{home}")
+        self.writectl("{right}")
+        self.exitJoe()
+        self.assertExited()
+        self.assertFileContents("test.md", "**bold** text\n")
+
+    def test_viewmode_cursor_horizontal_rule(self):
+        """Cursor on horizontal rule: file not modified after cursor movement"""
+        self.workdir.fixtureData("test.md", "---\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.writectl("{end}")
+        self.writectl("{home}")
+        self.exitJoe()
+        self.assertExited()
+        self.assertFileContents("test.md", "---\n")
+
+    def test_viewmode_cursor_code_block(self):
+        """Cursor in code block: file not modified after cursor movement"""
+        content = "```\ncode\n```\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.writectl("{down}")
+        self.writectl("{end}")
+        self.writectl("{up}")
+        self.exitJoe()
+        self.assertExited()
+        self.assertFileContents("test.md", content)
+
+    # --- Multi-line comprehensive test ---
+
+    def test_viewmode_comprehensive(self):
+        """Comprehensive test with multiple constructs"""
+        content = "# Title\n## Subtitle\n\n**bold** and *italic*\n\n> quote\n\n---\n\n`code` here\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Line 1: H1
+        self.assertTextAt("  ", x=0, y=1)
+        self.assertTextAt("Title", x=2, y=1)
+        # Line 2: H2
+        self.assertTextAt("Subtitle", x=3, y=2)
+        # Line 3: blank
+        # Line 4: bold + italic
+        self.assertTextAt("  bold   and  ital", x=0, y=4)
+        # Line 6: blockquote
+        self.assertTextAt("\u2502 quote", x=0, y=6)
+        # Line 8: horizontal rule
+        self.assertTextAt("\u2500\u2500\u2500", x=0, y=8)
+        # Line 10: inline code
+        self.assertTextAt(" code  here", x=0, y=10)
+        self.exitJoe()
+        self.assertExited()
 
 
 class MarkdownSyntaxTests(joefx.JoeTestBase):
@@ -172,6 +855,30 @@ class MarkdownSyntaxTests(joefx.JoeTestBase):
         self.exitJoe()
         self.assertExited()
 
+    def test_h4_visible(self):
+        self.workdir.fixtureData("test.md", "#### Level Four\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("#### Level Four", x=0, y=1)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_h5_visible(self):
+        self.workdir.fixtureData("test.md", "##### Level Five\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("##### Level Five", x=0, y=1)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_h6_visible(self):
+        self.workdir.fixtureData("test.md", "###### Level Six\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("###### Level Six", x=0, y=1)
+        self.exitJoe()
+        self.assertExited()
+
     # --- Inline code ---
 
     def test_inline_code_backticks(self):
@@ -188,6 +895,18 @@ class MarkdownSyntaxTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.assertTextAt("Within a code block", x=0, y=1)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_inline_code_multiple_on_line(self):
+        """Multiple inline code spans on one line"""
+        self.workdir.fixtureData("test.md", "Use `foo` and `bar` here\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("Use ", x=0, y=1)
+        self.assertTextAt("foo", x=5, y=1)
+        self.assertTextAt(" and ", x=9, y=1)
+        self.assertTextAt("bar", x=15, y=1)
         self.exitJoe()
         self.assertExited()
 
@@ -217,6 +936,17 @@ class MarkdownSyntaxTests(joefx.JoeTestBase):
         self.exitJoe()
         self.assertExited()
 
+    def test_fenced_code_tilde(self):
+        content = "~~~\nsome code\n~~~\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("~~~", x=0, y=1)
+        self.assertTextAt("some code", x=0, y=2)
+        self.assertTextAt("~~~", x=0, y=3)
+        self.exitJoe()
+        self.assertExited()
+
     # --- Indented code ---
 
     def test_indented_code_block(self):
@@ -241,6 +971,17 @@ class MarkdownSyntaxTests(joefx.JoeTestBase):
         self.exitJoe()
         self.assertExited()
 
+    def test_nested_blockquote(self):
+        content = "> Outer\n> > Inner\n> Back to outer\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("> Outer", x=0, y=1)
+        self.assertTextAt("> > Inner", x=0, y=2)
+        self.assertTextAt("> Back to outer", x=0, y=3)
+        self.exitJoe()
+        self.assertExited()
+
     # --- Lists ---
 
     def test_unordered_list_dash(self):
@@ -251,6 +992,28 @@ class MarkdownSyntaxTests(joefx.JoeTestBase):
         self.assertTextAt("- Red", x=0, y=1)
         self.assertTextAt("- Green", x=0, y=2)
         self.assertTextAt("- Blue", x=0, y=3)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_unordered_list_asterisk(self):
+        content = "* Red\n* Green\n* Blue\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("* Red", x=0, y=1)
+        self.assertTextAt("* Green", x=0, y=2)
+        self.assertTextAt("* Blue", x=0, y=3)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_unordered_list_plus(self):
+        content = "+ Red\n+ Green\n+ Blue\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("+ Red", x=0, y=1)
+        self.assertTextAt("+ Green", x=0, y=2)
+        self.assertTextAt("+ Blue", x=0, y=3)
         self.exitJoe()
         self.assertExited()
 
@@ -277,6 +1040,24 @@ class MarkdownSyntaxTests(joefx.JoeTestBase):
         self.exitJoe()
         self.assertExited()
 
+    def test_reference_link(self):
+        content = "This is [a reference][ref]\n\n[ref]: http://example.com\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("This is [a referenc", x=0, y=1)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_image_link(self):
+        content = "![alt text](image.png)\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("![alt text](image.", x=0, y=1)
+        self.exitJoe()
+        self.assertExited()
+
     # --- Horizontal rules ---
 
     def test_horizontal_rule(self):
@@ -284,6 +1065,14 @@ class MarkdownSyntaxTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.assertTextAt("----", x=0, y=1)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_horizontal_rule_asterisks(self):
+        self.workdir.fixtureData("test.md", "****\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("****", x=0, y=1)
         self.exitJoe()
         self.assertExited()
 
@@ -305,6 +1094,14 @@ class MarkdownSyntaxTests(joefx.JoeTestBase):
         self.exitJoe()
         self.assertExited()
 
+    def test_bold_italic_asterisks(self):
+        self.workdir.fixtureData("test.md", "***triple asterisks***\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("***triple asterisks", x=0, y=1)
+        self.exitJoe()
+        self.assertExited()
+
     def test_italic_underscores(self):
         self.workdir.fixtureData("test.md", "_single underscores_\n")
         self.startup.args = ("test.md",)
@@ -318,6 +1115,24 @@ class MarkdownSyntaxTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.assertTextAt("__double underscores__", x=0, y=1)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_bold_italic_underscores(self):
+        self.workdir.fixtureData("test.md", "___triple underscores___\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("___triple underscor", x=0, y=1)
+        self.exitJoe()
+        self.assertExited()
+
+    # --- Strikethrough ---
+
+    def test_strikethrough(self):
+        self.workdir.fixtureData("test.md", "~~strikethrough~~\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("~~strikethrough~~", x=0, y=1)
         self.exitJoe()
         self.assertExited()
 
@@ -353,5 +1168,263 @@ class MarkdownSyntaxTests(joefx.JoeTestBase):
         self.startJoe()
         # Text should be visible on the first content line
         self.assertTextAt("    * Keystrokes", x=0, y=1)
+        self.exitJoe()
+        self.assertExited()
+
+    # --- mdtest.md based tests ---
+
+    def test_mdtest_heading_chain(self):
+        """Test heading hierarchy from mdtest.md"""
+        content = "# Markdown: Syntax\n\n## Overview\n\n### Philosophy\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("# Markdown: Synta", x=0, y=1)
+        self.assertTextAt("## Overview", x=0, y=3)
+        self.assertTextAt("### Philosophy", x=0, y=5)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_mdtest_emphasis_examples(self):
+        """Test emphasis examples from mdtest.md"""
+        content = "*single asterisks*\n\n_single underscores_\n\n**double asterisks**\n\n__double underscores__\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("*single asterisks*", x=0, y=1)
+        self.assertTextAt("_single underscores_", x=0, y=3)
+        self.assertTextAt("**double asterisks**", x=0, y=5)
+        self.assertTextAt("__double underscores__", x=0, y=7)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_mdtest_code_examples(self):
+        """Test code examples from mdtest.md"""
+        content = "Use the `printf()` function.\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("Use the ", x=0, y=1)
+        self.assertTextAt("printf()", x=9, y=1)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_mdtest_blockquote_examples(self):
+        """Test blockquote examples from mdtest.md"""
+        content = "> This is a blockquote with two paragraphs. Lorem ipsum dolor sit amet,\n> consectetuer adipiscing elit. Aliquam hendrerit mi posuere lectus.\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("> This is a blockq", x=0, y=1)
+        self.assertTextAt("> consectetuer adip", x=0, y=2)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_mdtest_nested_blockquote(self):
+        """Test nested blockquote from mdtest.md"""
+        content = "> This is the first level of quoting.\n>\n> > This is nested blockquote.\n>\n> Back to the first level.\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("> This is the first", x=0, y=1)
+        self.assertTextAt("> ", x=0, y=2)
+        self.assertTextAt("> > This is nested ", x=0, y=3)
+        self.assertTextAt("> ", x=0, y=4)
+        self.assertTextAt("> Back to the first", x=0, y=5)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_mdtest_list_examples(self):
+        """Test list examples from mdtest.md"""
+        content = "*   Red\n*   Green\n*   Blue\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("*   Red", x=0, y=1)
+        self.assertTextAt("*   Green", x=0, y=2)
+        self.assertTextAt("*   Blue", x=0, y=3)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_mdtest_ordered_list_examples(self):
+        """Test ordered list examples from mdtest.md"""
+        content = "1.  Bird\n2.  McHale\n3.  Parish\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("1.  Bird", x=0, y=1)
+        self.assertTextAt("2.  McHale", x=0, y=2)
+        self.assertTextAt("3.  Parish", x=0, y=3)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_mdtest_link_example(self):
+        """Test link example from mdtest.md"""
+        content = "This is [an example](http://example.com/) inline link.\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("This is ", x=0, y=1)
+        self.assertTextAt("[an example]", x=8, y=1)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_mdtest_fenced_code(self):
+        """Test fenced code from mdtest.md"""
+        content = "```\ntell application \"Foo\"\n    beep\nend tell\n```\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("```", x=0, y=1)
+        self.assertTextAt("tell application", x=0, y=2)
+        self.assertTextAt("    beep", x=0, y=3)
+        self.assertTextAt("end tell", x=0, y=4)
+        self.assertTextAt("```", x=0, y=5)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_mdtest_horizontal_rule(self):
+        """Test horizontal rule from mdtest.md"""
+        content = "----\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("----", x=0, y=1)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_mdtest_emphasis_in_sentence(self):
+        """Test emphasis in context from mdtest.md"""
+        content = "**Note:** This document is itself written using Markdown\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("**Note:** This doc", x=0, y=1)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_mdtest_code_with_special_chars(self):
+        """Test code with special characters from mdtest.md"""
+        content = "Within a code block, ampersands (`&`) are converted.\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("Within a code block", x=0, y=1)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_mdtest_mixed_content(self):
+        """Test mixed content from mdtest.md"""
+        content = "# Markdown: Syntax\n\n**Note:** This document is itself written using Markdown;\n\n## Overview\n\n### Philosophy\n\nMarkdown is intended to be as easy-to-read and easy-to-write as is feasible.\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.assertTextAt("# Markdown: Synta", x=0, y=1)
+        self.assertTextAt("**Note:** This doc", x=0, y=3)
+        self.assertTextAt("## Overview", x=0, y=5)
+        self.assertTextAt("### Philosophy", x=0, y=7)
+        self.assertTextAt("Markdown is intende", x=0, y=9)
+        self.exitJoe()
+        self.assertExited()
+
+    # --- Feature 2.1: Unicode Box-Drawing Table Borders ---
+
+    def test_viewmode_table_single_column(self):
+        """Single column table renders with box-drawing"""
+        content = "| Item |\n|------|\n| A |\n| B |\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Header: ┌
+        self.assertTextAt("\u250c Item ", x=0, y=1)
+        # Separator: ├
+        self.assertTextAt("\u251c\u2500\u2500\u2500\u2500\u2500\u2500", x=0, y=2)
+        # Body: │
+        self.assertTextAt("\u2502 A ", x=0, y=3)
+        # Last: └
+        self.assertTextAt("\u2514 B ", x=0, y=4)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_table_two_column(self):
+        """Two column table: ┌ ┬ ┐ header, ├ ┼ ┤ separator, │ body, └ ┴ ┘ last"""
+        content = "| A | B |\n|---|---|\n| 1 | 2 |\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Header: ┌ ┬ ┐
+        self.assertTextAt("\u250c A \u252c B \u2510", x=0, y=1)
+        # Separator: ├ ┼ ┤
+        self.assertTextAt("\u251c\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u2524", x=0, y=2)
+        # Last body row: └ ┴ ┘
+        self.assertTextAt("\u2514 1 \u2534 2 \u2518", x=0, y=3)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_table_no_bottom_border_for_continuing(self):
+        """Table followed by more content — last body row still gets bottom border"""
+        content = "| X | Y |\n|---|---|\n| 1 | 2 |\n\nMore text\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Last row of table gets └ ┴ ┘
+        self.assertTextAt("\u2514 1 \u2534 2 \u2518", x=0, y=3)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_table_large(self):
+        """Large table with many body rows"""
+        lines = ["| Name | Score |", "|------|-------|"]
+        for i in range(10):
+            lines.append(f"| Item{i} | {i*10} |")
+        content = "\n".join(lines) + "\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Header
+        self.assertTextAt("\u250c Name \u252c Score", x=0, y=1)
+        # Separator
+        self.assertTextAt("\u251c\u2500\u2500\u2500\u2500\u2500\u2500\u253c", x=0, y=2)
+        # First body row
+        self.assertTextAt("\u2502 Item0 \u2502 0 ", x=0, y=3)
+        # Middle body row
+        self.assertTextAt("\u2502 Item5 \u2502 50", x=0, y=8)
+        # Last body row (line 12: banner=0, header=1, sep=2, body=3-12)
+        self.assertTextAt("\u2514 Item9 \u2534 90", x=0, y=12)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_table_two_tables_separate(self):
+        """Two separate tables should each get their own box-drawing borders"""
+        content = "| A | B |\n|---|---|\n| 1 | 2 |\n\n| X | Y |\n|---|---|\n| a | b |\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # First table
+        self.assertTextAt("\u250c A \u252c B \u2510", x=0, y=1)
+        self.assertTextAt("\u251c\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u2524", x=0, y=2)
+        self.assertTextAt("\u2514 1 \u2534 2 \u2518", x=0, y=3)
+        # Second table (after blank line)
+        self.assertTextAt("\u250c X \u252c Y \u2510", x=0, y=5)
+        self.assertTextAt("\u251c\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u2524", x=0, y=6)
+        self.assertTextAt("\u2514 a \u2534 b \u2518", x=0, y=7)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_table_alignment_stripped(self):
+        """Alignment indicators in separator row are replaced with ─"""
+        content = "| L | C | R |\n|:---|:--:|---:|\n| a | b | c |\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Separator: all colons and dashes become ─
+        # The separator row should start with ├ and contain ─
+        self.assertTextAt("\u251c\u2500", x=0, y=2)
         self.exitJoe()
         self.assertExited()

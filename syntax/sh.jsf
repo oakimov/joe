@@ -350,7 +350,7 @@ done
 	"pushd"		stmt
 	"shopt"		stmt
 done
-	"-a-zA-Z0-9_"	ident
+	"-.a-zA-Z0-9_"	ident
 	"/"		path recolormark
 
 :kw Keyword

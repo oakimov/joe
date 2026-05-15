@@ -35,6 +35,7 @@
 =MdH6		dim
 =MdBold		bold
 =MdItalic	dim
+=MdBoldItalic	bold dim
 =MdStrike	dim
 =MdCode		cyan
 =MdBlockquote	green
@@ -44,7 +45,11 @@
 =MdLinkUrl	magenta
 =MdImageAlt	bold cyan
 =MdCodeBlock	cyan
-=MdCodeFence	blue
+=MdCodeFence	dim blue
+=MdTableHeader	bold
+=MdTableSeparator	dim
+=MdTableBody
+=MdTableAlign	dim
 
 =diff.DelLine	red
 =diff.AddLine	green

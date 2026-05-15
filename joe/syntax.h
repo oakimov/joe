@@ -103,6 +103,7 @@ struct state_debug_data {
 	int name, recolor;
 };
 extern attr_data *attr_buf;
+extern int attr_size;
 extern struct state_debug_data *syndebug_buf;
 
 #define clear_state(s) (((s)->saved_s = 0), ((s)->state = 0), ((s)->stack = 0), ((s)->delim_stack = 0))

@@ -1,7 +1,7 @@
 # Markdown WYSIWYG Enhancement — Task List
 
 > **Source:** `plans/markdown-wysiwyg-feasibility.md`
-> **Status:** Phase 1 Features 1.1–1.10 complete. Phase 2 not started.
+> **Status:** Phase 1 complete (Features 1.1–1.10). Phase 2 Feature 2.1 complete. Features 2.2–2.4 pending.
 > **Constraint:** C only, libc only. No external dependencies.
 
 ---
@@ -42,7 +42,7 @@ Goal: Add a toggle between edit mode and view mode. In view mode, markdown delim
 - [x] **1.3.1** In `lgen_view()`, when line starts with 1–6 `#` characters followed by a space, hide all `#` chars and the trailing space by marking them in `viewmode_hide[]` → Rendered as spaces
 - [x] **1.3.2** Apply the heading color/attribute from Feature 1.2 to the remaining heading text → Already applied by syntax DFA via `attr_buf`
 - [x] **1.3.3** Ensure cursor positioning is correct when the user moves the cursor onto a heading line (the cursor should map to the correct buffer position even though fewer cells are displayed) → Column mapping implemented in `lgen_view()`
-- [ ] **1.3.4** Test: toggle view mode on a file with headings of all six levels; verify `#` marks are hidden and text is colored correctly
+- [x] **1.3.4** Test: toggle view mode on a file with headings of all six levels; verify `#` marks are hidden and text is colored correctly → 6 tests (h1–h6) passing
 
 ### Feature 1.4 — Inline Style Delimiter Hiding ✅ COMPLETE
 `[depends on 1.1]` `[independent within phase]`
@@ -53,7 +53,7 @@ Goal: Add a toggle between edit mode and view mode. In view mode, markdown delim
 - [x] **1.4.4** Handle bold+italic (`***`) — `***text***` and `___text___` now properly detected, colored with MdBoldItalic class, and all 3 delimiter chars hidden on both opening and closing
 - [x] **1.4.5** Emphasis processing now respects code spans (delimiters inside backticks are not hidden) and handles nested styles correctly (e.g., `**bold *italic* bold**`)
 - [x] **1.4.6** Cursor movement maps displayed positions to buffer positions when delimiters are hidden → Column mapping implemented in `lgen_view()` and `bwgen()`
-- [x] **1.4.7** Test: 94 tests in `tests/viewmode.py` covering all Phase 1 features — headings (H1-H6), bold/italic/strikethrough/bold+italic, code spans, fenced code blocks, links, blockquotes, lists, horizontal rules, file integrity, and mdtest.md-based constructs
+- [x] **1.4.7** Test: 123 tests in `tests/viewmode.py` covering all Phase 1 features and Feature 2.1 — headings (H1-H6), bold/italic/strikethrough/bold+italic, code spans, fenced code blocks, links, blockquotes, lists, horizontal rules, file integrity, nested styles, emphasis inside code spans, mdtest.md-based constructs, and box-drawing tables
 
 ### Feature 1.5 — Code Block Rendering in View Mode ✅ COMPLETE
 `[depends on 1.1]` `[independent within phase]`
@@ -79,7 +79,7 @@ Goal: Add a toggle between edit mode and view mode. In view mode, markdown delim
 - [x] **1.7.2** For nested blockquotes, render multiple vertical bars with progressive indentation → `>` substituted with `│` (U+2502), nested `>>` becomes `││`
 - [x] **1.7.3** List markers (* - +) at line start are preserved (not hidden as emphasis)
 - [x] **1.7.4** Replace `[ ]` with `☐` (U+2610) and `[x]` with `☑` (U+2611) for task lists
-- [x] **1.7.5** Test: verify blockquotes show vertical bars, lists show bullets, and task checkboxes render as box characters → 102 tests passing
+- [x] **1.7.5** Test: verify blockquotes show vertical bars, lists show bullets, and task checkboxes render as box characters → 123 tests passing
 
 ### Feature 1.8 — Horizontal Rule Substitution
 
@@ -155,7 +155,7 @@ Goal: Full visual polish — Unicode table borders, nested syntax highlighting i
 ### Testing and Validation
 `[ongoing]`
 
-- [x] **T.1** Create a comprehensive test markdown file (`mdtest.md`) containing all supported constructs: headings (H1–H6), bold, italic, bold+italic, strikethrough, inline code, fenced code blocks (with and without language), tables, links (inline, reference, autolink), images, blockquotes (nested), ordered lists, unordered lists, task lists, horizontal rules, tight/loose paragraphs → Created as `mdtest.md`. Automated tests in `tests/viewmode.py` with 94 tests covering all Phase 1 features (viewmode toggle, H1-H6, bold/italic/strikethrough/bold+italic, code spans, fenced code blocks, links, blockquotes, lists, horizontal rules, file integrity, nested styles, emphasis inside code spans, mdtest.md-based constructs).
+- [x] **T.1** Create a comprehensive test markdown file (`mdtest.md`) containing all supported constructs: headings (H1–H6), bold, italic, bold+italic, strikethrough, inline code, fenced code blocks (with and without language), tables, links (inline, reference, autolink), images, blockquotes (nested), ordered lists, unordered lists, task lists, horizontal rules, tight/loose paragraphs → Created as `mdtest.md`. Automated tests in `tests/viewmode.py` with 123 tests covering all Phase 1 features and Feature 2.1 box-drawing tables.
 - [ ] **T.2** Test on `TERM=xterm` (16-color)
 - [ ] **T.3** Test on `TERM=xterm-256color` (256-color)
 - [ ] **T.4** Test on `TERM=xterm-direct` (truecolor)

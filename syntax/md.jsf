@@ -90,27 +90,27 @@
 # ATX headings (# H1 through ###### H6)
 # ============================================================
 :atx_h1 MdH1
-	"#"		atx_h2		noeat
+	"#"		atx_h2		recolor=-1
 	" \t"		h1_content
 	*		h1_content
 
 :atx_h2 MdH2
-	"#"		atx_h3		noeat
+	"#"		atx_h3		recolor=-1
 	" \t"		h2_content
 	*		h2_content
 
 :atx_h3 MdH3
-	"#"		atx_h4		noeat
+	"#"		atx_h4		recolor=-1
 	" \t"		h3_content
 	*		h3_content
 
 :atx_h4 MdH4
-	"#"		atx_h5		noeat
+	"#"		atx_h5		recolor=-1
 	" \t"		h4_content
 	*		h4_content
 
 :atx_h5 MdH5
-	"#"		atx_h6		noeat
+	"#"		atx_h6		recolor=-1
 	" \t"		h5_content
 	*		h5_content
 
@@ -146,8 +146,8 @@
 # Bold/Italic: * and ** and *** and _ and __
 # ============================================================
 # After first * in idle:
-:star1 Idle
-	"*"		star2		recolor=-1
+:star1 MdItalic
+	"*"		star2		recolor=-2
 	" \t\n"	idle		noeat
 	*		italic		noeat
 
@@ -161,8 +161,8 @@
 	*		bold_italic
 
 # After first _ in idle:
-:under1 Idle
-	"_"		under2		recolor=-1
+:under1 MdItalic
+	"_"		under2		recolor=-2
 	" \t\n"	idle		noeat
 	*		underline_italic	noeat
 
@@ -196,10 +196,10 @@
 	"_"		end_underline_bold	recolor=-2
 	*		underline_bold
 
-:end_bold Idle
+:end_bold MdBold
 	*		idle		noeat
 
-:end_underline_bold Idle
+:end_underline_bold MdBold
 	*		idle		noeat
 
 # Bold+Italic state (*** ... ***)
@@ -216,7 +216,7 @@
 	"*"		end_bold_italic	recolor=-2
 	*		bold_italic
 
-:end_bold_italic Idle
+:end_bold_italic MdBoldItalic
 	*		idle		noeat
 
 # Underline Bold+Italic state (___ ... ___)
@@ -233,7 +233,7 @@
 	"_"		end_underline_bold_italic	recolor=-2
 	*		underline_bold_italic
 
-:end_underline_bold_italic Idle
+:end_underline_bold_italic MdBoldItalic
 	*		idle		noeat
 
 # Italic state (* ... *)
@@ -242,7 +242,7 @@
 	"\n"		line_start
 	"*"		end_italic	recolor=-1
 
-:end_italic Idle
+:end_italic MdItalic
 	*		idle		noeat
 
 :underline_italic MdItalic
@@ -250,7 +250,7 @@
 	"\n"		line_start
 	"_"		end_underline_italic	recolor=-1
 
-:end_underline_italic Idle
+:end_underline_italic MdItalic
 	*		idle		noeat
 
 # ============================================================
@@ -273,29 +273,75 @@
 	"~"		end_strike	recolor=-2
 	*		strike
 
-:end_strike Idle
+:end_strike MdStrike
 	*		idle		noeat
 
 # ============================================================
 # Inline code: `code` and ``code``
 # ============================================================
 :inline_code_s MdCode
-	"`"		inline_code_d	mark
+	"`"		inline_code_d_start	mark
 	*		inline_code	mark
 
 :inline_code MdCode
 	*		inline_code
-	"`"		end_inline_code	markend recolormark
+	"`"		inline_code_maybe_end
 	"\n"		line_start
 
+:inline_code_maybe_end MdCode
+	"`"		inline_code_ignore_bt
+	*		end_inline_code	markend recolormark noeat
+
+:inline_code_ignore_bt MdCode
+	"`"		inline_code_ignore_bt
+	*		inline_code	noeat
+
 # Double backtick code span
-:inline_code_d MdCode
-	"`"		inline_code_d2
+:inline_code_d_start MdCode
+	"`"		inline_code_t_start	mark
 	*		inline_code_d
 
-:inline_code_d2 MdCode
-	"`"		end_inline_code_d	markend recolormark
+:inline_code_d MdCode
+	"`"		inline_code_d_maybe_end1
+	"\n"		line_start
 	*		inline_code_d
+
+:inline_code_d_maybe_end1 MdCode
+	"`"		inline_code_d_maybe_end2
+	*		inline_code_d	noeat
+
+:inline_code_d_maybe_end2 MdCode
+	"`"		inline_code_d_ignore_bt
+	*		end_inline_code_d	markend recolormark noeat
+
+:inline_code_d_ignore_bt MdCode
+	"`"		inline_code_d_ignore_bt
+	*		inline_code_d	noeat
+
+# Triple backtick code span (fallback, since standard is fenced code, but just in case)
+:inline_code_t_start MdCode
+	*		inline_code_t
+
+:inline_code_t MdCode
+	"`"		inline_code_t_maybe_end1
+	"\n"		line_start
+	*		inline_code_t
+
+:inline_code_t_maybe_end1 MdCode
+	"`"		inline_code_t_maybe_end2
+	*		inline_code_t	noeat
+
+:inline_code_t_maybe_end2 MdCode
+	"`"		inline_code_t_maybe_end3
+	*		inline_code_t	noeat
+
+:inline_code_t_maybe_end3 MdCode
+	"`"		inline_code_t_ignore_bt
+	*		end_inline_code_t	markend recolormark noeat
+
+:inline_code_t_ignore_bt MdCode
+	"`"		inline_code_t_ignore_bt
+	*		inline_code_t	noeat
 
 :end_inline_code MdCode
 	*		idle		noeat
@@ -303,6 +349,8 @@
 :end_inline_code_d MdCode
 	*		idle		noeat
 
+:end_inline_code_t MdCode
+	*		idle		noeat
 # ============================================================
 # Fenced code blocks: ```lang ... ``` or ~~~lang ... ~~~
 # ============================================================
@@ -473,11 +521,21 @@
 	"\n"		line_start
 
 # ============================================================
-# Blockquotes
+# Blockquotes (with lazy continuation support)
 # ============================================================
 :blockquote MdBlockquote
 	*		blockquote
+	"\n"		blockquote_after_nl
+
+:blockquote_after_nl MdBlockquote
+	">"		blockquote	recolor=-1
+	" \t"		blockquote_after_nl
 	"\n"		line_start
+	*		blockquote_lazy
+
+:blockquote_lazy MdBlockquote
+	*		blockquote_lazy
+	"\n"		blockquote_after_nl
 
 # ============================================================
 # Lists
@@ -557,7 +615,17 @@
 # ============================================================
 :maybe_link_or_image Idle
 	"!"		image_alt	mark recolor=-1
+	" "		maybe_cb_sp
+	"xX"		maybe_cb_x
 	*		link_text	mark recolor=-1
+
+:maybe_cb_sp Idle
+	"]"		idle
+	*		link_text	mark recolor=-1 noeat
+
+:maybe_cb_x Idle
+	"]"		idle
+	*		link_text	mark recolor=-1 noeat
 
 :link_text MdLinkText
 	*		link_text

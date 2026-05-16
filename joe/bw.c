@@ -549,7 +549,7 @@ static void viewmode_free_link_urls(void)
 	void **freed = NULL;
 	int freed_n = 0;
 	if (viewmode_link_url_size > 0)
-		freed = (void **)joe_malloc((size_t)viewmode_link_url_size * sizeof(void *));
+		freed = (void **)joe_malloc((ptrdiff_t)viewmode_link_url_size * (ptrdiff_t)sizeof(void *));
 	int m;
 	for (m = 0; m < viewmode_link_url_size; m++) {
 		void *p = viewmode_link_url[m];

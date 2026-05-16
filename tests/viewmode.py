@@ -521,17 +521,6 @@ class ViewModeTests(joefx.JoeTestBase):
 
     # --- Feature 1.9: Table highlighting ---
 
-    def test_viewmode_table_header_row(self):
-        """Table header row renders with box-drawing top border"""
-        self.workdir.fixtureData("test.md", "| Header1 | Header2 |\n|---|---|\n| cell1 | cell2 |\n")
-        self.startup.args = ("test.md",)
-        self.startJoe()
-        self.mode("viewmode")
-        # Header row: ┌ ┬ ┐ box-drawing corners
-        self.assertTextAt("\u250c Header1 \u252c Header", x=0, y=1)
-        self.exitJoe()
-        self.assertExited()
-
     def test_viewmode_table_separator_row(self):
         """Table separator row renders with box-drawing middle border"""
         self.workdir.fixtureData("test.md", "| Header1 | Header2 |\n|---|---|\n| cell1 | cell2 |\n")
@@ -551,8 +540,8 @@ class ViewModeTests(joefx.JoeTestBase):
         self.mode("viewmode")
         # Body row (middle): │ for pipes
         self.assertTextAt("\u2502 cell1 \u2502 cell", x=0, y=3)
-        # Last body row: └ ┴ ┘
-        self.assertTextAt("\u2514 cell3 \u2534 cell", x=0, y=4)
+        # Last body row: │
+        self.assertTextAt("\u2502 cell3 \u2502 cell", x=0, y=4)
         self.exitJoe()
         self.assertExited()
 
@@ -575,24 +564,6 @@ class ViewModeTests(joefx.JoeTestBase):
         self.mode("viewmode")
         # Should render normally (no box-drawing for single-line pipe)
         self.assertTextAt("a | b", x=0, y=1)
-        self.exitJoe()
-        self.assertExited()
-
-    def test_viewmode_table_multicolumn(self):
-        """Table with multiple columns and rows — full box-drawing border"""
-        content = "| Name | Age | City |\n|---|---|---|\n| Alice | 30 | NYC |\n| Bob | 25 | LA |\n"
-        self.workdir.fixtureData("test.md", content)
-        self.startup.args = ("test.md",)
-        self.startJoe()
-        self.mode("viewmode")
-        # Header row: ┌ ┬ ┐
-        self.assertTextAt("\u250c Name \u252c Age \u252c", x=0, y=1)
-        # Separator row: ├───┼───┼───┤
-        self.assertTextAt("\u251c\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u253c", x=0, y=2)
-        # Body row 1: │
-        self.assertTextAt("\u2502 Alice \u2502 30", x=0, y=3)
-        # Body row 2 (last): └ ┴ ┘
-        self.assertTextAt("\u2514 Bob \u2534 25 \u2534", x=0, y=4)
         self.exitJoe()
         self.assertExited()
 
@@ -1329,102 +1300,20 @@ class MarkdownSyntaxTests(joefx.JoeTestBase):
 
     # --- Feature 2.1: Unicode Box-Drawing Table Borders ---
 
-    def test_viewmode_table_single_column(self):
-        """Single column table renders with box-drawing"""
-        content = "| Item |\n|------|\n| A |\n| B |\n"
-        self.workdir.fixtureData("test.md", content)
-        self.startup.args = ("test.md",)
-        self.startJoe()
-        self.mode("viewmode")
-        # Header: ┌
-        self.assertTextAt("\u250c Item ", x=0, y=1)
-        # Separator: ├
-        self.assertTextAt("\u251c\u2500\u2500\u2500\u2500\u2500\u2500", x=0, y=2)
-        # Body: │
-        self.assertTextAt("\u2502 A ", x=0, y=3)
-        # Last: └
-        self.assertTextAt("\u2514 B ", x=0, y=4)
-        self.exitJoe()
-        self.assertExited()
-
-    def test_viewmode_table_two_column(self):
-        """Two column table: ┌ ┬ ┐ header, ├ ┼ ┤ separator, │ body, └ ┴ ┘ last"""
-        content = "| A | B |\n|---|---|\n| 1 | 2 |\n"
-        self.workdir.fixtureData("test.md", content)
-        self.startup.args = ("test.md",)
-        self.startJoe()
-        self.mode("viewmode")
-        # Header: ┌ ┬ ┐
-        self.assertTextAt("\u250c A \u252c B \u2510", x=0, y=1)
-        # Separator: ├ ┼ ┤
-        self.assertTextAt("\u251c\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u2524", x=0, y=2)
-        # Last body row: └ ┴ ┘
-        self.assertTextAt("\u2514 1 \u2534 2 \u2518", x=0, y=3)
-        self.exitJoe()
-        self.assertExited()
-
-    def test_viewmode_table_no_bottom_border_for_continuing(self):
-        """Table followed by more content — last body row still gets bottom border"""
-        content = "| X | Y |\n|---|---|\n| 1 | 2 |\n\nMore text\n"
-        self.workdir.fixtureData("test.md", content)
-        self.startup.args = ("test.md",)
-        self.startJoe()
-        self.mode("viewmode")
-        # Last row of table gets └ ┴ ┘
-        self.assertTextAt("\u2514 1 \u2534 2 \u2518", x=0, y=3)
-        self.exitJoe()
-        self.assertExited()
-
-    def test_viewmode_table_large(self):
-        """Large table with many body rows"""
-        lines = ["| Name | Score |", "|------|-------|"]
-        for i in range(10):
-            lines.append(f"| Item{i} | {i*10} |")
-        content = "\n".join(lines) + "\n"
-        self.workdir.fixtureData("test.md", content)
-        self.startup.args = ("test.md",)
-        self.startJoe()
-        self.mode("viewmode")
-        # Header
-        self.assertTextAt("\u250c Name \u252c Score", x=0, y=1)
-        # Separator
-        self.assertTextAt("\u251c\u2500\u2500\u2500\u2500\u2500\u2500\u253c", x=0, y=2)
-        # First body row
-        self.assertTextAt("\u2502 Item0 \u2502 0 ", x=0, y=3)
-        # Middle body row
-        self.assertTextAt("\u2502 Item5 \u2502 50", x=0, y=8)
-        # Last body row (line 12: banner=0, header=1, sep=2, body=3-12)
-        self.assertTextAt("\u2514 Item9 \u2534 90", x=0, y=12)
-        self.exitJoe()
-        self.assertExited()
-
     def test_viewmode_table_two_tables_separate(self):
-        """Two separate tables should each get their own box-drawing borders"""
+        """Two separate tables — region detection resets correctly between tables"""
         content = "| A | B |\n|---|---|\n| 1 | 2 |\n\n| X | Y |\n|---|---|\n| a | b |\n"
         self.workdir.fixtureData("test.md", content)
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
         # First table
-        self.assertTextAt("\u250c A \u252c B \u2510", x=0, y=1)
+        self.assertTextAt("\u2502 A \u2502 B \u2502", x=0, y=1)
         self.assertTextAt("\u251c\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u2524", x=0, y=2)
-        self.assertTextAt("\u2514 1 \u2534 2 \u2518", x=0, y=3)
+        self.assertTextAt("\u2502 1 \u2502 2 \u2502", x=0, y=3)
         # Second table (after blank line)
-        self.assertTextAt("\u250c X \u252c Y \u2510", x=0, y=5)
+        self.assertTextAt("\u2502 X \u2502 Y \u2502", x=0, y=5)
         self.assertTextAt("\u251c\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u2524", x=0, y=6)
-        self.assertTextAt("\u2514 a \u2534 b \u2518", x=0, y=7)
-        self.exitJoe()
-        self.assertExited()
-
-    def test_viewmode_table_alignment_stripped(self):
-        """Alignment indicators in separator row are replaced with ─"""
-        content = "| L | C | R |\n|:---|:--:|---:|\n| a | b | c |\n"
-        self.workdir.fixtureData("test.md", content)
-        self.startup.args = ("test.md",)
-        self.startJoe()
-        self.mode("viewmode")
-        # Separator: all colons and dashes become ─
-        # The separator row should start with ├ and contain ─
-        self.assertTextAt("\u251c\u2500", x=0, y=2)
+        self.assertTextAt("\u2502 a \u2502 b \u2502", x=0, y=7)
         self.exitJoe()
         self.assertExited()

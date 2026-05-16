@@ -469,6 +469,20 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
  * This allows lgen_view to parse, modify attr_buf, then delegate rendering. */
 static int viewmode_skip_parse = 0;
 
+/*
+ * View mode operates by building per-line side tables indexed by buffer byte
+ * offset (hide/substitute/link-url/column-map). Without a hard cap, a single
+ * gigantic line can force multi-hundred-megabyte allocations and OOM.
+ *
+ * The cap only limits viewmode transformations; the underlying buffer and core
+ * renderer can still handle longer lines (delimiters beyond the cap remain
+ * visible / untransformed).
+ */
+#define VIEWMODE_MAX_LINE_BYTES (1024 * 1024)
+
+/* Table scanning does not need full-line fidelity; keep it small to avoid OOM. */
+#define VIEWMODE_TABLE_SCAN_MAX_BYTES (16 * 1024)
+
 /* Bitmap for view mode: when viewmode_skip_parse is set, characters with
  * a set bit in viewmode_hide[] are rendered as spaces (hidden delimiters).
  */
@@ -530,15 +544,34 @@ static void viewmode_free_link_urls(void)
 {
 	if (!viewmode_link_url)
 		return;
-	const char *last_url = NULL;
+	/* Allocate a tracking array sized to worst case (all slots unique)
+	 * to prevent double-free when the same pointer appears in multiple slots. */
+	void **freed = NULL;
+	int freed_n = 0;
+	if (viewmode_link_url_size > 0)
+		freed = (void **)joe_malloc((size_t)viewmode_link_url_size * sizeof(void *));
 	int m;
 	for (m = 0; m < viewmode_link_url_size; m++) {
-		if (viewmode_link_url[m] && viewmode_link_url[m] != last_url) {
-			last_url = viewmode_link_url[m];
-			joe_free((void *)last_url);
+		void *p = viewmode_link_url[m];
+		if (p) {
+			int seen = 0;
+			int i;
+			for (i = 0; i < freed_n; i++) {
+				if (freed[i] == p) {
+					seen = 1;
+					break;
+				}
+			}
+			if (!seen) {
+				joe_free(p);
+				if (freed)
+					freed[freed_n++] = p;
+			}
 		}
 		viewmode_link_url[m] = NULL;
 	}
+	if (freed)
+		joe_free(freed);
 }
 
 /* Cleanup view mode static globals on exit */
@@ -615,6 +648,7 @@ static int lgen_core(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 	struct state_debug_data old_atr_state = {};
         P *tmp;
         int idx=0;
+	int highlight = (st.state != -1);
         int defatr = (bw->o.hiline && bw->cursor->line == y - bw->y + bw->top->line) ? (bg_text & curlinmask) | bg_curlin : bg_text;
         int atr = BG_COLOR(defatr);
         int ca = 0;		/* Additional attributes for current character */
@@ -624,13 +658,29 @@ static int lgen_core(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 	utf8_init(&utf8_sm);
 	ansi_init(&ansi_sm);
 
-	if(st.state!=-1) {
+	if (highlight) {
 		if (!viewmode_skip_parse) {
+			/* Avoid unbounded per-line allocations in the highlighter:
+			 * a single huge line can otherwise OOM via attr_buf growth. */
+			P *lp = pdup(p, "lgen_len");
+			p_goto_bol(lp);
+			int ll = 0;
+			int ch;
+			while ((ch = pgetb(lp)) != NO_MORE_DATA && ch != '\n') {
+				if (++ll > VIEWMODE_MAX_LINE_BYTES) {
+					highlight = 0;
+					break;
+				}
+			}
+			prm(lp);
+			if (!highlight)
+				goto no_parse;
 			tmp=pdup(p, "lgen");
 			p_goto_bol(tmp);
 			parse(bw->o.syntax,tmp,st,p->b->o.charmap);
 			prm(tmp);
 		}
+no_parse:
 		syn = attr_buf;
 		syndebug = syndebug_buf;
 	}
@@ -656,7 +706,7 @@ static int lgen_core(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 				ungetit = NO_MORE_DATA;
 			}
 			sub_c = 0;
-			if(st.state!=-1) {
+			if (highlight) {
 				atr = syn[idx] & ~CONTEXT_MASK;
 				if (syndebug)
 					atr_state = syndebug[idx];
@@ -808,7 +858,7 @@ static int lgen_core(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 				ungetit = NO_MORE_DATA;
 			}
 			sub_c = 0;
-			if(st.state!=-1) {
+			if (highlight) {
 				atr = syn[idx] & ~CONTEXT_MASK;
 				if (syndebug)
 					atr_state = syndebug[idx];
@@ -1033,6 +1083,21 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 		return lgen_core(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
 	}
 
+	/* Avoid unbounded allocations in view mode on pathological lines. */
+	{
+		P *lp = pdup(p, "lgen_view_len");
+		p_goto_bol(lp);
+		int ll = 0;
+		int ch;
+		while ((ch = pgetb(lp)) != NO_MORE_DATA && ch != '\n') {
+			if (++ll > VIEWMODE_MAX_LINE_BYTES) {
+				prm(lp);
+				return lgen_core(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
+			}
+		}
+		prm(lp);
+	}
+
 	/* Parse the line to populate attr_buf */
 	P *tmp = pdup(p, "lgen_view");
 	p_goto_bol(tmp);
@@ -1045,6 +1110,7 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 
 	int line_len = 0;
 	ptrdiff_t line_cap = 1024;
+	int line_truncated = 0;
 	unsigned char *line = (unsigned char *)joe_malloc(line_cap);
 	if (!line) {
 		prm(tmp);
@@ -1054,12 +1120,19 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 	while ((c = pgetb(tmp)) != NO_MORE_DATA && c != '\n') {
 		if (line_len >= INT_MAX - 1)
 			break;
+		if (line_len >= VIEWMODE_MAX_LINE_BYTES) {
+			/* Stop buffering: avoid allocating per-line state for gigantic lines. */
+			line_truncated = 1;
+			break;
+		}
 		if (line_len >= line_cap) {
 			ptrdiff_t new_cap = line_cap * 2;
 			if (new_cap <= line_cap) {
 				/* Overflow protection: cap at max safe size */
 				new_cap = line_cap + (ptrdiff_t)1024 * 1024;
 			}
+			if (new_cap > VIEWMODE_MAX_LINE_BYTES)
+				new_cap = VIEWMODE_MAX_LINE_BYTES;
 			unsigned char *new_line = (unsigned char *)joe_realloc(line, new_cap);
 			if (!new_line) {
 				/* Realloc failed — keep existing buffer, stop reading */
@@ -1073,24 +1146,30 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 	prm(tmp);
 
 	/* Ensure viewmode_hide is the right size */
-	if (!viewmode_hide || viewmode_hide_size != line_len) {
-		viewmode_hide_size = line_len > 0 ? line_len : 1;
+	if (!viewmode_hide || viewmode_hide_size < (line_len > 0 ? line_len : 1)) {
+		int need = line_len > 0 ? line_len : 1;
+		if (need > VIEWMODE_MAX_LINE_BYTES)
+			need = VIEWMODE_MAX_LINE_BYTES;
 		if (viewmode_hide)
 			joe_free(viewmode_hide);
-		viewmode_hide = (char *)joe_malloc(viewmode_hide_size);
+		viewmode_hide_size = need;
+		viewmode_hide = (char *)joe_malloc((ptrdiff_t)viewmode_hide_size);
 		if (!viewmode_hide) {
 			/* OOM — fall back to core rendering without hiding */
 			joe_free(line);
 			return lgen_core(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
 		}
 	}
-	memset(viewmode_hide, 0, viewmode_hide_size);
+	memset(viewmode_hide, 0, (size_t)(line_len > 0 ? line_len : 1));
 
 	/* Ensure viewmode_substitute is the right size */
-	if (!viewmode_substitute || viewmode_substitute_size != line_len) {
-		viewmode_substitute_size = line_len > 0 ? line_len : 1;
+	if (!viewmode_substitute || viewmode_substitute_size < (line_len > 0 ? line_len : 1)) {
+		int need = line_len > 0 ? line_len : 1;
+		if (need > VIEWMODE_MAX_LINE_BYTES)
+			need = VIEWMODE_MAX_LINE_BYTES;
 		if (viewmode_substitute)
 			joe_free(viewmode_substitute);
+		viewmode_substitute_size = need;
 		viewmode_substitute = (int *)joe_malloc((ptrdiff_t)viewmode_substitute_size * (ptrdiff_t)sizeof(int));
 		if (!viewmode_substitute) {
 			/* OOM — fall back to core rendering without substitution */
@@ -1098,7 +1177,18 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 			return lgen_core(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
 		}
 	}
-	memset(viewmode_substitute, 0, (size_t)viewmode_substitute_size * sizeof(int));
+	memset(viewmode_substitute, 0, (size_t)(line_len > 0 ? line_len : 1) * sizeof(int));
+
+	/* If we couldn't buffer the full line, avoid building additional per-line state. */
+	if (line_truncated) {
+		joe_free(line);
+		/* Prevent stale URL mappings from previous lines from leaking into this render. */
+		viewmode_free_link_urls();
+		viewmode_skip_parse = 1;
+		int result = lgen_core(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
+		viewmode_skip_parse = 0;
+		return result;
+	}
 
 	/* --- Detect line type and hide delimiters --- */
 
@@ -1264,8 +1354,11 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 				while (consecutive < 200) {
 					/* Read this line into persistent scan buffer */
 					int ll = 0;
+					int too_long = 0;
 					{
 						ptrdiff_t need = 512;
+						if (need > VIEWMODE_TABLE_SCAN_MAX_BYTES)
+							need = VIEWMODE_TABLE_SCAN_MAX_BYTES;
 						if (!viewmode_scan_buf || viewmode_scan_buf_size < need) {
 							if (viewmode_scan_buf) joe_free(viewmode_scan_buf);
 							viewmode_scan_buf = (unsigned char *)joe_malloc(need);
@@ -1281,9 +1374,15 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 						while ((ch = pgetb(rl)) != NO_MORE_DATA && ch != '\n') {
 							if (ll >= INT_MAX - 1)
 								break;
+							if (ll >= VIEWMODE_TABLE_SCAN_MAX_BYTES) {
+								too_long = 1;
+								break;
+							}
 							if (ll >= lc) {
 								ptrdiff_t nc = lc * 2;
 								if (nc <= lc) nc = lc + 256;
+								if (nc > VIEWMODE_TABLE_SCAN_MAX_BYTES)
+									nc = VIEWMODE_TABLE_SCAN_MAX_BYTES;
 							unsigned char *nb = (unsigned char *)joe_realloc(viewmode_scan_buf, nc);
 							if (!nb) break;
 							viewmode_scan_buf = nb;
@@ -1300,6 +1399,8 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 					int si = 0;
 					while (si < ll && (lb[si] == ' ' || lb[si] == '\t')) ++si;
 					if (si < ll && lb[si] == '|') has_pipe = 1;
+					if (too_long)
+						has_pipe = 0; /* Avoid classifying huge lines as tables. */
 
 						if (has_pipe) {
 						if (first_table_line == -1)
@@ -1381,17 +1482,13 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 
 			if (pipe_count > 0) {
 				switch (row_type) {
-				case TABLE_ROW_HEADER:
-					/* First row: ┌ ┬ ┐ */
-					if (pipe_count == 1) {
-						viewmode_substitute[pipe_positions[0]] = 0x250C; /* ┌ */
-					} else {
-						viewmode_substitute[pipe_positions[0]] = 0x250C; /* ┌ first */
-						int pi;
-						for (pi = 1; pi < pipe_count - 1; pi++)
-							viewmode_substitute[pipe_positions[pi]] = 0x252C; /* ┬ middle */
-						viewmode_substitute[pipe_positions[pipe_count - 1]] = 0x2510; /* ┐ last */
-					}
+			case TABLE_ROW_HEADER:
+				/* First row: │ for all pipes */
+				{
+					int pi;
+					for (pi = 0; pi < pipe_count; pi++)
+						viewmode_substitute[pipe_positions[pi]] = 0x2502; /* │ */
+				}
 					/* Bold + background tint for header */
 					{
 						int hi;
@@ -1431,17 +1528,13 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 					}
 					break;
 
-				case TABLE_ROW_LAST:
-					/* Last row: └ ┴ ┘ */
-					if (pipe_count == 1) {
-						viewmode_substitute[pipe_positions[0]] = 0x2514; /* └ */
-					} else {
-						viewmode_substitute[pipe_positions[0]] = 0x2514; /* └ first */
-						int pi;
-						for (pi = 1; pi < pipe_count - 1; pi++)
-							viewmode_substitute[pipe_positions[pi]] = 0x2534; /* ┴ middle */
-						viewmode_substitute[pipe_positions[pipe_count - 1]] = 0x2518; /* ┘ last */
-					}
+			case TABLE_ROW_LAST:
+				/* Last row: │ for all pipes */
+				{
+					int pi;
+					for (pi = 0; pi < pipe_count; pi++)
+						viewmode_substitute[pipe_positions[pi]] = 0x2502; /* │ */
+				}
 					break;
 
 				default:
@@ -1505,16 +1598,31 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 		while (i < line_len) {
 			if (line[i] == '`') {
 				int start = i;
-				++i;
-				while (i < line_len && line[i] != '`')
+				int bcnt = 0;
+				while (i < line_len && line[i] == '`') {
+					++bcnt;
 					++i;
-				if (i < line_len) {
-					/* Mark the code span content (not the backticks) */
-					int j;
-					for (j = start + 1; j < i; j++)
-						in_code[j] = 1;
-					++i; /* skip closing backtick */
 				}
+				/* Find matching closing run of same backtick count */
+				int found_close = 0;
+				while (i <= line_len - bcnt) {
+					if (line[i] == '`') {
+						int k;
+						for (k = 0; k < bcnt && i + k < line_len && line[i + k] == '`'; k++)
+							;
+						if (k == bcnt) {
+							int j;
+							for (j = start + bcnt; j < i; j++)
+								in_code[j] = 1;
+							i += bcnt;
+							found_close = 1;
+							break;
+						}
+					}
+					++i;
+				}
+				if (!found_close)
+					i = start + bcnt;
 			} else {
 				++i;
 			}
@@ -1622,20 +1730,30 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 						}
 						++j;
 					}
-				} else if (line[j] == '*' || line[j] == '_') {
-					/* Single * or _ for italic */
-					viewmode_hide[j] = 1;
-					char delim = (char)line[j];
+			} else if (line[j] == '*' || line[j] == '_') {
+				char delim = (char)line[j];
+				/* Skip if part of a longer run (handled by bold/bold+italic arms) */
+				if (j + 1 < line_len && line[j + 1] == delim) {
 					++j;
-					while (j < line_len) {
-						if (in_code[j]) { ++j; continue; }
-						if (line[j] == delim) {
-							viewmode_hide[j] = 1;
-							++j;
+					continue;
+				}
+				/* Single * or _ for italic */
+				viewmode_hide[j] = 1;
+				++j;
+				while (j < line_len) {
+					if (in_code[j]) { ++j; continue; }
+					if (line[j] == delim) {
+						/* If closing delimiter is part of a longer run
+						 * (e.g. part of star-star), break so the outer
+						 * loop processes remaining delimiter chars */
+						if (j + 1 < line_len && line[j + 1] == delim)
 							break;
-						}
+						viewmode_hide[j] = 1;
 						++j;
+						break;
 					}
+					++j;
+				}
 				} else {
 					++j;
 				}
@@ -1646,21 +1764,39 @@ skip_emphasis:
 	if (in_code)
 		joe_free(in_code);
 
-	/* Feature 1.5: Inline code backticks */
+	/* Feature 1.5: Inline code backticks — hide matching runs */
 	{
 		int i = 0;
 		while (i < line_len) {
 			if (line[i] == '`') {
-				viewmode_hide[i] = 1;
-				++i;
-				while (i < line_len) {
+				int start = i;
+				int bcnt = 0;
+				while (i < line_len && line[i] == '`') {
+					++bcnt;
+					++i;
+				}
+				/* Find matching closing run of same backtick count */
+				int found_close = 0;
+				while (i <= line_len - bcnt) {
 					if (line[i] == '`') {
-						viewmode_hide[i] = 1;
-						++i;
-						break;
+						int k;
+						for (k = 0; k < bcnt && i + k < line_len && line[i + k] == '`'; k++)
+							;
+						if (k == bcnt) {
+							int j;
+							for (j = start; j < start + bcnt; j++)
+								viewmode_hide[j] = 1;
+							for (j = i; j < i + bcnt; j++)
+								viewmode_hide[j] = 1;
+							i += bcnt;
+							found_close = 1;
+							break;
+						}
 					}
 					++i;
 				}
+				if (!found_close)
+					i = start + bcnt;
 			} else {
 				++i;
 			}
@@ -1698,18 +1834,21 @@ skip_emphasis:
 							url[url_len] = '\0';
 
 							/* Ensure link URL array is sized */
-							if (!viewmode_link_url || viewmode_link_url_size != line_len) {
+							if (!viewmode_link_url || viewmode_link_url_size < line_len) {
 								viewmode_free_link_urls();
-								if (viewmode_link_url)
-									joe_free(viewmode_link_url);
-								viewmode_link_url_size = line_len;
-								viewmode_link_url = (char **)joe_malloc((ptrdiff_t)line_len * (ptrdiff_t)sizeof(char *));
-								if (!viewmode_link_url) {
+								char **nl = (char **)joe_realloc(viewmode_link_url, (ptrdiff_t)line_len * (ptrdiff_t)sizeof(char *));
+								if (!nl) {
 									joe_free(url);
 									i = k + 1;
 									continue;
 								}
-								memset(viewmode_link_url, 0, (size_t)line_len * sizeof(char *));
+								viewmode_link_url = nl;
+								/* Ensure newly grown region is NULLed. */
+								if (viewmode_link_url_size < line_len) {
+									memset(viewmode_link_url + viewmode_link_url_size, 0,
+									       (size_t)(line_len - viewmode_link_url_size) * sizeof(char *));
+								}
+								viewmode_link_url_size = line_len;
 							}
 
 							/* Store URL for each link text character */
@@ -1742,17 +1881,19 @@ skip_emphasis:
 						viewmode_hide[k] = 1;   /* ] */
 
 						/* Ensure link URL array is sized */
-						if (!viewmode_link_url || viewmode_link_url_size != line_len) {
+						if (!viewmode_link_url || viewmode_link_url_size < line_len) {
 							viewmode_free_link_urls();
-							if (viewmode_link_url)
-								joe_free(viewmode_link_url);
-							viewmode_link_url_size = line_len;
-							viewmode_link_url = (char **)joe_malloc((ptrdiff_t)line_len * (ptrdiff_t)sizeof(char *));
-							if (!viewmode_link_url) {
+							char **nl = (char **)joe_realloc(viewmode_link_url, (ptrdiff_t)line_len * (ptrdiff_t)sizeof(char *));
+							if (!nl) {
 								i = k + 1;
 								continue;
 							}
-							memset(viewmode_link_url, 0, (size_t)line_len * sizeof(char *));
+							viewmode_link_url = nl;
+							if (viewmode_link_url_size < line_len) {
+								memset(viewmode_link_url + viewmode_link_url_size, 0,
+								       (size_t)(line_len - viewmode_link_url_size) * sizeof(char *));
+							}
+							viewmode_link_url_size = line_len;
 						}
 
 						/* Store ref as URL for OSC 8 (will be resolved later) */
@@ -1790,17 +1931,17 @@ skip_emphasis:
 		 * Accounts for hidden delimiters and Unicode substitutions. */
 		{
 		/* Ensure column map is the right size */
-			if (!viewmode_col_map || viewmode_col_map_size != line_len) {
-				viewmode_col_map_size = line_len > 0 ? line_len : 1;
-				if (viewmode_col_map)
-					joe_free(viewmode_col_map);
-				viewmode_col_map = (off_t *)joe_malloc((ptrdiff_t)viewmode_col_map_size * (ptrdiff_t)sizeof(off_t));
-				if (!viewmode_col_map) {
+			if (!viewmode_col_map || viewmode_col_map_size < (line_len > 0 ? line_len : 1)) {
+				int need = line_len > 0 ? line_len : 1;
+				off_t *nm = (off_t *)joe_realloc(viewmode_col_map, (ptrdiff_t)need * (ptrdiff_t)sizeof(off_t));
+				if (!nm) {
 					/* OOM — continue rendering without cursor mapping */
 					viewmode_col_map_size = 0;
 					viewmode_col_map_line = -1;
 					goto done;
 				}
+				viewmode_col_map = nm;
+				viewmode_col_map_size = need;
 			}
 
 		/* Build the mapping: for each buffer byte, compute display column */
@@ -1833,14 +1974,15 @@ done:
 	{
 		off_t buf_line = bw->top->line + y - bw->y;
 		if (viewmode_col_map_line != buf_line) {
-			if (!viewmode_col_map || viewmode_col_map_size != line_len) {
-				viewmode_col_map_size = line_len > 0 ? line_len : 1;
-				if (viewmode_col_map)
-					joe_free(viewmode_col_map);
-				viewmode_col_map = (off_t *)joe_malloc((ptrdiff_t)viewmode_col_map_size * (ptrdiff_t)sizeof(off_t));
-				if (!viewmode_col_map) {
+			if (!viewmode_col_map || viewmode_col_map_size < (line_len > 0 ? line_len : 1)) {
+				int need = line_len > 0 ? line_len : 1;
+				off_t *nm = (off_t *)joe_realloc(viewmode_col_map, (ptrdiff_t)need * (ptrdiff_t)sizeof(off_t));
+				if (!nm) {
 					viewmode_col_map_size = 0;
 					viewmode_col_map_line = -1;
+				} else {
+					viewmode_col_map = nm;
+					viewmode_col_map_size = need;
 				}
 			}
 			if (viewmode_col_map) {
@@ -1913,11 +2055,11 @@ done:
 
 	/* Clear hide map for next line */
 	if (viewmode_hide)
-		memset(viewmode_hide, 0, viewmode_hide_size);
+		memset(viewmode_hide, 0, (size_t)(line_len > 0 ? line_len : 1));
 
 	/* Clear substitution map for next line */
 	if (viewmode_substitute)
-		memset(viewmode_substitute, 0, (size_t)viewmode_substitute_size * sizeof(int));
+		memset(viewmode_substitute, 0, (size_t)(line_len > 0 ? line_len : 1) * sizeof(int));
 
 	/* Free link URL strings for next line (keep array allocated) */
 	viewmode_free_link_urls();

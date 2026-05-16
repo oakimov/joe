@@ -1,7 +1,7 @@
 # Markdown WYSIWYG Enhancement — Task List
 
 > **Source:** `plans/markdown-wysiwyg-feasibility.md`
-> **Status:** Phase 1 complete (Features 1.1–1.10). Phase 2 Feature 2.1 complete. Features 2.2–2.4 pending.
+> **Status:** Phase 1 complete (Features 1.1–1.10). Phase 2 Feature 2.1 complete. Feature 2.2 complete. Features 2.3–2.5 pending.
 > **Constraint:** C only, libc only. No external dependencies.
 
 ---
@@ -122,31 +122,43 @@ Goal: Full visual polish — Unicode table borders, nested syntax highlighting i
 - [x] **2.1.8** Handle alignment indicators (`:---`, `:---:`, `---:`) — strip them from display but remember alignment for future cell padding → Colons and dashes in separator row replaced with ─
 - [x] **2.1.9** Test: render a 4-column table with header, separator, and 5+ body rows; verify complete box-drawing border and alternating row colors → 123 tests passing (6 new table tests added)
 
-### Feature 2.2 — Nested Syntax Highlighting in Code Blocks
+### Feature 2.2 - Full Table Layout Engine (terminal-grade rendering) ❌ NOT STARTED
+`[depends on 1.1, 1.9, 2.1, 1.10]` `[independent within phase]`
+
+- [ ] **2.2.1** Build a table layout pass in `lgen_view()` that parses each table row into logical cells (not just delimiter substitution), preserving escaped pipes and inline markdown styling per cell
+- [ ] **2.2.2** Compute visible display width per column using Unicode cell width (`wcwidth`) and derive stable column widths for the entire table region
+- [ ] **2.2.3** Render padded cells so each column is visually aligned across all rows, with consistent left/right interior padding and continuous vertical borders
+- [ ] **2.2.4** Honor alignment markers from separator rows (`:---`, `:---:`, `---:`) by left/center/right-aligning cell content within computed column widths
+- [ ] **2.2.5** Handle narrow terminals: define deterministic behavior (clip, wrap, or horizontal scroll fallback) while keeping borders intact and preventing broken junctions
+- [ ] **2.2.6** Support multiline/wrapped cell rendering with row height expansion so wrapped lines remain inside their column boundaries
+- [ ] **2.2.7** Keep cursor/edit mapping correct in view mode for padded/wrapped table rows by extending `viewmode_col_map[]` to logical-cell layout output
+- [ ] **2.2.8** Test: add golden-render tests for the expected "should-be" visual table shape (header, separator, body, alignment, wrapping, narrow terminal) and verify no regressions when view mode is off
+
+### Feature 2.3 — Nested Syntax Highlighting in Code Blocks
 `[depends on 1.1, 1.2, 1.5]` `[independent within phase]`
 
-- [ ] **2.2.1** Extend the `md.jsf` fenced code block DFA state to capture the language identifier token (e.g., `python`, `c`, `javascript`)
-- [ ] **2.2.2** Use the existing `call` mechanism in the syntax DFA to invoke the appropriate sub-syntax (e.g., `call "c.jsf"` for ` ```c ` blocks)
-- [ ] **2.2.3** For unrecognized language identifiers, fall back to the plain code block highlighting from Feature 1.2
-- [ ] **2.2.4** Implement sub-syntax return: when the closing ` ``` ` is encountered, return to the parent markdown syntax DFA state
-- [ ] **2.2.5** Test: create a markdown file with ` ```c `, ` ```python `, and ` ```javascript ` blocks; verify each block has language-appropriate syntax highlighting
+- [ ] **2.3.1** Extend the `md.jsf` fenced code block DFA state to capture the language identifier token (e.g., `python`, `c`, `javascript`)
+- [ ] **2.3.2** Use the existing `call` mechanism in the syntax DFA to invoke the appropriate sub-syntax (e.g., `call "c.jsf"` for ` ```c ` blocks)
+- [ ] **2.3.3** For unrecognized language identifiers, fall back to the plain code block highlighting from Feature 1.2
+- [ ] **2.3.4** Implement sub-syntax return: when the closing ` ``` ` is encountered, return to the parent markdown syntax DFA state
+- [ ] **2.3.5** Test: create a markdown file with ` ```c `, ` ```python `, and ` ```javascript ` blocks; verify each block has language-appropriate syntax highlighting
 
-### Feature 2.3 — Smart Paragraph Spacing in View Mode
+### Feature 2.4 — Smart Paragraph Spacing in View Mode
 `[depends on 1.1]` `[independent within phase]`
 
-- [ ] **2.3.1** In `lgen_view()`, detect blank lines between paragraphs and render them as a visual gap (optionally add a faint separator line)
-- [ ] **2.3.2** Detect tight line breaks (two spaces at end of line followed by newline) and render as a continuation without visual gap
-- [ ] **2.3.3** Add vertical padding above headings by rendering an extra blank line before H1/H2 headings (cosmetic, buffer unchanged)
-- [ ] **2.3.4** Test: verify paragraph spacing, tight line breaks, and heading padding all render correctly in view mode
+- [ ] **2.4.1** In `lgen_view()`, detect blank lines between paragraphs and render them as a visual gap (optionally add a faint separator line)
+- [ ] **2.4.2** Detect tight line breaks (two spaces at end of line followed by newline) and render as a continuation without visual gap
+- [ ] **2.4.3** Add vertical padding above headings by rendering an extra blank line before H1/H2 headings (cosmetic, buffer unchanged)
+- [ ] **2.4.4** Test: verify paragraph spacing, tight line breaks, and heading padding all render correctly in view mode
 
-### Feature 2.4 — Image Link Rendering
+### Feature 2.5 — Image Link Rendering
 `[depends on 1.1, 1.6]` `[independent within phase]`
 
-- [ ] **2.4.1** Detect image syntax `![alt text](url)` in `lgen_view()`
-- [ ] **2.4.2** Replace the `!` with a Unicode image indicator `🖼` or `[IMG]` text
-- [ ] **2.4.3** Display the alt text in italic + dim color
-- [ ] **2.4.4** Skip rendering the URL portion (or show it in very dim text on hover if possible)
-- [ ] **2.4.5** Test: verify `![Photo](cat.jpg)` renders as an image indicator with alt text in view mode
+- [ ] **2.5.1** Detect image syntax `![alt text](url)` in `lgen_view()`
+- [ ] **2.5.2** Replace the `!` with a Unicode image indicator `🖼` or `[IMG]` text
+- [ ] **2.5.3** Display the alt text in italic + dim color
+- [ ] **2.5.4** Skip rendering the URL portion (or show it in very dim text on hover if possible)
+- [ ] **2.5.5** Test: verify `![Photo](cat.jpg)` renders as an image indicator with alt text in view mode
 
 ---
 

@@ -1978,6 +1978,8 @@ done:
 				int need = line_len > 0 ? line_len : 1;
 				off_t *nm = (off_t *)joe_realloc(viewmode_col_map, (ptrdiff_t)need * (ptrdiff_t)sizeof(off_t));
 				if (!nm) {
+					if (viewmode_col_map) joe_free(viewmode_col_map);
+					viewmode_col_map = NULL;
 					viewmode_col_map_size = 0;
 					viewmode_col_map_line = -1;
 				} else {
@@ -1985,7 +1987,7 @@ done:
 					viewmode_col_map_size = need;
 				}
 			}
-			if (viewmode_col_map) {
+			if (viewmode_col_map && viewmode_col_map_size >= (line_len > 0 ? line_len : 1)) {
 				off_t display_col = 0;
 				int i;
 				for (i = 0; i < line_len; i++) {

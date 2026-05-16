@@ -279,7 +279,8 @@ def startJoe(joeexe, args=None):
     env['LINES'] = str(args.lines)
     env['COLUMNS'] = str(args.columns)
     env['TERM'] = 'ansi'
-    env['LANG'] = 'en_US.UTF-8'
+    env["LANG"] = "en_US.UTF-8"
+    env["ASAN_OPTIONS"] = "log_path=/tmp/asan_report:abort_on_error=1:halt_on_error=1"
     env['SHELL'] = os.getenv('SHELL', '/bin/sh')
 
     env.update(args.env)

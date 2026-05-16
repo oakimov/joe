@@ -515,7 +515,7 @@ void texec(CAP *cap, const char *s, ptrdiff_t l, ptrdiff_t a0, ptrdiff_t a1, ptr
 	ptrdiff_t x;
 	long tenth = 0;
 	ptrdiff_t args[4];
-	ptrdiff_t vars[128];
+	ptrdiff_t vars[256];
 	ptrdiff_t *a = args;
 
 /* Do nothing if there is no string */
@@ -619,7 +619,7 @@ void texec(CAP *cap, const char *s, ptrdiff_t l, ptrdiff_t a0, ptrdiff_t a1, ptr
 				--a;
 				break;
 			case 'a':
-				x = s[2];
+				x = (unsigned char)s[2];
 				if (s[1] == 'p')
 					x = a[x - 0100];
 				switch (*s) {

@@ -38,6 +38,30 @@ To remove all generated artifacts (configure, Makefiles, compiled objects, etc.)
 make distclean && rm -f configure aclocal.m4 config.guess config.sub depcomp install-sh missing compile
 ```
 
+## Testing
+
+Tests must be executed as:
+
+```sh
+cd tests/ && python3 -m unittest tests.py -v
+```
+
+Do not use `pytest` — the test harness (`joefx/testbase.py`) is incompatible with it. Use the standard `unittest` runner only.
+
+## Post-Feature Code Review
+
+After completing any feature, critically review all changed code before committing:
+
+- **Memory leaks**: every `joe_malloc`/`joe_realloc` must have a corresponding `joe_free` on all paths (including error/early-return paths)
+- **Buffer overflows**: all array accesses must be bounds-checked; `realloc` failure must not leave dangling pointers
+- **Security issues**: sanitize all external input (URLs, file paths, terminal escape sequences); prevent format string and injection vulnerabilities
+- **Redundant code**: remove dead functions, unused variables, duplicate logic, unreachable branches
+- **Extreme inputs**: verify correct behavior with huge files (10,000+ lines), extremely long lines (1MB+), pathological Unicode (zero-width, combining, surrogate), and OOM conditions (malloc/realloc returning NULL)
+- **Unlikely scenarios**: terminal resize during rendering, concurrent buffer modifications, nested syntax call stack overflow, malformed markdown constructs, empty files, files with no trailing newline
+- **Compiler warnings**: zero warnings allowed (`-Wall -Wconversion -Wunused -Wshadow` etc.)
+
+Fix every issue found regardless of how small it is. Do not introduce new issues in the process.
+
 ## Working on This Project
 
 This codebase has well-structured components and many independent tasks. When working on features that can be executed in parallel, use **subagents** to speed up work:

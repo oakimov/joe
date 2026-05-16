@@ -545,6 +545,8 @@ int ttcheck(void)
 			fcntl(mpxfd, F_SETFL, O_NDELAY);
 			if (read(mpxfd, &pack, pack.data - (char *)&pack) > 0) {
 				fcntl(mpxfd, F_SETFL, 0);
+				if (pack.size < 0 || pack.size > sizeof(pack.data))
+					pack.size = sizeof(pack.data);
 				joe_read(mpxfd, pack.data, pack.size);
 				have = 1;
 				acceptch = pack.ch;
@@ -666,6 +668,8 @@ char ttgetc(void)
 			mystat = read(mpxfd, &pack, pack.data - (char *)&pack);
 
 			if (pack.size && mystat > 0) {
+				if (pack.size < 0 || pack.size > sizeof(pack.data))
+					pack.size = sizeof(pack.data);
 				joe_read(mpxfd, pack.data, pack.size);
 			} else if (mystat < 1) {
 				if (winched || ticked)

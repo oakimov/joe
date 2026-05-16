@@ -80,7 +80,7 @@ int main(int argc, char *argv[])
                             else if ((c >= 32 && c <= 126) || c == '\t')
                                 putchar(c);
                             else
-                                printf("\\x%2.2x", c);
+                                printf("\\%03o", c);
                             if (c == '\n') {
                                 printf("\"\n");
                                 instring = 0;
@@ -99,7 +99,7 @@ int main(int argc, char *argv[])
             else if ((c >= 32 && c <= 126) || c == '\t')
                 putchar(c);
             else
-                printf("\\x%2.2x", c);
+                printf("\\%03o", c);
             if (c == '\n') {
                 printf("\"\n");
                 instring = 0;

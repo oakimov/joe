@@ -212,6 +212,10 @@ int edloop(int flg)
 		}
 
 		/* exemac could have invalidated bw, but hopefully not from paste */
+		if (!leave && maint->curwin->watom->what & (TYPETW | TYPEPW))
+			bw = (BW *)maint->curwin->object;
+		else
+			bw = 0;
 		if (bw && !bw->pasting) exemac_pasting(0); /* okay, done for now */
 
 		/* trailing part of disabled autoindent */

@@ -526,6 +526,14 @@ static int table_col_count = 0;		/* Number of columns in the table */
 static unsigned char *viewmode_scan_buf = NULL;	/* Persistent buffer for table scan */
 static ptrdiff_t viewmode_scan_buf_size = 0;
 
+/* Feature 2.2: Table layout engine — per-column widths and alignment */
+#define MAX_TABLE_COLS 64
+static int table_col_width[MAX_TABLE_COLS];	/* Max display width per column */
+static int table_col_align[MAX_TABLE_COLS];	/* 0=left, 1=center, 2=right */
+
+/* When non-zero, lgen_view rendered the table row to screen directly. */
+static int viewmode_table_rendered = 0;
+
 /* Feature 1.10: Get display column for a buffer position in view mode.
  * Returns -1 if not in view mode or map not available. */
 off_t viewmode_display_col(off_t buf_line, off_t buf_offset)
@@ -600,6 +608,14 @@ void viewmode_cleanup(void)
 	table_separator_line = -1;
 	table_cached_for_line = -1;
 	table_col_count = 0;
+	viewmode_table_rendered = 0;
+	{
+		int _vi;
+		for (_vi = 0; _vi < MAX_TABLE_COLS; _vi++) {
+			table_col_width[_vi] = 0;
+			table_col_align[_vi] = 0;
+		}
+	}
 	if (viewmode_scan_buf) {
 		joe_free(viewmode_scan_buf);
 		viewmode_scan_buf = NULL;
@@ -1074,6 +1090,222 @@ no_parse:
 	return 0;
 }
 
+/* Feature 2.2: Render a table row with padded columns, alignment, and
+ * box-drawing borders.  Writes directly to the screen buffer because the
+ * padded output is wider than the original buffer line.  After this
+ * returns, caller should advance p past the line and skip lgen_core.
+ * Also builds viewmode_col_map for cursor positioning. */
+static void render_padded_table_row(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, ptrdiff_t x, ptrdiff_t w, BW *bw, const unsigned char *line, int line_len, table_row_type_t row_type)
+{
+	int pipe_pos[MAX_TABLE_COLS];
+	int pipe_count = 0;
+	int ti;
+	for (ti = 0; ti < line_len && pipe_count < MAX_TABLE_COLS; ti++) {
+		if (line[ti] == '|')
+			pipe_pos[pipe_count++] = ti;
+	}
+	if (pipe_count == 0) return;
+	int ncols = pipe_count - 1;
+	if (ncols > MAX_TABLE_COLS) ncols = MAX_TABLE_COLS;
+	int defatr = (bw->o.hiline && bw->cursor->line == y - bw->y + bw->top->line) ? (bg_text & curlinmask) | bg_curlin : bg_text;
+	int base_atr = BG_COLOR(defatr);
+	if (row_type == TABLE_ROW_HEADER) base_atr |= BOLD;
+	/* Parse each cell: trimmed byte range and display width */
+	int ci;
+	struct { int start; int end; int width; } cells[MAX_TABLE_COLS];
+	for (ci = 0; ci < ncols; ci++) {
+		int cs = pipe_pos[ci] + 1;
+		int ce = (ci + 1 < pipe_count) ? pipe_pos[ci + 1] : line_len;
+		int ts = cs;
+		while (ts < ce && (line[ts] == ' ' || line[ts] == '\t')) ++ts;
+		int te = ce - 1;
+		while (te >= ts && (line[te] == ' ' || line[te] == '\t')) --te;
+		te++;
+		cells[ci].start = ts;
+		cells[ci].end = te;
+		int width = 0;
+		if (ts < te) {
+			const char *cp = (const char *)(line + ts);
+			ptrdiff_t rem = (ptrdiff_t)(te - ts);
+			while (rem > 0) {
+				int c = utf8_decode_fwrd(&cp, &rem);
+				if (c >= 0) {
+					int cw = joe_wcwidth(1, c);
+					if (cw > 0) width += cw;
+				}
+			}
+		}
+		cells[ci].width = width;
+	}
+	int col;
+
+
+
+	/* Compute total rendered width */
+	int total_width = 0;
+	for (col = 0; col < ncols && col < MAX_TABLE_COLS; col++)
+		total_width += 3 + (col < MAX_TABLE_COLS ? table_col_width[col] : 0);
+	total_width += 1; /* closing border */
+	/* Clip to available width */
+	ptrdiff_t max_col = w - x;
+	if (total_width > max_col)
+		total_width = (int)max_col;
+	if (total_width <= 0) return;
+
+	/* Feature 2.2: Separator rows — box-drawing joints with dashes matching column widths */
+	if (row_type == TABLE_ROW_SEPARATOR) {
+		ptrdiff_t oc = x;
+		for (col = 0; col < ncols && oc < x + total_width; col++) {
+			int cw = (col < MAX_TABLE_COLS) ? table_col_width[col] : 0;
+			int seg_w = cw + 2;
+			if (oc + 1 + seg_w > x + total_width) break;
+			int joint = (col == 0) ? 0x251C : 0x253C;
+			outatr(bw->b->o.charmap, t, screen + oc, attr + oc, oc, y, joint, base_atr);
+			oc++;
+			int di;
+			for (di = 0; di < seg_w && oc < x + total_width; di++) {
+				outatr(bw->b->o.charmap, t, screen + oc, attr + oc, oc, y, 0x2500, base_atr);
+				oc++;
+			}
+		}
+		if (oc < x + total_width)
+			outatr(bw->b->o.charmap, t, screen + oc, attr + oc, oc, y, 0x2524, base_atr);
+		outatr_complete(t);
+		return;
+	}
+
+	/* Render */
+	ptrdiff_t oc = x;
+	for (col = 0; col < ncols && oc < x + total_width; col++) {
+		int cw = (col < MAX_TABLE_COLS) ? table_col_width[col] : 0;
+		if (cw < cells[col].width) cw = cells[col].width; /* clamp to at least content width */
+		/* Ensure there's room for border + left_pad + content + right_pad */
+		if (oc + 1 + 1 + cw + 1 > x + total_width) break;
+		/* Border │ */
+		outatr(bw->b->o.charmap, t, screen + oc, attr + oc, oc, y, 0x2502, base_atr);
+		oc++;
+		/* Left padding */
+		outatr(bw->b->o.charmap, t, screen + oc, attr + oc, oc, y, ' ', base_atr);
+		oc++;
+		/* Padded content */
+		int align = (col < MAX_TABLE_COLS) ? table_col_align[col] : 0;
+		int avail = cw;
+		int cwidth = cells[col].width;
+		if (cwidth > avail) cwidth = avail;
+		int pad_total = avail - cwidth;
+		int pad_left = 0, pad_right = pad_total;
+		if (align == 1) {
+			pad_left = pad_total / 2;
+			pad_right = pad_total - pad_left;
+		} else if (align == 2) {
+			pad_left = pad_total;
+			pad_right = 0;
+		}
+		/* Alignment pad (left) */
+		int pi;
+		for (pi = 0; pi < pad_left && oc < x + total_width; pi++) {
+			outatr(bw->b->o.charmap, t, screen + oc, attr + oc, oc, y, ' ', base_atr);
+			oc++;
+		}
+		/* Cell content */
+		if (cells[col].start < cells[col].end) {
+			const char *cp = (const char *)(line + cells[col].start);
+			ptrdiff_t rem = (ptrdiff_t)(cells[col].end - cells[col].start);
+			while (rem > 0 && oc < x + total_width) {
+				int c = utf8_decode_fwrd(&cp, &rem);
+				if (c >= 0) {
+					int cww = joe_wcwidth(1, c);
+					if (cww > 0) {
+						if (oc + cww <= x + total_width) {
+							outatr(bw->b->o.charmap, t, screen + oc, attr + oc, oc, y, c, base_atr);
+							oc += cww;
+						} else break;
+					}
+				}
+			}
+		}
+		/* Alignment pad (right) */
+		for (pi = 0; pi < pad_right && oc < x + total_width; pi++) {
+			outatr(bw->b->o.charmap, t, screen + oc, attr + oc, oc, y, ' ', base_atr);
+			oc++;
+		}
+		/* Right padding (always 1 space) */
+		if (oc < x + total_width) {
+			outatr(bw->b->o.charmap, t, screen + oc, attr + oc, oc, y, ' ', base_atr);
+			oc++;
+		}
+	}
+	/* Closing border */
+	if (oc < x + total_width)
+		outatr(bw->b->o.charmap, t, screen + oc, attr + oc, oc, y, 0x2502, base_atr);
+	outatr_complete(t);
+
+	/* Build viewmode_col_map for cursor positioning */
+	if (viewmode_col_map && viewmode_col_map_size >= (line_len > 0 ? line_len : 1)) {
+		int bi;
+		for (bi = 0; bi < line_len; bi++)
+			viewmode_col_map[bi] = 0;
+		/* Compute display start column for each cell's content area */
+		int content_display_start[MAX_TABLE_COLS];
+		int col_start_disp = (int)x;
+		int cj;
+		for (cj = 0; cj < ncols; cj++) {
+			content_display_start[cj] = col_start_disp;
+			int cw_ = (cj < MAX_TABLE_COLS) ? table_col_width[cj] : 0;
+			if (cw_ < cells[cj].width) cw_ = cells[cj].width;
+			col_start_disp += 3 + cw_;
+		}
+		for (cj = 0; cj < ncols; cj++) {
+			int base = content_display_start[cj];
+			int cw_ = (cj < MAX_TABLE_COLS) ? table_col_width[cj] : 0;
+			if (cw_ < cells[cj].width) cw_ = cells[cj].width;
+			int pad_t = cw_ - cells[cj].width;
+			if (pad_t < 0) pad_t = 0;
+			int pl = 0;
+			int al_ = (cj < MAX_TABLE_COLS) ? table_col_align[cj] : 0;
+			if (al_ == 1) { pl = pad_t / 2; }
+			else if (al_ == 2) { pl = pad_t; }
+			/* Pipe position maps to border */
+			if (cj < pipe_count)
+				viewmode_col_map[pipe_pos[cj]] = base;
+			/* Content area: border(1) + left_pad(1) + pad_left */
+			int content_col = base + 1 + 1 + pl;
+			/* Walk content bytes and map each to display column */
+			int buf_i = cells[cj].start;
+			const char *cp_ = (const char *)(line + cells[cj].start);
+			ptrdiff_t rem_ = (ptrdiff_t)(cells[cj].end - cells[cj].start);
+			while (rem_ > 0 && buf_i < cells[cj].end) {
+				int ch_ = utf8_decode_fwrd(&cp_, &rem_);
+				if (ch_ >= 0) {
+					int cww_ = joe_wcwidth(1, ch_);
+					if (cww_ > 0) {
+						while (buf_i < cells[cj].end && (const char *)(line + buf_i) < cp_) {
+							if (buf_i < line_len)
+								viewmode_col_map[buf_i] = content_col;
+							buf_i++;
+						}
+						content_col += cww_;
+					} else {
+						while (buf_i < cells[cj].end && (const char *)(line + buf_i) < cp_) {
+							if (buf_i < line_len)
+								viewmode_col_map[buf_i] = content_col;
+							buf_i++;
+						}
+					}
+				}
+			}
+			/* Remaining bytes before next pipe map to end of content area */
+			int content_end_col = base + 1 + 1 + cw_ + 1; /* after right_pad space */
+			int next_pipe = (cj + 1 < pipe_count) ? pipe_pos[cj + 1] : line_len;
+			while (buf_i < next_pipe && buf_i < line_len) {
+				viewmode_col_map[buf_i] = content_end_col;
+				buf_i++;
+			}
+		}
+		viewmode_col_map_line = bw->top->line + y - bw->y;
+	}
+}
+
 /* Markdown view mode rendering */
 /* Features 1.3-1.8: Hide/transform markdown delimiters in view mode */
 static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,HIGHLIGHT_STATE st,BW *bw)
@@ -1340,11 +1572,47 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 				table_region_end = -1;
 				table_separator_line = -1;
 				table_col_count = 0;
+				{
+					int _vi;
+					for (_vi = 0; _vi < MAX_TABLE_COLS; _vi++) {
+						table_col_width[_vi] = 0;
+						table_col_align[_vi] = 0;
+					}
+				}
+
+				/* Try to find the table start by scanning backward from current line */
+				off_t backward_first = -1;
+				{
+					P *back = pdup(p, "back_scan");
+					p_goto_bol(back);
+					int bc0;
+					while ((bc0 = pgetb(back)) != NO_MORE_DATA && (bc0 == ' ' || bc0 == '\t'));
+					if (bc0 == '|') {
+						backward_first = buf_line;
+						off_t bl = buf_line - 1;
+						while (bl >= 0 && buf_line - bl <= 50) {
+							pline(back, bl);
+							p_goto_bol(back);
+							int bc1;
+							while ((bc1 = pgetb(back)) != NO_MORE_DATA && (bc1 == ' ' || bc1 == '\t'));
+							if (bc1 == '|') {
+								backward_first = bl;
+								bl--;
+							} else {
+								break;
+							}
+						}
+					}
+					prm(back);
+				}
 
 				/* Scan ahead from current line to find a table region */
 				P *scan = pdup(p, "table_scan");
+				if (backward_first != -1) {
+					pline(scan, backward_first);
+				}
 				p_goto_bol(scan);
-				off_t scan_line = buf_line;
+				off_t scan_line = (backward_first != -1) ? backward_first : buf_line;
 				off_t first_table_line = -1;
 				off_t sep_line = -1;
 				int consecutive = 0;
@@ -1424,6 +1692,61 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 							for (ci = 0; ci < ll; ci++)
 								if (lb[ci] == '|') pipes++;
 							col_cnt = pipes > 0 ? pipes - 1 : 1;
+							/* Extract column alignment from separator row */
+							{
+								int pipe_pos[MAX_TABLE_COLS];
+								int np = 0;
+								for (ci = 0; ci < ll && np < MAX_TABLE_COLS; ci++)
+									if (lb[ci] == '|') pipe_pos[np++] = ci;
+								int max_col = np > 0 ? np - 1 : 0;
+								if (max_col > MAX_TABLE_COLS) max_col = MAX_TABLE_COLS;
+								int k;
+								for (k = 0; k < max_col; k++) {
+									int cs = pipe_pos[k] + 1;
+									int ce = (k + 1 < np) ? pipe_pos[k + 1] : ll;
+									if (cs >= ce) continue;
+									int has_left = (lb[cs] == ':') ? 1 : 0;
+									int has_right = (lb[ce - 1] == ':') ? 1 : 0;
+									if (has_left && has_right)
+										table_col_align[k] = 1; /* center */
+									else if (has_right)
+										table_col_align[k] = 2; /* right */
+								}
+							}
+						} else {
+							/* Feature 2.2: Track per-column display widths */
+							int pipe_pos[MAX_TABLE_COLS];
+							int np = 0;
+							int ci2;
+							for (ci2 = 0; ci2 < ll && np < MAX_TABLE_COLS; ci2++)
+								if (lb[ci2] == '|') pipe_pos[np++] = ci2;
+							int max_col = np > 0 ? np - 1 : 0;
+							if (max_col > MAX_TABLE_COLS) max_col = MAX_TABLE_COLS;
+							int k;
+							for (k = 0; k < max_col; k++) {
+								int cs = pipe_pos[k] + 1;
+								int ce = (k + 1 < np) ? pipe_pos[k + 1] : ll;
+								/* Trim leading/trailing whitespace */
+								int ts = cs;
+								while (ts < ce && (lb[ts] == ' ' || lb[ts] == '\t')) ++ts;
+								int te = ce - 1;
+								while (te >= ts && (lb[te] == ' ' || lb[te] == '\t')) --te;
+								te++;
+								int width = 0;
+								if (ts < te) {
+									const char *cp = (const char *)(lb + ts);
+									ptrdiff_t rem = (ptrdiff_t)(te - ts);
+									while (rem > 0) {
+										int ucw = utf8_decode_fwrd(&cp, &rem);
+										if (ucw >= 0) {
+											int cw = joe_wcwidth(1, ucw);
+											if (cw > 0) width += cw;
+										}
+									}
+								}
+								if (width > table_col_width[k])
+									table_col_width[k] = width;
+							}
 						}
 
 							consecutive++;
@@ -1471,32 +1794,24 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 		}
 
 		if (row_type != TABLE_ROW_NONE) {
-			/* Find pipe positions in this line */
-			int pipe_positions[32];
-			int pipe_count = 0;
-			int ti;
-			for (ti = 0; ti < line_len && pipe_count < 32; ti++) {
-				if (line[ti] == '|')
-					pipe_positions[pipe_count++] = ti;
-			}
-
-			if (pipe_count > 0) {
-				switch (row_type) {
-			case TABLE_ROW_HEADER:
-				/* First row: │ for all pipes */
-				{
-					int pi;
-					for (pi = 0; pi < pipe_count; pi++)
-						viewmode_substitute[pipe_positions[pi]] = 0x2502; /* │ */
+			if (row_type != TABLE_ROW_NONE && table_col_count > 0) {
+				/* Feature 2.2: Full table layout engine */
+				render_padded_table_row(t, y, screen, attr, x, w, bw, line, line_len, row_type);
+				viewmode_table_rendered = 1;
+				/* Skip rest of lgen_view — we rendered to screen directly */
+				goto table_rendered;
+			} else {
+				/* Find pipe positions in this line */
+				int pipe_positions[32];
+				int pipe_count = 0;
+				int ti;
+				for (ti = 0; ti < line_len && pipe_count < 32; ti++) {
+					if (line[ti] == '|')
+						pipe_positions[pipe_count++] = ti;
 				}
-					/* Bold + background tint for header */
-					{
-						int hi;
-						for (hi = 0; hi < line_len && hi < attr_size; hi++)
-							attr_buf[hi] |= BOLD;
-					}
-					break;
 
+				if (pipe_count > 0) {
+					switch (row_type) {
 				case TABLE_ROW_SEPARATOR:
 					/* Separator row: ├───┼───┤ */
 					if (pipe_count == 1) {
@@ -1519,27 +1834,13 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 					}
 					break;
 
-				case TABLE_ROW_BODY:
-					/* Body row: │ for all pipes */
-					{
-						int pi;
-						for (pi = 0; pi < pipe_count; pi++)
-							viewmode_substitute[pipe_positions[pi]] = 0x2502; /* │ */
+					case TABLE_ROW_HEADER:
+					case TABLE_ROW_BODY:
+					case TABLE_ROW_LAST:
+					default:
+					case TABLE_ROW_NONE:
+						break;
 					}
-					break;
-
-			case TABLE_ROW_LAST:
-				/* Last row: │ for all pipes */
-				{
-					int pi;
-					for (pi = 0; pi < pipe_count; pi++)
-						viewmode_substitute[pipe_positions[pi]] = 0x2502; /* │ */
-				}
-					break;
-
-				default:
-				case TABLE_ROW_NONE:
-					break;
 				}
 			}
 		}
@@ -1593,7 +1894,7 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 			goto skip_emphasis;
 		}
 		if (line_len > 0)
-			memset(in_code, 0, line_len);
+			memset(in_code, 0, (size_t)line_len);
 		int i = 0;
 		while (i < line_len) {
 			if (line[i] == '`') {
@@ -1830,7 +2131,7 @@ skip_emphasis:
 								i = k + 1;
 								continue;
 							}
-							memcpy(url, line + j + 2, url_len);
+							memcpy(url, line + j + 2, (size_t)url_len);
 							url[url_len] = '\0';
 
 							/* Ensure link URL array is sized */
@@ -1901,7 +2202,7 @@ skip_emphasis:
 						if (ref_len > 0) {
 							char *ref = (char *)joe_malloc(ref_len + 1);
 							if (ref) {
-								memcpy(ref, line + j + 2, ref_len);
+								memcpy(ref, line + j + 2, (size_t)ref_len);
 								ref[ref_len] = '\0';
 								int lp2;
 								for (lp2 = i + 1; lp2 < j; lp2++)
@@ -2009,39 +2310,36 @@ done:
 		}
 	}
 
+table_rendered:
+	/* For table rows rendered directly to screen, skip lgen_core. */
 	joe_free(line);
 
-	/* Feature 1.10: Update cursor position for view mode BEFORE rendering
-	 * If the cursor is on this line, move it off hidden characters and compute display column */
+	/* Feature 1.10/2.2.7: Update cursor position for view mode.
+	 * Runs for both regular and table_rendered rows. */
 	{
 		off_t buf_line = bw->top->line + y - bw->y;
 		if (bw->cursor->line == buf_line && viewmode_col_map &&
 		    viewmode_col_map_size > 0 && viewmode_col_map_line == buf_line) {
-			/* Compute buffer byte offset relative to BOL */
 			P *cur_tmp = pdup(bw->cursor, "viewmode_cursor");
 			p_goto_bol(cur_tmp);
 			off_t cursor_offset = bw->cursor->byte - cur_tmp->byte;
 			prm(cur_tmp);
-
-			/* If cursor is on a hidden character, move to next visible */
-			if (cursor_offset >= 0 && cursor_offset < viewmode_hide_size &&
-			    viewmode_hide && viewmode_hide[cursor_offset]) {
-				/* Find next visible character */
-				off_t next_visible = cursor_offset + 1;
-				while (next_visible < viewmode_hide_size && viewmode_hide[next_visible])
-					++next_visible;
-				if (next_visible < viewmode_hide_size) {
-					/* Move cursor to next visible character */
-					P *move_tmp = pdup(bw->cursor, "viewmode_skip_hidden");
-					p_goto_bol(move_tmp);
-					off_t target_byte = move_tmp->byte + next_visible;
-					pgoto(bw->cursor, target_byte);
-					cursor_offset = next_visible;
-					prm(move_tmp);
+			if (!viewmode_table_rendered) {
+				if (cursor_offset >= 0 && cursor_offset < viewmode_hide_size &&
+				    viewmode_hide && viewmode_hide[cursor_offset]) {
+					off_t next_visible = cursor_offset + 1;
+					while (next_visible < viewmode_hide_size && viewmode_hide[next_visible])
+						++next_visible;
+					if (next_visible < viewmode_hide_size) {
+						P *move_tmp = pdup(bw->cursor, "viewmode_skip_hidden");
+						p_goto_bol(move_tmp);
+						off_t target_byte = move_tmp->byte + next_visible;
+						pgoto(bw->cursor, target_byte);
+						cursor_offset = next_visible;
+						prm(move_tmp);
+					}
 				}
 			}
-
-			/* Look up display column from map */
 			if (cursor_offset >= 0 && cursor_offset < viewmode_col_map_size) {
 				off_t new_xcol = viewmode_col_map[cursor_offset];
 				bw->cursor->xcol = new_xcol;
@@ -2050,10 +2348,14 @@ done:
 		}
 	}
 
-	/* Render with our modified hide map */
-	viewmode_skip_parse = 1;
-	int result = lgen_core(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
-	viewmode_skip_parse = 0;
+	int result = 0;
+	if (viewmode_table_rendered) {
+		pnextl(p);
+	} else {
+		viewmode_skip_parse = 1;
+		result = lgen_core(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
+		viewmode_skip_parse = 0;
+	}
 
 	/* Clear hide map for next line */
 	if (viewmode_hide)
@@ -2066,6 +2368,7 @@ done:
 	/* Free link URL strings for next line (keep array allocated) */
 	viewmode_free_link_urls();
 
+	viewmode_table_rendered = 0;
 	return result;
 }
 static void gennum(BW *w, int (*screen)[COMPOSE], int *attr, SCRN *t, ptrdiff_t y, int *comp)
@@ -2153,9 +2456,9 @@ void bwgenh(BW *w)
 		}
 		if (!flg) {
 #if HAVE_LONG_LONG
-			sprintf(bf,"%8llx ",(unsigned long long)q->byte);
+			snprintf(bf,sizeof(bf),"%8llx ",(unsigned long long)q->byte);
 #else
-			sprintf(bf,"%8lx ",(unsigned long)q->byte);
+			snprintf(bf,sizeof(bf),"%8lx ",(unsigned long)q->byte);
 #endif
 			memcpy(txt,bf,9);
 			for (x=0; x!=8; ++x) {
@@ -2171,7 +2474,7 @@ void bwgenh(BW *w)
 				}
 				c = pgetb(q);
 				if (c != NO_MORE_DATA) {
-					sprintf(bf,"%2.2x",c);
+					snprintf(bf,sizeof(bf),"%2.2x",c);
 					txt[10+x*3] = bf[0];
 					txt[10+x*3+1] = bf[1];
 					if (c >= 0x20 && c <= 0x7E)
@@ -2194,7 +2497,7 @@ void bwgenh(BW *w)
 				}
 				c = pgetb(q);
 				if (c != NO_MORE_DATA) {
-					sprintf(bf,"%2.2x",c);
+					snprintf(bf,sizeof(bf),"%2.2x",c);
 					txt[11+x*3] = bf[0];
 					txt[11+x*3+1] = bf[1];
 					if (c >= 0x20 && c <= 0x7E)

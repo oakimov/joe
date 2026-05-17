@@ -527,21 +527,21 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        # Separator row: ├───┼───┤
-        self.assertTextAt("\u251c\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u2524", x=0, y=2)
+        # Separator row: ├─────────┼─────────┤ (padded to column width 7)
+        self.assertTextAt("\u251c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2524", x=0, y=2)
         self.exitJoe()
         self.assertExited()
 
     def test_viewmode_table_body_row(self):
-        """Table body row renders with │ pipes"""
+        """Table body row renders with padded columns (Feature 2.2)"""
         self.workdir.fixtureData("test.md", "| Header1 | Header2 |\n|---|---|\n| cell1 | cell2 |\n| cell3 | cell4 |\n")
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        # Body row (middle): │ for pipes
-        self.assertTextAt("\u2502 cell1 \u2502 cell", x=0, y=3)
-        # Last body row: │
-        self.assertTextAt("\u2502 cell3 \u2502 cell", x=0, y=4)
+        # Body rows: columns padded to max width (Header1=7, Header2=7)
+        # │ cell1   │ cell2   │
+        self.assertTextAt("\u2502 cell1   \u2502 cell", x=0, y=3)
+        self.assertTextAt("\u2502 cell3   \u2502 cell", x=0, y=4)
         self.exitJoe()
         self.assertExited()
 
@@ -1298,7 +1298,7 @@ class MarkdownSyntaxTests(joefx.JoeTestBase):
         self.exitJoe()
         self.assertExited()
 
-    # --- Feature 2.1: Unicode Box-Drawing Table Borders ---
+    # --- Feature 2.1/2.2: Unicode Box-Drawing Table Borders + Layout Engine ---
 
     def test_viewmode_table_two_tables_separate(self):
         """Two separate tables — region detection resets correctly between tables"""
@@ -1307,7 +1307,7 @@ class MarkdownSyntaxTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        # First table
+        # First table: all columns same width (1) → no extra padding
         self.assertTextAt("\u2502 A \u2502 B \u2502", x=0, y=1)
         self.assertTextAt("\u251c\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u2524", x=0, y=2)
         self.assertTextAt("\u2502 1 \u2502 2 \u2502", x=0, y=3)
@@ -1315,5 +1315,96 @@ class MarkdownSyntaxTests(joefx.JoeTestBase):
         self.assertTextAt("\u2502 X \u2502 Y \u2502", x=0, y=5)
         self.assertTextAt("\u251c\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u2524", x=0, y=6)
         self.assertTextAt("\u2502 a \u2502 b \u2502", x=0, y=7)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_table_padded_columns(self):
+        """Table columns padded to match widest cell per column"""
+        content = "| Short | LongerName |\n|---|---|\n| ab | cd |\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Header: column widths [6, 11], body cell 'ab' (2) padded to 6, 'cd' (2) padded to 11
+        # Both left-aligned (default).  pad_total = col_width - content_width
+        # │ ab    │ cd         │
+        self.assertTextAt("\u2502 ab    \u2502 cd         \u2502", x=0, y=3)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_table_alignment_center_right(self):
+        """Table columns respect alignment markers :---  :---:  ---:"""
+        content = "| L | C | R |\n|:---|:---:|---:|\n| a | b | c |\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Column widths: all 1 (from header 'L','C','R')
+        # L=left: "a "  C=center: " b "  R=right: " c"  but with right_pad too
+        # Col 0 (L, width 1, align 0=left):   │ a
+        # Col 1 (C, width 1, align 1=center): │ b
+        # Col 2 (R, width 1, align 2=right):  │ c │
+        self.assertTextAt("\u2502 a \u2502 b \u2502 c \u2502", x=0, y=3)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_table_varying_column_widths(self):
+        """Three columns with different widths — each padded independently"""
+        content = "| A | BB | CCC |\n|---|---|---|\n| x | y | z |\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Column widths: [1, 2, 3] from header
+        # Body: content widths [1,1,1] → padded to [1,2,3]
+        # │ x │ y  │ z   │
+        self.assertTextAt("\u2502 x \u2502 y  \u2502 z   \u2502", x=0, y=3)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_table_single_column(self):
+        """Single-column table renders correctly with padding"""
+        content = "| Header |\n|---|\n| cell |\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Column width: 6 (Header)
+        # Body: 'cell' (4) padded to 6, plus 1 right-pad → │ cell   │
+        self.assertTextAt("\u2502 cell   \u2502", x=0, y=3)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_cursor_table_row(self):
+        """Cursor on table row: file not modified after cursor movement in padded table"""
+        content = "| H1 | H2 |\n|---|---|\n| ab | cd |\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.writectl("{end}")
+        self.writectl("{home}")
+        self.writectl("{down}")
+        self.writectl("{down}")
+        self.writectl("{right*3}")
+        self.writectl("{left*2}")
+        self.exitJoe()
+        self.assertExited()
+        self.assertFileContents("test.md", content)
+
+    def test_viewmode_table_body_wider_than_header(self):
+        """Body content wider than header — column widths expand to fit"""
+        content = "| Hdr | Label |\n|----|------|\n| longbody | tiny |\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Column widths from scan: Hdr=3 < longbody=8 → col 0 = 8, Label=5 > tiny=4 → col 1 = 5
+        # Header: Hdr(3) padded to 8 → │ Hdr      │
+        # Separator: dashes span 8+2=10, 5+2=7 → ├──────────┼───────┤
+        # Body: longbody(8) padded to 8 → │ longbody │
+        self.assertTextAt("\u2502 Hdr      \u2502 Label \u2502", x=0, y=1)
+        self.assertTextAt("\u251c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2524", x=0, y=2)
+        self.assertTextAt("\u2502 longbody \u2502 tiny  \u2502", x=0, y=3)
         self.exitJoe()
         self.assertExited()

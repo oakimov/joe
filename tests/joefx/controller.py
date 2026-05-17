@@ -94,8 +94,43 @@ class JoeController(object):
             result = os.read(self.fd, 1024)
         except OSError as err:
             return 0 if err == errno.EIO or err == errno.EAGAIN else -1
-        self.stream.feed(result)
+
+        if not result:
+            return 0
+
+        if not hasattr(self, '_read_buffer'):
+            self._read_buffer = bytearray()
+
+        self._read_buffer.extend(result)
+
+        processed = bytearray()
+        i = 0
+        n = len(self._read_buffer)
+        while i < n:
+            if i + 5 <= n and self._read_buffer[i:i+5] == b'\x1b]8;;':
+                j = self._read_buffer.find(b'\x1b\\', i + 5)
+                if j != -1:
+                    i = j + 2
+                    continue
+                else:
+                    break
+            elif i + 1 <= n and self._read_buffer[i] == 0x1b:
+                avail = min(5, n - i)
+                if self._read_buffer[i:i+avail] == b'\x1b]8;;'[:avail]:
+                    break
+                else:
+                    processed.append(self._read_buffer[i])
+                    i += 1
+            else:
+                processed.append(self._read_buffer[i])
+                i += 1
+
+        del self._read_buffer[:i]
+
+        if processed:
+            self.stream.feed(bytes(processed))
         return len(result)
+
 
     def checkProcess(self):
         """Checks whether the process is still running"""
@@ -281,6 +316,7 @@ def startJoe(joeexe, args=None):
     env['TERM'] = 'ansi'
     env["LANG"] = "en_US.UTF-8"
     env["ASAN_OPTIONS"] = "log_path=/tmp/asan_report:abort_on_error=1:halt_on_error=1"
+    env['MallocNanoZone'] = '0'
     env['SHELL'] = os.getenv('SHELL', '/bin/sh')
 
     env.update(args.env)

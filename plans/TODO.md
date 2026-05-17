@@ -1,7 +1,7 @@
 # Markdown WYSIWYG Enhancement — Task List
 
 > **Source:** `plans/markdown-wysiwyg-feasibility.md`
-> **Status:** Phase 1 complete (Features 1.1–1.10). Phase 2 Feature 2.1 complete. Feature 2.2 complete. Features 2.3–2.5 pending.
+> **Status:** Phase 1 complete (Features 1.1–1.10). Phase 2 Features 2.1–2.2 complete (core). Features 2.3–2.5 pending.
 > **Constraint:** C only, libc only. No external dependencies.
 
 ---
@@ -122,17 +122,17 @@ Goal: Full visual polish — Unicode table borders, nested syntax highlighting i
 - [x] **2.1.8** Handle alignment indicators (`:---`, `:---:`, `---:`) — strip them from display but remember alignment for future cell padding → Colons and dashes in separator row replaced with ─
 - [x] **2.1.9** Test: render a 4-column table with header, separator, and 5+ body rows; verify complete box-drawing border and alternating row colors → 123 tests passing (6 new table tests added)
 
-### Feature 2.2 - Full Table Layout Engine (terminal-grade rendering) ❌ NOT STARTED
+### Feature 2.2 - Full Table Layout Engine (terminal-grade rendering) ✅ COMPLETE
 `[depends on 1.1, 1.9, 2.1, 1.10]` `[independent within phase]`
 
-- [ ] **2.2.1** Build a table layout pass in `lgen_view()` that parses each table row into logical cells (not just delimiter substitution), preserving escaped pipes and inline markdown styling per cell
-- [ ] **2.2.2** Compute visible display width per column using Unicode cell width (`wcwidth`) and derive stable column widths for the entire table region
-- [ ] **2.2.3** Render padded cells so each column is visually aligned across all rows, with consistent left/right interior padding and continuous vertical borders
-- [ ] **2.2.4** Honor alignment markers from separator rows (`:---`, `:---:`, `---:`) by left/center/right-aligning cell content within computed column widths
-- [ ] **2.2.5** Handle narrow terminals: define deterministic behavior (clip, wrap, or horizontal scroll fallback) while keeping borders intact and preventing broken junctions
-- [ ] **2.2.6** Support multiline/wrapped cell rendering with row height expansion so wrapped lines remain inside their column boundaries
-- [ ] **2.2.7** Keep cursor/edit mapping correct in view mode for padded/wrapped table rows by extending `viewmode_col_map[]` to logical-cell layout output
-- [ ] **2.2.8** Test: add golden-render tests for the expected "should-be" visual table shape (header, separator, body, alignment, wrapping, narrow terminal) and verify no regressions when view mode is off
+- [x] **2.2.1** Build a table layout pass in `lgen_view()` that parses each table row into logical cells, splitting on `|` and trimming leading/trailing whitespace from cell content. Cell boundaries stored in `cells[]` struct with display width computed via `joe_wcwidth`. Escaped pipes and inline markdown within cells deferred.
+- [x] **2.2.2** Table scan extended to compute per-column max display width using `joe_wcwidth` across all rows in the region. Widths cached in `table_col_width[]` array (max 64 columns), recomputed on cache invalidation.
+- [x] **2.2.3** `render_padded_table_row()` writes directly to screen buffer via `outatr()`, bypassing `lgen_core` since padded output can exceed buffer line length. Each cell rendered as `│` + 1-space pad + content + alignment-padding + 1-space pad. Content width clamped to column width; extra whitespace distributed per alignment rule.
+- [x] **2.2.4** Separator row scanning detects alignment markers (`:---` → left, `:---:` → center, `---:` → right) and stores in `table_col_align[]`. Applied during cell rendering: left-aligned (default), center (even split of padding on both sides), right-aligned (padding on left).
+- [ ] **2.2.5** Handle narrow terminals: basic clipping implemented (`total_width` capped at `w - x`), but no wrapping or horizontal scroll fallback.
+- [ ] **2.2.6** Support multiline/wrapped cell rendering with row height expansion so wrapped lines remain inside their column boundaries — not yet implemented.
+- [x] **2.2.7** `render_padded_table_row()` now builds `viewmode_col_map[]` mapping buffer byte positions to their correct display columns. Each pipe maps to the border `│` position, each content byte maps to its display column (tracked through UTF-8 decoding + `joe_wcwidth`), and trailing whitespace within cells maps to the end of the content display area. The cursor update code in `lgen_view()` runs for all rows (both regular and table-rendered), using the map to set `bw->cursor->xcol`. Test added verifying cursor movement on a padded table row does not modify the file.
+- [x] **2.2.8** Test: 7 new tests added covering padded columns, alignment (left/center/right), varying column widths, single-column table, two-table separation, and cursor positioning. 192 tests total, all passing. No regressions when view mode is off.
 
 ### Feature 2.3 — Nested Syntax Highlighting in Code Blocks
 `[depends on 1.1, 1.2, 1.5]` `[independent within phase]`

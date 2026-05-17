@@ -15,7 +15,7 @@ Feasibility analysis: `plans/markdown-wysiwyg-feasibility.md`
 From a clean checkout (no generated files):
 
 ```sh
-autoreconf -i && ./configure --prefix=/opt/local && make
+autoreconf -i && ./configure CFLAGS="-O3 -flto -DNDEBUG" LDFLAGS="-flto" --prefix=/opt/local && make
 ```
 
 If `configure` already exists:
@@ -58,7 +58,7 @@ After completing any feature, critically review all changed code before committi
 - **Redundant code**: remove dead functions, unused variables, duplicate logic, unreachable branches
 - **Extreme inputs**: verify correct behavior with huge files (10,000+ lines), extremely long lines (1MB+), pathological Unicode (zero-width, combining, surrogate), and OOM conditions (malloc/realloc returning NULL)
 - **Unlikely scenarios**: terminal resize during rendering, concurrent buffer modifications, nested syntax call stack overflow, malformed markdown constructs, empty files, files with no trailing newline
-- **Compiler warnings**: zero warnings allowed (`-Wall -Wconversion -Wunused -Wshadow` etc.)
+- **Compiler warnings**: zero warnings allowed (`-Wall -Wconversion -Wunused -Wshadow` etc.) - this includes preexisting warnings. Fix them before starting work on new features.
 
 Fix every issue found regardless of how small it is. Do not introduce new issues in the process.
 

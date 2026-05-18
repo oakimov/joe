@@ -26,6 +26,7 @@ struct bw {
 	struct lattr_db *db;	/* line attribute database */
 	int	shell_flag;	/* Cursor should follow shell cursor in this window */
 	int	pasting;	/* Whether a paste operation is occurring in this window */
+	int	last_viewmode;	/* Track viewmode to detect toggles (ghost text fix) */
 	struct {
 		int ww, ai, sp;	/* saved during bracketed paste */
 	} saved;

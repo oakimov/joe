@@ -795,6 +795,38 @@ class ViewModeTests(joefx.JoeTestBase):
         self.assertExited()
 
 
+
+    def test_viewmode_toggle_no_ghost_text(self):
+        """Regression: toggling viewmode on must not leave ghost/raw text in buffer.
+        The raw ** delimiters should be hidden as spaces, not duplicated as ghost text
+        underneath the rendered content."""
+        self.workdir.fixtureData("test.md", "**Base URL:** http://localhost:3457\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # After toggle, positions 0,1 (opening **) should be spaces, not asterisks
+        self.assertTextAt("  Base URL:   http://l", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_toggle_off_to_on_no_ghost(self):
+        """Regression: toggle viewmode off then on — screen must fully refresh.
+        Old non-viewmode characters must not persist as ghost text."""
+        self.workdir.fixtureData("test.md", "**bold** text *italic* here\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        # Start in non-viewmode, toggle on
+        self.mode("viewmode")
+        # Verify delimiters are spaces, not ghost raw text
+        self.assertTextAt("  bold   text  italic  h", x=0)
+        # Toggle off and back on
+        self.mode("viewmode")
+        self.mode("viewmode")
+        # After re-toggle, still clean — no ghost text
+        self.assertTextAt("  bold   text  italic  h", x=0)
+        self.exitJoe()
+        self.assertExited()
+
 class MarkdownSyntaxTests(joefx.JoeTestBase):
     """Tests for Markdown syntax highlighting (DFA correctness, viewmode off).
        Content starts at y=1 (y=0 is the status bar).

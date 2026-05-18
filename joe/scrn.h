@@ -184,6 +184,9 @@ int nresize(SCRN *t, ptrdiff_t w, ptrdiff_t h);
  */
 void nredraw(SCRN *t);
 
+/* Invalidate screen buffer without terminal I/O — for viewmode toggle ghost text fix */
+void scrn_invalidate(SCRN *t);
+
 void npartial(SCRN *t);
 void nescape(SCRN *t);
 void nreturn(SCRN *t);

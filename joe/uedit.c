@@ -23,6 +23,8 @@ int u_goto_bol(W *w, int k)
 	} else {
 		p_goto_bol(bw->cursor);
 	}
+	if (!bw->o.hex)
+		bw->cursor->xcol = piscol(bw->cursor);
 	return 0;
 }
 
@@ -59,6 +61,7 @@ int uhome(W *w, int k)
 
 	pset(bw->cursor, p);
 	prm(p);
+	bw->cursor->xcol = piscol(bw->cursor);
 	if (bw->o.viewmode)
 		bw->cursor->valcol = 0;
 	return 0;
@@ -76,8 +79,10 @@ int u_goto_eol(W *w, int k)
 			pset(bw->cursor,bw->b->eof);
 		else
 			pfwrd(bw->cursor, 15 - bw->cursor->byte%16);
-	} else
+	} else {
 		p_goto_eol(bw->cursor);
+		bw->cursor->xcol = piscol(bw->cursor);
+	}
 	if (bw->o.viewmode)
 		bw->cursor->valcol = 0;
 	return 0;
@@ -175,14 +180,13 @@ int u_goto_right(W *w, int k)
 	} else {
 		int rtn;
 		if (pgetc(bw->cursor) != NO_MORE_DATA) {
-			if (!bw->o.viewmode)
-				bw->cursor->xcol = piscol(bw->cursor);
+			bw->cursor->xcol = piscol(bw->cursor);
 			rtn = 0;
 		} else {
 			rtn = -1;
 		}
 		/* Have to do EFIXXCOL here because of picture mode */
-		if (!bw->o.viewmode && bw->cursor->xcol != piscol(bw->cursor))
+		if (bw->cursor->xcol != piscol(bw->cursor))
 			bw->cursor->xcol = piscol(bw->cursor);
 		return rtn;
 	}

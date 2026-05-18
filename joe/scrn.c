@@ -1962,6 +1962,16 @@ void nscrlup(SCRN *t, ptrdiff_t top, ptrdiff_t bot, ptrdiff_t amnt)
 		}
 }
 
+/* Invalidate screen buffer without terminal I/O.
+ * Fills scrn[] with -1 and attr[] with 0 so outatr() always writes on next pass.
+ * Safe to call during popup interactions where nredraw() would crash. */
+void scrn_invalidate(SCRN *t)
+{
+	mfill(t->scrn, -1, t->li * t->co);
+	msetI(t->attr, 0, t->li * t->co);
+	msetI(t->updtab, 1, t->li);
+}
+
 void nredraw(SCRN *t)
 {
 	dostaupd = 1;

@@ -1171,6 +1171,9 @@ static void render_padded_table_row(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE]
 		if (oc < x + total_width)
 			outatr(bw->b->o.charmap, t, screen + oc, attr + oc, oc, y, 0x2524, base_atr);
 		outatr_complete(t);
+		oc++;
+		if (oc < w)
+			eraeol(t, oc, y, base_atr);
 		return;
 	}
 
@@ -1239,6 +1242,9 @@ static void render_padded_table_row(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE]
 	if (oc < x + total_width)
 		outatr(bw->b->o.charmap, t, screen + oc, attr + oc, oc, y, 0x2502, base_atr);
 	outatr_complete(t);
+	oc++;
+	if (oc < w)
+		eraeol(t, oc, y, base_atr);
 
 	/* Build viewmode_col_map for cursor positioning */
 	if (viewmode_col_map && viewmode_col_map_size >= (line_len > 0 ? line_len : 1)) {
@@ -2529,6 +2535,16 @@ void bwgen(BW *w, int linums, int linchg)
 	/* Set w.db to correct value */
 	if (w->o.highlight && w->o.syntax && (!w->db || w->db->syn != w->o.syntax))
 		w->db = find_lattr_db(w->b, w->o.syntax);
+
+	/* Feature 1.1/1.4: Invalidate screen buffer when viewmode toggles.
+	 * Hidden delimiters shift content left, so the new render can land on
+	 * positions where the old buffer already has the same character.
+	 * Without invalidation, outatr() skips those writes, leaving ghost text.
+	 * scrn_invalidate() only touches memory — no terminal I/O, safe during popups. */
+	if (w->o.viewmode != w->last_viewmode) {
+		scrn_invalidate(w->t->t);
+		w->last_viewmode = w->o.viewmode;
+	}
 
 	fromline = toline = from = to = 0;
 

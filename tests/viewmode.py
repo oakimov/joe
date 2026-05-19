@@ -796,6 +796,73 @@ class ViewModeTests(joefx.JoeTestBase):
 
 
 
+    def test_viewmode_toggle_tables_scroll_no_ghost(self):
+        """Regression: scrolling then toggling viewmode with tables must not duplicate lines.
+        Simulates user scenario: file with tables, scroll to middle, toggle viewmode ON."""
+        lines = []
+        # Build a file similar to user's README with two tables separated by text
+        lines.append("# Chat Client\n")
+        lines.append("\n")
+        lines.append("## Commands\n")
+        lines.append("\n")
+        lines.append("| Command | Description |\n")
+        lines.append("|---------|-------------|\n")
+        lines.append("| `/status` | Show session stats |\n")
+        lines.append("| `/reset` | Reset session |\n")
+        lines.append("| `/config` | View model parameters |\n")
+        lines.append("| `/exit` | Exit gracefully |\n")
+        lines.append("| `/help` | Show available commands |\n")
+        lines.append("\n")
+        lines.append("### API Reference\n")
+        lines.append("\n")
+        # Long line that extends beyond screen width
+        lines.append("The server exposes OpenAI-compatible endpoints alongside the dashboard. Any tool that speaks the OpenAI Chat Completions API can use it.\n")
+        lines.append("\n")
+        lines.append("**Base URL:** `http://localhost:3457`\n")
+        lines.append("\n")
+        lines.append("| Method | Path | Description |\n")
+        lines.append("|--------|------|-------------|\n")
+        lines.append("| `GET` | `/v1/models` | List available models |\n")
+        lines.append("| `GET` | `/v1/models/:id` | Get model details |\n")
+        lines.append("| `POST` | `/v1/chat/completions` | Chat completion |\n")
+        lines.append("| `GET` | `/health` | Health check |\n")
+        content = "".join(lines)
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        # Scroll down to around line 15 (the long text line)
+        for _ in range(14):
+            self.writectl("{down}")
+        # Now toggle viewmode ON
+        self.mode("viewmode")
+        # Wait for rendering to complete — the second table at the bottom
+        # of the screen must be fully rendered before we read.
+        self.assertTrue(self.joe.expect(lambda: '│' in self.joe.readLine(self.joe.size.Y - 2, 0, self.joe.size.X)),
+                        "Timed out waiting for viewmode rendering to complete")
+        # Read the full screen — there should be no duplicated rows
+        screen_lines = []
+        for y in range(self.joe.size.Y):
+            line = self.joe.readLine(y, 0, self.joe.size.X).rstrip()
+            if line:
+                screen_lines.append(line)
+        # Check for duplicate adjacent non-empty lines (ghost text duplication)
+        # Skip the status bar line
+        for i in range(1, len(screen_lines) - 1):
+            if screen_lines[i] == screen_lines[i-1] and len(screen_lines[i].strip()) > 3:
+                self.fail("Ghost text duplication: line %d and %d are identical: '%s'" %
+                          (i, i-1, screen_lines[i][:60]))
+        # Check that table pipes are replaced with box-drawing characters in viewmode
+        # Find a line that should be a table row (has visible content from the first table)
+        found_table = False
+        for y in range(self.joe.size.Y):
+            line = self.joe.readLine(y, 0, self.joe.size.X)
+            if '│' in line:  # Box-drawing │ character
+                found_table = True
+                break
+        self.assertTrue(found_table, "Expected box-drawing table borders in viewmode")
+        self.exitJoe()
+        self.assertExited()
+
     def test_viewmode_toggle_no_ghost_text(self):
         """Regression: toggling viewmode on must not leave ghost/raw text in buffer.
         The raw ** delimiters should be hidden as spaces, not duplicated as ghost text

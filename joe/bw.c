@@ -358,6 +358,23 @@ static void ansi_init(struct ansi_sm *sm)
 
 #define SELECT_IF(c)	{ if (c) { ca = selectatr; cm = selectmask; } else { ca = 0; cm = -1; } }
 
+/* Sanitize a string for terminal output: replace control characters
+ * (0x00-0x1F, 0x7F) with '?'.  Returns a static buffer that is reused. */
+static const char *sanitize_for_terminal(const char *s)
+{
+	static char buf[256];
+	if (!s) return "(null)";
+	size_t len = strlen(s);
+	if (len >= sizeof(buf)) len = sizeof(buf) - 1;
+	size_t i;
+	for (i = 0; i < len; i++) {
+		unsigned char c = (unsigned char)s[i];
+		buf[i] = (c <= 0x1F || c == 0x7F) ? '?' : (char)c;
+	}
+	buf[len] = '\0';
+	return buf;
+}
+
 static struct state_debug_data out_osc8(const struct state_debug_data *oldstate, const struct state_debug_data *newstate, int opt)
 {
 	static const struct state_debug_data empty = {};
@@ -377,9 +394,9 @@ static struct state_debug_data out_osc8(const struct state_debug_data *oldstate,
 
 			if (newstate && newstate->name >= 0) {
 				ttputs("\x1B]8;id=");
-				ttputs(state_names[newstate->name]);
+				ttputs(sanitize_for_terminal(state_names[newstate->name]));
 				ttputs(";");
-				ttputs(state_names[newstate->name]);
+				ttputs(sanitize_for_terminal(state_names[newstate->name]));
 				ttputs("\x1B\\");
 			}
 			break;
@@ -392,9 +409,9 @@ static struct state_debug_data out_osc8(const struct state_debug_data *oldstate,
 
 			if (newstate && newstate->name >= 0) {
 				ttputs("\x1B]8;id=");
-				ttputs(newstate->recolor ? state_names[newstate->recolor] : "(idle)");
+				ttputs(newstate->recolor ? sanitize_for_terminal(state_names[newstate->recolor]) : "(idle)");
 				ttputs(";");
-				ttputs(newstate->recolor ? state_names[newstate->recolor] : "(idle)");
+				ttputs(newstate->recolor ? sanitize_for_terminal(state_names[newstate->recolor]) : "(idle)");
 				ttputs("\x1B\\");
 			}
 			break;
@@ -407,13 +424,13 @@ static struct state_debug_data out_osc8(const struct state_debug_data *oldstate,
 
 			if (newstate && newstate->name >= 0) {
 				ttputs("\x1B]8;id=");
-				ttputs(state_names[newstate->name]);
+				ttputs(sanitize_for_terminal(state_names[newstate->name]));
 				ttputs(";");
-				ttputs(state_names[newstate->name]);
+				ttputs(sanitize_for_terminal(state_names[newstate->name]));
 				if (newstate->recolor && newstate->recolor != newstate->name) {
 					/* ugh, only ASCII for OSC-8 pop-up text */
 					ttputs("->");
-					ttputs(state_names[newstate->recolor]);
+					ttputs(sanitize_for_terminal(state_names[newstate->recolor]));
 				}
 				ttputs("\x1B\\");
 			}
@@ -522,6 +539,7 @@ static off_t table_region_start = -1;	/* First line of detected table region */
 static off_t table_region_end = -1;	/* Last line of detected table region (exclusive) */
 static off_t table_separator_line = -1;	/* Line number of the separator row */
 static off_t table_cached_for_line = -1;/* Which line triggered the cache (staleness check) */
+static off_t table_no_region_line = -1;/* Line where no table was found (negative cache) */
 static int table_col_count = 0;		/* Number of columns in the table */
 static unsigned char *viewmode_scan_buf = NULL;	/* Persistent buffer for table scan */
 static ptrdiff_t viewmode_scan_buf_size = 0;
@@ -533,6 +551,9 @@ static int table_col_align[MAX_TABLE_COLS];	/* 0=left, 1=center, 2=right */
 
 /* When non-zero, lgen_view rendered the table row to screen directly. */
 static int viewmode_table_rendered = 0;
+
+/* Track which BW last rendered viewmode state — invalidate caches on window change */
+static BW *viewmode_last_bw = NULL;
 
 /* Feature 1.10: Get display column for a buffer position in view mode.
  * Returns -1 if not in view mode or map not available. */
@@ -552,34 +573,22 @@ static void viewmode_free_link_urls(void)
 {
 	if (!viewmode_link_url)
 		return;
-	/* Allocate a tracking array sized to worst case (all slots unique)
-	 * to prevent double-free when the same pointer appears in multiple slots. */
-	void **freed = NULL;
-	int freed_n = 0;
-	if (viewmode_link_url_size > 0)
-		freed = (void **)joe_malloc((ptrdiff_t)viewmode_link_url_size * (ptrdiff_t)sizeof(void *));
+	/* In-place dedup: walk the array, free each unique pointer on first
+	 * encounter, then NULL all slots pointing to the same allocation. */
 	int m;
 	for (m = 0; m < viewmode_link_url_size; m++) {
 		void *p = viewmode_link_url[m];
 		if (p) {
-			int seen = 0;
+			joe_free(p);
+			/* NULL all subsequent slots pointing to the same allocation */
 			int i;
-			for (i = 0; i < freed_n; i++) {
-				if (freed[i] == p) {
-					seen = 1;
-					break;
-				}
-			}
-			if (!seen) {
-				joe_free(p);
-				if (freed)
-					freed[freed_n++] = p;
+			for (i = m + 1; i < viewmode_link_url_size; i++) {
+				if (viewmode_link_url[i] == p)
+					viewmode_link_url[i] = NULL;
 			}
 		}
 		viewmode_link_url[m] = NULL;
 	}
-	if (freed)
-		joe_free(freed);
 }
 
 /* Cleanup view mode static globals on exit */
@@ -589,14 +598,18 @@ void viewmode_cleanup(void)
 		joe_free(viewmode_hide);
 		viewmode_hide = NULL;
 	}
+	viewmode_hide_size = 0;
 	if (viewmode_substitute) {
 		joe_free(viewmode_substitute);
 		viewmode_substitute = NULL;
 	}
+	viewmode_substitute_size = 0;
 	if (viewmode_col_map) {
 		joe_free(viewmode_col_map);
 		viewmode_col_map = NULL;
 	}
+	viewmode_col_map_size = 0;
+	viewmode_col_map_line = -1;
 	if (viewmode_link_url) {
 		viewmode_free_link_urls();
 		joe_free(viewmode_link_url);
@@ -607,6 +620,7 @@ void viewmode_cleanup(void)
 	table_region_end = -1;
 	table_separator_line = -1;
 	table_cached_for_line = -1;
+	table_no_region_line = -1;
 	table_col_count = 0;
 	viewmode_table_rendered = 0;
 	{
@@ -621,6 +635,7 @@ void viewmode_cleanup(void)
 		viewmode_scan_buf = NULL;
 		viewmode_scan_buf_size = 0;
 	}
+	viewmode_last_bw = NULL;
 }
 
 static int lgen(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,HIGHLIGHT_STATE st,BW *bw)
@@ -1252,8 +1267,8 @@ static void render_padded_table_row(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE]
 		for (bi = 0; bi < line_len; bi++)
 			viewmode_col_map[bi] = 0;
 		/* Compute display start column for each cell's content area */
-		int content_display_start[MAX_TABLE_COLS];
-		int col_start_disp = (int)x;
+		ptrdiff_t content_display_start[MAX_TABLE_COLS];
+		ptrdiff_t col_start_disp = x;
 		int cj;
 		for (cj = 0; cj < ncols; cj++) {
 			content_display_start[cj] = col_start_disp;
@@ -1262,7 +1277,7 @@ static void render_padded_table_row(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE]
 			col_start_disp += 3 + cw_;
 		}
 		for (cj = 0; cj < ncols; cj++) {
-			int base = content_display_start[cj];
+			ptrdiff_t base = content_display_start[cj];
 			int cw_ = (cj < MAX_TABLE_COLS) ? table_col_width[cj] : 0;
 			if (cw_ < cells[cj].width) cw_ = cells[cj].width;
 			int pad_t = cw_ - cells[cj].width;
@@ -1275,7 +1290,7 @@ static void render_padded_table_row(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE]
 			if (cj < pipe_count)
 				viewmode_col_map[pipe_pos[cj]] = base;
 			/* Content area: border(1) + left_pad(1) + pad_left */
-			int content_col = base + 1 + 1 + pl;
+			ptrdiff_t content_col = base + 1 + 1 + pl;
 			/* Walk content bytes and map each to display column */
 			int buf_i = cells[cj].start;
 			const char *cp_ = (const char *)(line + cells[cj].start);
@@ -1301,7 +1316,7 @@ static void render_padded_table_row(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE]
 				}
 			}
 			/* Remaining bytes before next pipe map to end of content area */
-			int content_end_col = base + 1 + 1 + cw_ + 1; /* after right_pad space */
+			ptrdiff_t content_end_col = base + 1 + 1 + cw_ + 1; /* after right_pad space */
 			int next_pipe = (cj + 1 < pipe_count) ? pipe_pos[cj + 1] : line_len;
 			while (buf_i < next_pipe && buf_i < line_len) {
 				viewmode_col_map[buf_i] = content_end_col;
@@ -1317,8 +1332,19 @@ static void render_padded_table_row(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE]
 static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,HIGHLIGHT_STATE st,BW *bw)
 {
 	/* Only process when syntax highlighting is active and syntax is Markdown. */
-	if (st.state == -1 || !bw->o.syntax || zcmp(bw->o.syntax->name, "md")) {
+	if (st.state == -1 || !bw->o.syntax || zcmp(bw->o.syntax->name, "md"))
 		return lgen_core(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
+
+	/* Invalidate caches when rendering a different window (split-screen safety). */
+	if (viewmode_last_bw != bw) {
+		table_region_start = -1;
+		table_region_end = -1;
+		table_separator_line = -1;
+		table_cached_for_line = -1;
+		table_no_region_line = -1;
+		table_col_count = 0;
+		viewmode_col_map_line = -1;
+		viewmode_last_bw = bw;
 	}
 
 	/* Avoid unbounded allocations in view mode on pathological lines. */
@@ -1372,10 +1398,6 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 			if (new_cap > VIEWMODE_MAX_LINE_BYTES)
 				new_cap = VIEWMODE_MAX_LINE_BYTES;
 			unsigned char *new_line = (unsigned char *)joe_realloc(line, new_cap);
-			if (!new_line) {
-				/* Realloc failed — keep existing buffer, stop reading */
-				break;
-			}
 			line = new_line;
 			line_cap = new_cap;
 		}
@@ -1392,11 +1414,6 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 			joe_free(viewmode_hide);
 		viewmode_hide_size = need;
 		viewmode_hide = (char *)joe_malloc((ptrdiff_t)viewmode_hide_size);
-		if (!viewmode_hide) {
-			/* OOM — fall back to core rendering without hiding */
-			joe_free(line);
-			return lgen_core(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
-		}
 	}
 	memset(viewmode_hide, 0, (size_t)(line_len > 0 ? line_len : 1));
 
@@ -1409,11 +1426,6 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 			joe_free(viewmode_substitute);
 		viewmode_substitute_size = need;
 		viewmode_substitute = (int *)joe_malloc((ptrdiff_t)viewmode_substitute_size * (ptrdiff_t)sizeof(int));
-		if (!viewmode_substitute) {
-			/* OOM — fall back to core rendering without substitution */
-			joe_free(line);
-			return lgen_core(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
-		}
 	}
 	memset(viewmode_substitute, 0, (size_t)(line_len > 0 ? line_len : 1) * sizeof(int));
 
@@ -1457,17 +1469,25 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 		while (i < line_len && (line[i] == ' ' || line[i] == '\t'))
 			++i;
 		if (i + 2 < line_len && line[i] == '`' && line[i+1] == '`' && line[i+2] == '`') {
-			/* Hide the fence markers and leading whitespace */
+			/* Count all consecutive backtick characters */
+			int fence_end = i + 3;
+			while (fence_end < line_len && line[fence_end] == '`')
+				++fence_end;
+			/* Hide leading whitespace and all fence markers */
 			int j;
-			for (j = 0; j < i + 3; j++)
+			for (j = 0; j < fence_end; j++)
 				viewmode_hide[j] = 1;
 			/* Language identifier (if any) remains visible with MdCodeFence color */
 			goto done;
 		}
 		if (i + 2 < line_len && line[i] == '~' && line[i+1] == '~' && line[i+2] == '~') {
-			/* Hide the fence markers and leading whitespace */
+			/* Count all consecutive tilde characters */
+			int fence_end = i + 3;
+			while (fence_end < line_len && line[fence_end] == '~')
+				++fence_end;
+			/* Hide leading whitespace and all fence markers */
 			int j;
-			for (j = 0; j < i + 3; j++)
+			for (j = 0; j < fence_end; j++)
 				viewmode_hide[j] = 1;
 			/* Language identifier (if any) remains visible with MdCodeFence color */
 			goto done;
@@ -1586,7 +1606,26 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 					}
 				}
 
-				/* Try to find the table start by scanning backward from current line */
+				/* Negative cache: if we recently scanned nearby and found
+					 * no table region, skip the expensive forward/backward scan.
+					 * But only skip if this line has no pipe chars — a line with
+					 * | might be the start of a new table. */
+					int has_pipe = 0;
+					{
+						int _pi;
+						for (_pi = 0; _pi < line_len; _pi++) {
+							if (line[_pi] == '|') { has_pipe = 1; break; }
+						}
+					}
+					if (!has_pipe &&
+					    table_no_region_line != -1 &&
+					    buf_line >= table_no_region_line - 10 &&
+					    buf_line <= table_no_region_line + 10) {
+						table_cached_for_line = buf_line;
+						goto skip_table_scan;
+					}
+
+					/* Try to find the table start by scanning backward from current line */
 				off_t backward_first = -1;
 				{
 					P *back = pdup(p, "back_scan");
@@ -1658,7 +1697,6 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 								if (nc > VIEWMODE_TABLE_SCAN_MAX_BYTES)
 									nc = VIEWMODE_TABLE_SCAN_MAX_BYTES;
 							unsigned char *nb = (unsigned char *)joe_realloc(viewmode_scan_buf, nc);
-							if (!nb) break;
 							viewmode_scan_buf = nb;
 							viewmode_scan_buf_size = nc;
 							lb = nb;
@@ -1669,103 +1707,103 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 					prm(rl);
 
 					/* Check if this line has a pipe */
-					int has_pipe = 0;
+					int line_has_pipe = 0;
 					int si = 0;
 					while (si < ll && (lb[si] == ' ' || lb[si] == '\t')) ++si;
-					if (si < ll && lb[si] == '|') has_pipe = 1;
+					if (si < ll && lb[si] == '|') line_has_pipe = 1;
 					if (too_long)
-						has_pipe = 0; /* Avoid classifying huge lines as tables. */
+						line_has_pipe = 0; /* Avoid classifying huge lines as tables. */
 
-						if (has_pipe) {
-						if (first_table_line == -1)
-							first_table_line = scan_line;
+					if (line_has_pipe) {
+					if (first_table_line == -1)
+						first_table_line = scan_line;
 
-						/* Check if this is a separator row */
-						int is_sep = 1, has_dash = 0, di;
-						for (di = 0; di < ll; di++) {
-							if (lb[di] == '|' || lb[di] == '-' || lb[di] == ':' ||
-							    lb[di] == ' ' || lb[di] == '\t') {
-								if (lb[di] == '-') has_dash = 1;
-							} else {
-								is_sep = 0;
-								break;
-							}
-						}
-						if (is_sep && has_dash) {
-							sep_line = scan_line;
-							/* Count columns */
-							int pipes = 0, ci;
-							for (ci = 0; ci < ll; ci++)
-								if (lb[ci] == '|') pipes++;
-							col_cnt = pipes > 0 ? pipes - 1 : 1;
-							/* Extract column alignment from separator row */
-							{
-								int pipe_pos[MAX_TABLE_COLS];
-								int np = 0;
-								for (ci = 0; ci < ll && np < MAX_TABLE_COLS; ci++)
-									if (lb[ci] == '|') pipe_pos[np++] = ci;
-								int max_col = np > 0 ? np - 1 : 0;
-								if (max_col > MAX_TABLE_COLS) max_col = MAX_TABLE_COLS;
-								int k;
-								for (k = 0; k < max_col; k++) {
-									int cs = pipe_pos[k] + 1;
-									int ce = (k + 1 < np) ? pipe_pos[k + 1] : ll;
-									if (cs >= ce) continue;
-									int has_left = (lb[cs] == ':') ? 1 : 0;
-									int has_right = (lb[ce - 1] == ':') ? 1 : 0;
-									if (has_left && has_right)
-										table_col_align[k] = 1; /* center */
-									else if (has_right)
-										table_col_align[k] = 2; /* right */
-								}
-							}
+					/* Check if this is a separator row */
+					int is_sep = 1, has_dash = 0, di;
+					for (di = 0; di < ll; di++) {
+						if (lb[di] == '|' || lb[di] == '-' || lb[di] == ':' ||
+						    lb[di] == ' ' || lb[di] == '\t') {
+							if (lb[di] == '-') has_dash = 1;
 						} else {
-							/* Feature 2.2: Track per-column display widths */
+							is_sep = 0;
+							break;
+						}
+					}
+					if (is_sep && has_dash) {
+						sep_line = scan_line;
+						/* Count columns */
+						int pipes = 0, ci;
+						for (ci = 0; ci < ll; ci++)
+							if (lb[ci] == '|') pipes++;
+						col_cnt = pipes > 0 ? pipes - 1 : 1;
+						/* Extract column alignment from separator row */
+						{
 							int pipe_pos[MAX_TABLE_COLS];
 							int np = 0;
-							int ci2;
-							for (ci2 = 0; ci2 < ll && np < MAX_TABLE_COLS; ci2++)
-								if (lb[ci2] == '|') pipe_pos[np++] = ci2;
+							for (ci = 0; ci < ll && np < MAX_TABLE_COLS; ci++)
+								if (lb[ci] == '|') pipe_pos[np++] = ci;
 							int max_col = np > 0 ? np - 1 : 0;
 							if (max_col > MAX_TABLE_COLS) max_col = MAX_TABLE_COLS;
 							int k;
 							for (k = 0; k < max_col; k++) {
 								int cs = pipe_pos[k] + 1;
 								int ce = (k + 1 < np) ? pipe_pos[k + 1] : ll;
-								/* Trim leading/trailing whitespace */
-								int ts = cs;
-								while (ts < ce && (lb[ts] == ' ' || lb[ts] == '\t')) ++ts;
-								int te = ce - 1;
-								while (te >= ts && (lb[te] == ' ' || lb[te] == '\t')) --te;
-								te++;
-								int width = 0;
-								if (ts < te) {
-									const char *cp = (const char *)(lb + ts);
-									ptrdiff_t rem = (ptrdiff_t)(te - ts);
-									while (rem > 0) {
-										int ucw = utf8_decode_fwrd(&cp, &rem);
-										if (ucw >= 0) {
-											int cw = joe_wcwidth(1, ucw);
-											if (cw > 0) width += cw;
-										}
-									}
-								}
-								if (width > table_col_width[k])
-									table_col_width[k] = width;
+								if (cs >= ce) continue;
+								int has_left = (lb[cs] == ':') ? 1 : 0;
+								int has_right = (lb[ce - 1] == ':') ? 1 : 0;
+								if (has_left && has_right)
+									table_col_align[k] = 1; /* center */
+								else if (has_right)
+									table_col_align[k] = 2; /* right */
 							}
 						}
+					} else {
+						/* Feature 2.2: Track per-column display widths */
+						int pipe_pos[MAX_TABLE_COLS];
+						int np = 0;
+						int ci2;
+						for (ci2 = 0; ci2 < ll && np < MAX_TABLE_COLS; ci2++)
+							if (lb[ci2] == '|') pipe_pos[np++] = ci2;
+						int max_col = np > 0 ? np - 1 : 0;
+						if (max_col > MAX_TABLE_COLS) max_col = MAX_TABLE_COLS;
+						int k;
+						for (k = 0; k < max_col; k++) {
+							int cs = pipe_pos[k] + 1;
+							int ce = (k + 1 < np) ? pipe_pos[k + 1] : ll;
+							/* Trim leading/trailing whitespace */
+							int ts = cs;
+							while (ts < ce && (lb[ts] == ' ' || lb[ts] == '\t')) ++ts;
+							int te = ce - 1;
+							while (te >= ts && (lb[te] == ' ' || lb[te] == '\t')) --te;
+							te++;
+							int width = 0;
+							if (ts < te) {
+								const char *cp = (const char *)(lb + ts);
+								ptrdiff_t rem = (ptrdiff_t)(te - ts);
+								while (rem > 0) {
+									int ucw = utf8_decode_fwrd(&cp, &rem);
+									if (ucw >= 0) {
+										int cw = joe_wcwidth(1, ucw);
+										if (cw > 0) width += cw;
+									}
+								}
+							}
+							if (width > table_col_width[k])
+								table_col_width[k] = width;
+						}
+					}
 
-							consecutive++;
-						} else {
-						/* Non-table line — if we found at least 2 table lines, we have a region */
-						if (first_table_line != -1 && consecutive >= 2) {
-							table_region_start = first_table_line;
-							table_region_end = scan_line;
-							table_separator_line = sep_line;
-							table_col_count = col_cnt;
-						}
-							break;
-						}
+						consecutive++;
+					} else {
+					/* Non-table line — if we found at least 2 table lines, we have a region */
+					if (first_table_line != -1 && consecutive >= 2) {
+						table_region_start = first_table_line;
+						table_region_end = scan_line;
+						table_separator_line = sep_line;
+						table_col_count = col_cnt;
+					}
+						break;
+					}
 						pnextl(scan);
 						scan_line++;
 					}
@@ -1779,11 +1817,15 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 				}
 
 				prm(scan);
+					/* If no table region was found, record in negative cache */
+					if (table_region_start == -1)
+						table_no_region_line = buf_line;
 				table_cached_for_line = buf_line;
 			}
 		}
 
-		/* Determine what kind of row we are */
+		skip_table_scan:
+			/* Determine what kind of row we are */
 		if (buf_line >= table_region_start && buf_line < table_region_end) {
 			if (buf_line == table_separator_line) {
 				row_type = TABLE_ROW_SEPARATOR;
@@ -1800,7 +1842,7 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 		}
 
 		if (row_type != TABLE_ROW_NONE) {
-			if (row_type != TABLE_ROW_NONE && table_col_count > 0) {
+			if (table_col_count > 0) {
 				/* Feature 2.2: Full table layout engine */
 				render_padded_table_row(t, y, screen, attr, x, w, bw, line, line_len, row_type);
 				viewmode_table_rendered = 1;
@@ -2144,11 +2186,6 @@ skip_emphasis:
 							if (!viewmode_link_url || viewmode_link_url_size < line_len) {
 								viewmode_free_link_urls();
 								char **nl = (char **)joe_realloc(viewmode_link_url, (ptrdiff_t)line_len * (ptrdiff_t)sizeof(char *));
-								if (!nl) {
-									joe_free(url);
-									i = k + 1;
-									continue;
-								}
 								viewmode_link_url = nl;
 								/* Ensure newly grown region is NULLed. */
 								if (viewmode_link_url_size < line_len) {
@@ -2191,10 +2228,6 @@ skip_emphasis:
 						if (!viewmode_link_url || viewmode_link_url_size < line_len) {
 							viewmode_free_link_urls();
 							char **nl = (char **)joe_realloc(viewmode_link_url, (ptrdiff_t)line_len * (ptrdiff_t)sizeof(char *));
-							if (!nl) {
-								i = k + 1;
-								continue;
-							}
 							viewmode_link_url = nl;
 							if (viewmode_link_url_size < line_len) {
 								memset(viewmode_link_url + viewmode_link_url_size, 0,
@@ -2241,12 +2274,6 @@ skip_emphasis:
 			if (!viewmode_col_map || viewmode_col_map_size < (line_len > 0 ? line_len : 1)) {
 				int need = line_len > 0 ? line_len : 1;
 				off_t *nm = (off_t *)joe_realloc(viewmode_col_map, (ptrdiff_t)need * (ptrdiff_t)sizeof(off_t));
-				if (!nm) {
-					/* OOM — continue rendering without cursor mapping */
-					viewmode_col_map_size = 0;
-					viewmode_col_map_line = -1;
-					goto done;
-				}
 				viewmode_col_map = nm;
 				viewmode_col_map_size = need;
 			}
@@ -2727,6 +2754,7 @@ BW *bwmk(W *window, B *b, int prompt)
 	w->db = 0;
 	w->shell_flag = 0;
 	w->pasting = 0;
+	w->last_viewmode = 0;
 	return w;
 }
 
@@ -2738,7 +2766,7 @@ static struct file_pos {
 	LINK(struct file_pos) link;
 	char *name;
 	off_t line;
-} file_pos = { { &file_pos, &file_pos } };
+} file_pos = { { &file_pos, &file_pos }, NULL, 0 };
 
 static int file_pos_count;
 
@@ -2865,6 +2893,7 @@ char *ustat_line;
 
 int ustat(W *w, int k)
 {
+	(void)k;
 	BW *bw;
 	int c;
 	const char *msg;
@@ -2887,6 +2916,7 @@ int ustat(W *w, int k)
 
 int ucrawlr(W *w, int k)
 {
+	(void)k;
 	BW *bw;
 	ptrdiff_t amnt;
 	WIND_BW(bw, w);
@@ -2912,6 +2942,7 @@ int ucrawlr(W *w, int k)
 
 int ucrawll(W *w, int k)
 {
+	(void)k;
 	BW *bw;
 	off_t amnt;
 	WIND_BW(bw, w);

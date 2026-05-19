@@ -97,8 +97,8 @@ static void grmem(H *hdr, char *ptr, short ofst, char *blk, short size)
 }
 
 
-static H nhdrs = { {&nhdrs, &nhdrs} };
-static H ohdrs = { {&ohdrs, &ohdrs} };
+static H nhdrs = { {&nhdrs, &nhdrs}, 0, 0, 0, 0, 0 };
+static H ohdrs = { {&ohdrs, &ohdrs}, 0, 0, 0, 0, 0 };
 
 /* Header allocation */
 static H *halloc(void)
@@ -128,7 +128,7 @@ static void hfreechn(H *h)
 }
 
 
-static P frptrs = { {&frptrs, &frptrs} };
+static P frptrs = { {&frptrs, &frptrs}, NULL, 0, NULL, NULL, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL };
 
 /* Pointer allocation */
 static P *palloc(void)
@@ -142,8 +142,11 @@ static void pfree(P *p)
 }
 
 /* Doubly linked list of buffers and free buffer structures */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
 B bufs = { {&bufs, &bufs} };
 static B frebufs = { {&frebufs, &frebufs} };
+#pragma GCC diagnostic pop
 
 void set_file_pos_orphaned(void)
 {
@@ -168,6 +171,7 @@ B *bafter(B *b)
 
 int udebug_joe(W *w, int k)
 {
+	(void)k;
 	char buf[1024];
 	BW *bw;
 	B *b;
@@ -2794,8 +2798,8 @@ B *bload(const char *s)
 			mod_time = sbuf.st_mtime;
 		}
 	}
-	joesep(n);
 
+	joesep(n);
 	/* Abort if couldn't open */
 	if (!fi) {
 		if (errno == ENOENT)
@@ -3267,8 +3271,8 @@ int bsave(P *p, const char *as, off_t size, int flag)
 		f = fopen(dequote(s), "w");
 		norm = 1;
 	}
-	joesep(s);
 
+	joesep(s);
 	if (!f) {
 		berror = -4;
 		goto opnerr;
@@ -3450,6 +3454,8 @@ void ttsig(int sig)
 	else
 		fprintf(ttsig_f, "*** JOE was aborted because the terminal closed\n");
 	fflush(ttsig_f);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-nonliteral"
 	for (b = bufs.link.next; b != &bufs; b = b->link.next)
 		if (b->changed) {
 			if (b->name)
@@ -3459,6 +3465,7 @@ void ttsig(int sig)
 			fflush(ttsig_f);
 			bsavefd(b->bof, fileno(ttsig_f), b->eof->byte);
 		}
+#pragma GCC diagnostic pop
 
 skipfile:
 	if (sig)

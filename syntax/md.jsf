@@ -358,7 +358,7 @@
 # Backtick fence from line_start (column 0)
 :fence_bt_s MdCodeFence
 	"`"		fence_bt_2
-	*		inline_code	noeat recolor=-1
+	*		inline_code	mark noeat recolor=-1
 
 :fence_bt_2 MdCodeFence
 	"`"		fence_bt_3
@@ -440,9 +440,8 @@
 	"\n"		fence_bt_body
 
 :fence_bt_body MdCodeBlock
-	*		fence_bt_body
 	"`"		fence_bt_e1
-	"\n"		fence_bt_body
+	*		fence_bt_body
 
 :fence_bt_e1 MdCodeFence
 	"`"		fence_bt_e2
@@ -480,9 +479,8 @@
 	"\n"		fence_tl_body
 
 :fence_tl_body MdCodeBlock
-	*		fence_tl_body
 	"~"		fence_tl_e1
-	"\n"		fence_tl_body
+	*		fence_tl_body
 
 :fence_tl_e1 MdCodeFence
 	"~"		fence_tl_e2
@@ -597,7 +595,7 @@
 
 :ordered_list MdList
 	"0-9"		ordered_list
-	"."		ordered_mark	recolor=-1
+	".)"		ordered_mark	recolor=-1
 	*		idle		noeat
 
 :ordered_mark Idle
@@ -621,13 +619,14 @@
 
 :maybe_cb_sp Idle
 	"]"		idle
-	*		link_text	mark recolor=-1 noeat
+	*		link_text	mark recolor=-2 noeat
 
 :maybe_cb_x Idle
 	"]"		idle
-	*		link_text	mark recolor=-1 noeat
+	*		link_text	mark recolor=-2 noeat
 
 :link_text MdLinkText
+	"\n"		line_start
 	*		link_text
 	"]"		link_text_end	markend
 
@@ -637,14 +636,17 @@
 	*		idle		noeat
 
 :link_url MdLinkUrl
+	"\n"		line_start
 	*		link_url
 	")"		link_end	noeat
 
 :link_ref MdLinkText
+	"\n"		line_start
 	*		link_ref
 	"]"		link_end	noeat
 
 :image_alt MdImageAlt
+	"\n"		line_start
 	*		image_alt
 	"]"		image_alt_end	markend
 
@@ -654,10 +656,12 @@
 	*		idle		noeat
 
 :image_url MdLinkUrl
+	"\n"		line_start
 	*		image_url
 	")"		link_end	noeat
 
 :image_ref MdLinkText
+	"\n"		line_start
 	*		image_ref
 	"]"		link_end	noeat
 

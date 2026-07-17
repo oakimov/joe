@@ -56,6 +56,8 @@ pub const paintMsgs = paint.paintMsgs;
 pub const paintLinum = paint.paintLinum;
 pub const paintBody = paint.paintBody;
 pub const paintText = paint.paintText;
+pub const paintHelpLine = paint.paintHelpLine;
+pub const paintHelp = paint.paintHelp;
 pub const paintWindow = paint.paintWindow;
 pub const paintAll = paint.paintAll;
 

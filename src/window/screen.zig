@@ -127,6 +127,8 @@ pub const Screen = struct {
     height: u16,
     /// Help-line rows reserved at top (JOE `wind`).
     wind: u16 = 0,
+    /// Borrowed help-screen text (JOE `help_actual->text`); `\n` separates rows.
+    help_text: ?[]const u8 = null,
     /// Top→bottom on-screen order (may include off-screen windows with `y < 0`).
     order: std.ArrayList(*Window),
     by_id: std.AutoHashMapUnmanaged(WindowId, *Window),
@@ -813,6 +815,19 @@ pub const Screen = struct {
         return neu;
     }
 
+    /// Count help rows (JOE `help_init` line count).
+    /// Each `\n` starts a row; a final non-empty partial line (no trailing `\n`)
+    /// also counts — Zig line-strings omit the last newline.
+    pub fn countHelpLines(text_blob: []const u8) u16 {
+        if (text_blob.len == 0) return 0;
+        var n: u16 = 0;
+        for (text_blob) |ch| {
+            if (ch == '\n') n +|= 1;
+        }
+        if (text_blob[text_blob.len - 1] != '\n') n +|= 1;
+        return n;
+    }
+
     /// Reserve help lines at top (JOE `wind`) and relayout.
     pub fn setHelpLines(self: *Screen, lines: u16) void {
         self.wind = lines;
@@ -820,6 +835,18 @@ pub const Screen = struct {
             self.wind = self.height -| fit_min;
         }
         self.layout();
+    }
+
+    /// Show help chrome (JOE `help_on`): borrow `text`, set `wind` from line count.
+    pub fn helpOn(self: *Screen, text_blob: []const u8) void {
+        self.help_text = text_blob;
+        self.setHelpLines(countHelpLines(text_blob));
+    }
+
+    /// Hide help chrome (JOE `help_off`).
+    pub fn helpOff(self: *Screen) void {
+        self.help_text = null;
+        self.setHelpLines(0);
     }
 
     /// Abort window and its dependents; return height to `org` when present.
@@ -1102,6 +1129,26 @@ test "setHelpLines reserves wind rows" {
     try testing.expectEqual(@as(u16, 2), scr.wind);
     try testing.expectEqual(@as(i16, 2), a.y);
     try testing.expectEqual(@as(u16, 22), a.h);
+}
+
+test "helpOn/helpOff set wind from newline count" {
+    var scr = try Screen.init(testing.allocator, 80, 24);
+    defer scr.deinit();
+    const a = try scr.createText(null, null, 24);
+    scr.layout();
+    const help =
+        \\\uA\u left \| right
+        \\\bB\b row2
+    ;
+    try testing.expectEqual(@as(u16, 2), Screen.countHelpLines(help));
+    scr.helpOn(help);
+    try testing.expectEqual(@as(u16, 2), scr.wind);
+    try testing.expect(scr.help_text != null);
+    try testing.expectEqual(@as(i16, 2), a.y);
+    scr.helpOff();
+    try testing.expectEqual(@as(u16, 0), scr.wind);
+    try testing.expect(scr.help_text == null);
+    try testing.expectEqual(@as(i16, 0), a.y);
 }
 
 test "showAll equalizes main windows" {

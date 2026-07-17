@@ -268,6 +268,109 @@ pub fn paintBody(term: *TermScreen, t: *const tw.TextWindow, attr: Attribute) vo
     }
 }
 
+/// Minimum display width of a help line (JOE help_display first pass).
+/// Attribute escapes consume no columns; `\|` is a spring (not width);
+/// other `\X` escapes contribute one column for `X`.
+fn helpMinWidth(line: []const u8) struct { width: usize, nspans: usize } {
+    var width: usize = 0;
+    var nspans: usize = 0;
+    var i: usize = 0;
+    while (i < line.len) {
+        if (line[i] == '\\' and i + 1 < line.len) {
+            const esc = line[i + 1];
+            i += 2;
+            switch (esc) {
+                'u', 'U', 'i', 'I', 'b', 'B', 'l', 'L', 'd', 'D', 'f', 'F', 's', 'S', 'z', 'Z' => {},
+                '|' => nspans += 1,
+                else => width += 1,
+            }
+            continue;
+        }
+        i += 1;
+        width += 1;
+    }
+    return .{ .width = width, .nspans = nspans };
+}
+
+/// Paint one help row across the full terminal width (JOE `help_display` row).
+/// Supports genfmt-style toggles plus `\|` springs that absorb leftover width.
+pub fn paintHelpLine(term: *TermScreen, y: i16, line: []const u8, base_attr: Attribute) void {
+    const sy = screenY(term, y) orelse return;
+    const twid: usize = term.width;
+    const meta = helpMinWidth(line);
+    var spanwidth: usize = 0;
+    var spanextra: usize = meta.nspans;
+    if (meta.width < twid and meta.nspans > 0) {
+        spanwidth = (twid - meta.width) / meta.nspans;
+        const rem = twid - meta.width - meta.nspans * spanwidth;
+        spanextra = meta.nspans - rem;
+    }
+
+    var attr = base_attr;
+    var x: usize = 0;
+    var i: usize = 0;
+    var spancount: usize = 0;
+    while (i < line.len and x < twid) {
+        if (line[i] == '\\' and i + 1 < line.len) {
+            const esc = line[i + 1];
+            i += 2;
+            switch (esc) {
+                'u', 'U' => attr = toggleStyle(attr, .underline),
+                'i', 'I' => attr = toggleStyle(attr, .inverse),
+                'b', 'B' => attr = toggleStyle(attr, .bold),
+                'l', 'L' => attr = toggleStyle(attr, .italic),
+                'd', 'D' => attr = toggleStyle(attr, .dim),
+                'f', 'F' => attr = toggleStyle(attr, .blink),
+                's', 'S' => attr = toggleStyle(attr, .crossed_out),
+                'z', 'Z' => attr = toggleStyle(attr, .double_underline),
+                '|' => {
+                    var z: usize = 0;
+                    while (z < spanwidth and x < twid) : (z += 1) {
+                        term.writeChar(@intCast(x), sy, ' ', attr);
+                        x += 1;
+                    }
+                    if (spancount >= spanextra and x < twid) {
+                        term.writeChar(@intCast(x), sy, ' ', attr);
+                        x += 1;
+                    }
+                    spancount += 1;
+                },
+                else => {
+                    term.writeChar(@intCast(x), sy, esc, attr);
+                    x += 1;
+                },
+            }
+            continue;
+        }
+        const ch: u21 = line[i];
+        i += 1;
+        term.writeChar(@intCast(x), sy, ch, attr);
+        x += 1;
+    }
+    if (x < twid) clearWinEol(term, @intCast(x), y, @intCast(twid - x), base_attr);
+}
+
+/// Paint help chrome into rows `[0, wind)` (JOE `help_display` before window disp).
+/// `text` is borrowed multiline help (`\n`-separated). Extra wind rows are cleared.
+pub fn paintHelp(term: *TermScreen, wind: u16, text: ?[]const u8, attr: Attribute) void {
+    if (wind == 0) return;
+    var rest: []const u8 = text orelse &[_]u8{};
+    var y: u16 = 0;
+    while (y < wind) : (y += 1) {
+        var line: []const u8 = &[_]u8{};
+        if (rest.len > 0) {
+            if (std.mem.indexOfScalar(u8, rest, '\n')) |nl| {
+                line = rest[0..nl];
+                rest = rest[nl + 1 ..];
+            } else {
+                line = rest;
+                rest = &[_]u8{};
+            }
+        }
+        paintHelpLine(term, @intCast(y), line, attr);
+    }
+}
+
 pub const PaintError = error{NoTerminal} || Allocator.Error;
 
 /// Paint text-window chrome (status) + shallow body stub (bwgen-shaped).
@@ -321,6 +424,10 @@ pub fn paintAll(scr: *screen.Screen, allocator: Allocator, attr: Attribute) Pain
         .x = scr.cursor_x,
         .y = scr.cursor_y,
     };
+    // JOE edupd: help_display(maint) before the window disp loop.
+    if (scr.wind > 0) {
+        paintHelp(term, scr.wind, scr.help_text, attr);
+    }
     const cur_id = scr.cur_id;
     for (scr.order.items) |w| {
         if (w.y < 0 or w.h == 0) continue;
@@ -644,6 +751,56 @@ test "paintBody clears content when no stub lines" {
     term.writeChar(t.x, @intCast(t.y), 'Z', .none);
     paintBody(&term, t, .none);
     try testing.expect(cellAt(&term, t.x, @intCast(t.y)).isBlankNone());
+}
+
+test "paintHelpLine expands springs and toggles underline" {
+    var term = try TermScreen.init(testing.allocator, 20, 3);
+    defer term.deinit();
+    // min width of "A" + "B" = 2, nspans=3 → leftover 18 / 3 = 6 each.
+    paintHelpLine(&term, 0, "\\|\\uA\\u\\|B\\|", .none);
+    try testing.expectEqual(@as(u21, 'A'), cellAt(&term, 6, 0).cp);
+    try testing.expect(cellAt(&term, 6, 0).attr.underline);
+    try testing.expectEqual(@as(u21, 'B'), cellAt(&term, 13, 0).cp);
+    try testing.expect(!cellAt(&term, 13, 0).attr.underline);
+    // Spring spaces around A.
+    try testing.expectEqual(@as(u21, ' '), cellAt(&term, 0, 0).cp);
+    try testing.expectEqual(@as(u21, ' '), cellAt(&term, 5, 0).cp);
+    try testing.expectEqual(@as(u21, ' '), cellAt(&term, 7, 0).cp);
+}
+
+test "paintAll paints help chrome above windows" {
+    var scr = try screen.Screen.init(testing.allocator, 20, 8);
+    defer scr.deinit();
+    var term = try TermScreen.init(testing.allocator, 20, 8);
+    defer term.deinit();
+    try scr.attachTerm(&term);
+
+    const help =
+        \\\uHELP\u title
+        \\\brow2\b
+    ;
+    const main_w = try scr.createText(null, null, 8);
+    scr.helpOn(help);
+    try testing.expectEqual(@as(u16, 2), scr.wind);
+    try testing.expectEqual(@as(i16, 2), main_w.y);
+
+    const tw_obj = main_w.asText().?;
+    tw_obj.status_line = "STAT";
+
+    _ = try paintAll(&scr, testing.allocator, .none);
+    try testing.expectEqual(@as(u21, 'H'), cellAt(&term, 0, 0).cp);
+    try testing.expect(cellAt(&term, 0, 0).attr.underline);
+    try testing.expectEqual(@as(u21, 'r'), cellAt(&term, 0, 1).cp);
+    try testing.expect(cellAt(&term, 0, 1).attr.bold);
+    // Text status begins at wind row.
+    try testing.expectEqual(@as(u21, 'S'), cellAt(&term, 0, 2).cp);
+
+    scr.helpOff();
+    term.clear();
+    _ = try paintAll(&scr, testing.allocator, .none);
+    try testing.expectEqual(@as(u16, 0), scr.wind);
+    try testing.expectEqual(@as(i16, 0), main_w.y);
+    try testing.expectEqual(@as(u21, 'S'), cellAt(&term, 0, 0).cp);
 }
 
 test "resize syncs attached terminal dimensions" {

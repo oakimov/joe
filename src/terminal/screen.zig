@@ -3,7 +3,8 @@
 //! Stateful cell grid with dirty-row tracking. Common operations emit
 //! ANSI directly (no terminfo required for SGR/cursor/clear). `flush`
 //! diffs `cells` against `display` and emits only changed runs (plus EL
-//! for blank tails). Insert/delete-within-line "magic" stays Phase 6.
+//! for blank tails). When a dirty row is a pure within-line insert/delete,
+//! `flush` may emit ICH/DCH ("magic") before painting remaining diffs.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -246,7 +247,7 @@ pub const Screen = struct {
     current_attr: Attribute = .none,
     /// Flat row-major grid: index = y * width + x
     cells: []Cell,
-    /// Last flushed cells (for future cell-diff). Same shape as `cells`.
+    /// Last flushed cells (cell-diff / magic baseline). Same shape as `cells`.
     display: []Cell,
     dirty_rows: std.DynamicBitSet,
     terminfo: ?terminfo.TermInfo = null,
@@ -262,6 +263,10 @@ pub const Screen = struct {
     /// When true, relative column motion may use tab / back-tab (JOE `opt_usetabs`).
     /// Default false matches JOE; enable explicitly for tab-aware `moveTo`.
     use_tabs: bool = false,
+    /// When true, `flush` may use within-line ICH/DCH when a dirty row is a
+    /// pure insert/delete shift (JOE `insdel` / disabled-C `magic`). Default
+    /// true: ANSI ICH/DCH fallbacks are always available.
+    use_insdel: bool = true,
     /// Fallback tab width when terminfo `it`/`tw` is absent (JOE default 8).
     tab_width: u16 = 8,
     /// Optional sequence overrides (unit tests / hosts without terminfo).
@@ -1202,6 +1207,11 @@ pub const Screen = struct {
         return self.cells[start .. start + self.width];
     }
 
+    fn displayRowSlice(self: *Screen, y: u16) []Cell {
+        const start = @as(usize, y) * @as(usize, self.width);
+        return self.display[start .. start + self.width];
+    }
+
     fn markDirtyRange(self: *Screen, from: u16, to_inclusive: u16) void {
         var y: u16 = from;
         while (y <= to_inclusive) : (y += 1) {
@@ -1332,6 +1342,40 @@ pub const Screen = struct {
         try self.appendSeqOrAnsi(seq, "\x1b[J");
     }
 
+    fn appendIch(self: *Screen, n: u16) !void {
+        if (n == 0) return;
+        if (self.terminfo) |ti| {
+            if (ti.formatIch(n)) |seq| {
+                if (seq.len != 0) {
+                    try self.out.appendSlice(self.allocator, seq);
+                    return;
+                }
+            }
+        }
+        if (n == 1) {
+            try self.out.appendSlice(self.allocator, "\x1b[@");
+        } else {
+            try self.out.print(self.allocator, "\x1b[{d}@", .{n});
+        }
+    }
+
+    fn appendDch(self: *Screen, n: u16) !void {
+        if (n == 0) return;
+        if (self.terminfo) |ti| {
+            if (ti.formatDch(n)) |seq| {
+                if (seq.len != 0) {
+                    try self.out.appendSlice(self.allocator, seq);
+                    return;
+                }
+            }
+        }
+        if (n == 1) {
+            try self.out.appendSlice(self.allocator, "\x1b[P");
+        } else {
+            try self.out.print(self.allocator, "\x1b[{d}P", .{n});
+        }
+    }
+
     /// Insert `count` blank cells at `(x, y)`, shifting the rest of the row
     /// right (cells past the right edge are dropped). Emits ICH (terminfo
     /// `ich`/`ich1` or ANSI `CSI n @`).
@@ -1352,19 +1396,7 @@ pub const Screen = struct {
         self.cursor_x = x;
         self.cursor_y = y;
         try self.appendCup(x, y);
-        if (self.terminfo) |ti| {
-            if (ti.formatIch(n)) |seq| {
-                if (seq.len != 0) {
-                    try self.out.appendSlice(self.allocator, seq);
-                    return;
-                }
-            }
-        }
-        if (n == 1) {
-            try self.out.appendSlice(self.allocator, "\x1b[@");
-        } else {
-            try self.out.print(self.allocator, "\x1b[{d}@", .{n});
-        }
+        try self.appendIch(n);
     }
 
     /// Delete `count` cells at `(x, y)`, shifting the rest of the row left and
@@ -1385,23 +1417,135 @@ pub const Screen = struct {
         self.cursor_x = x;
         self.cursor_y = y;
         try self.appendCup(x, y);
-        if (self.terminfo) |ti| {
-            if (ti.formatDch(n)) |seq| {
-                if (seq.len != 0) {
-                    try self.out.appendSlice(self.allocator, seq);
-                    return;
-                }
+        try self.appendDch(n);
+    }
+
+    const LineMagic = struct {
+        kind: enum { insert, delete },
+        at: u16,
+        n: u16,
+        /// Columns kept by the shift (width - at - n). Larger is better.
+        keep: u16,
+    };
+
+    fn rowHasWideGlyph(self: *const Screen, y: u16) bool {
+        const row_off = @as(usize, y) * @as(usize, self.width);
+        var x: u16 = 0;
+        while (x < self.width) : (x += 1) {
+            const cp = self.cells[row_off + x].cp;
+            if (cp != 0 and displayWidth(cp) >= 2) return true;
+            const dcp = self.display[row_off + x].cp;
+            if (dcp != 0 and displayWidth(dcp) >= 2) return true;
+        }
+        return false;
+    }
+
+    fn cellsEqualRange(a: []const Cell, b: []const Cell) bool {
+        if (a.len != b.len) return false;
+        for (a, b) |ca, cb| {
+            if (!Cell.eql(ca, cb)) return false;
+        }
+        return true;
+    }
+
+    /// Non-blank-aware score for a kept shifted run (JOE magic skips pure spaces).
+    fn shiftKeepScore(cells: []const Cell) u16 {
+        var score: u16 = 0;
+        var prev_blank = true;
+        for (cells) |c| {
+            const blank = c.isBlankNone();
+            if (!blank or !prev_blank) score +|= 1;
+            prev_blank = blank;
+        }
+        return score;
+    }
+
+    /// Find a pure within-line insert/delete at the first differing column.
+    /// Requires the entire shifted tail to match and a keep-score >= 2.
+    fn findLineMagic(self: *const Screen, y: u16) ?LineMagic {
+        if (!self.use_insdel or self.width < 3) return null;
+        if (self.rowHasWideGlyph(y)) return null;
+
+        const row_off = @as(usize, y) * @as(usize, self.width);
+        const width = self.width;
+        const cells = self.cells[row_off .. row_off + width];
+        const disp = self.display[row_off .. row_off + width];
+
+        var left: u16 = 0;
+        while (left < width and Cell.eql(cells[left], disp[left])) : (left += 1) {}
+        if (left >= width) return null;
+
+        var best: ?LineMagic = null;
+
+        // Deletes: want[left .. width-n] == display[left+n .. width]
+        var n: u16 = 1;
+        while (n < width - left) : (n += 1) {
+            const keep = width - left - n;
+            if (keep < 2) break;
+            if (!cellsEqualRange(cells[left .. left + keep], disp[left + n .. left + n + keep])) continue;
+            const score = shiftKeepScore(cells[left .. left + keep]);
+            if (score < 2) continue;
+            const cand = LineMagic{ .kind = .delete, .at = left, .n = n, .keep = keep };
+            if (best == null or cand.keep > best.?.keep or (cand.keep == best.?.keep and cand.n < best.?.n)) {
+                best = cand;
             }
         }
-        if (n == 1) {
-            try self.out.appendSlice(self.allocator, "\x1b[P");
-        } else {
-            try self.out.print(self.allocator, "\x1b[{d}P", .{n});
+
+        // Inserts: want[left+n .. width] == display[left .. width-n]
+        n = 1;
+        while (n < width - left) : (n += 1) {
+            const keep = width - left - n;
+            if (keep < 2) break;
+            if (!cellsEqualRange(cells[left + n .. left + n + keep], disp[left .. left + keep])) continue;
+            const score = shiftKeepScore(cells[left + n .. left + n + keep]);
+            if (score < 2) continue;
+            const cand = LineMagic{ .kind = .insert, .at = left, .n = n, .keep = keep };
+            if (best == null or cand.keep > best.?.keep or (cand.keep == best.?.keep and cand.n < best.?.n)) {
+                best = cand;
+            }
         }
+
+        return best;
+    }
+
+    fn applyDisplayDelete(self: *Screen, x: u16, y: u16, n: u16) void {
+        const row = self.displayRowSlice(y);
+        var dst: u16 = x;
+        while (dst + n < self.width) : (dst += 1) {
+            row[dst] = row[dst + n];
+        }
+        @memset(row[self.width - n ..], .{});
+    }
+
+    fn applyDisplayInsert(self: *Screen, x: u16, y: u16, n: u16) void {
+        const row = self.displayRowSlice(y);
+        var src: u16 = self.width - n;
+        while (src > x) {
+            src -= 1;
+            row[src + n] = row[src];
+        }
+        @memset(row[x .. x + n], .{});
+    }
+
+    fn applyLineMagic(self: *Screen, y: u16, op: LineMagic) !void {
+        try self.moveTo(op.at, y);
+        switch (op.kind) {
+            .delete => {
+                try self.appendDch(op.n);
+                self.applyDisplayDelete(op.at, y, op.n);
+            },
+            .insert => {
+                try self.appendIch(op.n);
+                self.applyDisplayInsert(op.at, y, op.n);
+            },
+        }
+        self.cursor_x = op.at;
+        self.cursor_y = y;
     }
 
     /// Emit only cells that differ from `display`, then sync `display` and
-    /// clear dirty bits. Blank tails use EL. Does not write to a TTY —
+    /// clear dirty bits. Blank tails use EL. Within-line insert/delete may
+    /// emit ICH/DCH first when `use_insdel`. Does not write to a TTY —
     /// caller drains `out` / `takeOut()`.
     pub fn flush(self: *Screen) !void {
         const want_x = self.cursor_x;
@@ -1412,6 +1556,9 @@ pub const Screen = struct {
         var y: u16 = 0;
         while (y < self.height) : (y += 1) {
             if (!self.dirty_rows.isSet(y)) continue;
+            if (self.findLineMagic(y)) |op| {
+                try self.applyLineMagic(y, op);
+            }
             const row_off = @as(usize, y) * @as(usize, self.width);
             var x: u16 = 0;
             while (x < self.width) {
@@ -2277,4 +2424,91 @@ test "Screen.flush after clear does not repaint blanks" {
     const out = screen.takeOut();
     try testing.expect(std.mem.indexOf(u8, out, "xy") == null);
     try testing.expect(out.len < 24);
+}
+
+test "Screen.flush magic emits DCH on within-line delete" {
+    var screen = try Screen.init(testing.allocator, 8, 1);
+    defer screen.deinit();
+    screen.writeText(0, 0, "ABCDEFGH", .none);
+    screen.setCursor(0, 0);
+    try screen.flush();
+    screen.clearOut();
+
+    // Model-only delete of 'C' at col 2: ABDEFGH + blank
+    const row = screen.rowSlice(0);
+    row[2] = row[3];
+    row[3] = row[4];
+    row[4] = row[5];
+    row[5] = row[6];
+    row[6] = row[7];
+    row[7] = .{};
+    screen.dirty_rows.set(0);
+    screen.setCursor(2, 0);
+    try screen.flush();
+    const out = screen.takeOut();
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[P") != null or std.mem.indexOf(u8, out, "\x1b[1P") != null);
+    // Should not repaint the shifted tail "DEFGH".
+    try testing.expect(std.mem.indexOf(u8, out, "DEFGH") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "ABCDEFGH") == null);
+    try testing.expectEqual(@as(u21, 'A'), screen.display[0].cp);
+    try testing.expectEqual(@as(u21, 'B'), screen.display[1].cp);
+    try testing.expectEqual(@as(u21, 'D'), screen.display[2].cp);
+    try testing.expectEqual(@as(u21, 'H'), screen.display[6].cp);
+    try testing.expect(screen.display[7].isBlankNone());
+}
+
+test "Screen.flush magic emits ICH on within-line insert" {
+    var screen = try Screen.init(testing.allocator, 8, 1);
+    defer screen.deinit();
+    screen.writeText(0, 0, "ABDEFGH ", .none);
+    // Force last cell blank-none for a clean shift-in.
+    screen.rowSlice(0)[7] = .{};
+    screen.setCursor(0, 0);
+    try screen.flush();
+    screen.clearOut();
+
+    // Model-only insert of 'C' at col 2: ABCDEFGH (drops trailing blank)
+    const row = screen.rowSlice(0);
+    var src: u16 = 7;
+    while (src > 2) {
+        src -= 1;
+        row[src + 1] = row[src];
+    }
+    row[2] = .{ .cp = 'C', .attr = .none };
+    screen.dirty_rows.set(0);
+    screen.setCursor(3, 0);
+    try screen.flush();
+    const out = screen.takeOut();
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[@") != null or std.mem.indexOf(u8, out, "\x1b[1@") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "C") != null);
+    // Shifted tail should not be fully repainted.
+    try testing.expect(std.mem.indexOf(u8, out, "DEFGH") == null);
+    try testing.expectEqual(@as(u21, 'A'), screen.display[0].cp);
+    try testing.expectEqual(@as(u21, 'C'), screen.display[2].cp);
+    try testing.expectEqual(@as(u21, 'D'), screen.display[3].cp);
+    try testing.expectEqual(@as(u21, 'H'), screen.display[7].cp);
+}
+
+test "Screen.flush magic disabled skips ICH/DCH" {
+    var screen = try Screen.init(testing.allocator, 8, 1);
+    defer screen.deinit();
+    screen.use_insdel = false;
+    screen.writeText(0, 0, "ABCDEFGH", .none);
+    screen.setCursor(0, 0);
+    try screen.flush();
+    screen.clearOut();
+
+    const row = screen.rowSlice(0);
+    row[2] = row[3];
+    row[3] = row[4];
+    row[4] = row[5];
+    row[5] = row[6];
+    row[6] = row[7];
+    row[7] = .{};
+    screen.dirty_rows.set(0);
+    screen.setCursor(2, 0);
+    try screen.flush();
+    const out = screen.takeOut();
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[P") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[1P") == null);
 }

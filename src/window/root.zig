@@ -33,6 +33,16 @@ pub const QueryWindow = qw.QueryWindow;
 pub const breakHeight = qw.breakHeight;
 pub const promptHeight = qw.promptHeight;
 
+pub const MenuWindow = menu.MenuWindow;
+pub const GridConfig = menu.GridConfig;
+pub const RcMenu = menu.RcMenu;
+pub const RcMenuEntry = menu.RcMenuEntry;
+pub const MenuRegistry = menu.MenuRegistry;
+pub const configureGrid = menu.configureGrid;
+pub const linesFor = menu.linesFor;
+pub const commonPrefix = menu.commonPrefix;
+pub const completePrefix = menu.completePrefix;
+
 test {
     _ = screen;
     _ = tw;

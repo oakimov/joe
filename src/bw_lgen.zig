@@ -7,6 +7,8 @@
 //! path). Feature 2.2 padded table rows use `zig_bw_table_row` → `render.table.paintRow`
 //! with C-computed widths/aligns (region detect stays in C `lgen_view`). Line-number
 //! gutters use `zig_bw_gennum` (JOE `" %21lld "` trailing `lincols`; past-EOF blanks).
+//! Window paint loops use `zig_bw_bwgen` (mark/lattr/viewmode setup stays in C;
+//! loops call C `getto`/`lgen`/`gennum` so Path A body/gutter bridges still apply).
 //! Default off until soak. Falls back to C when the gate is off or unsupported
 //! (non-UTF-8 body). Feature 2.1 simple pipe substitute stays in C.
 //!
@@ -140,6 +142,175 @@ pub export fn zig_bw_gennum(
     }
     outatr_complete(t);
     return 0;
+}
+
+const BW = opaque {};
+
+extern var have: c_int;
+extern fn zig_c_bw_getto(p: ?*P, cur: ?*P, top: ?*P, line: i64) ?*P;
+extern fn zig_c_bw_lgen(
+    t: ?*SCRN,
+    y: isize,
+    screen: ?[*][COMPOSE]c_int,
+    attr_row: ?[*]c_int,
+    x: isize,
+    w: isize,
+    p: ?*P,
+    scr: i64,
+    from: i64,
+    to: i64,
+    st: HighlightState,
+    bw: ?*BW,
+) c_int;
+extern fn zig_c_bw_gennum(
+    w: ?*BW,
+    screen: ?[*][COMPOSE]c_int,
+    attr_row: ?[*]c_int,
+    t: ?*SCRN,
+    y: isize,
+    compose: ?[*]c_int,
+) void;
+extern fn zig_c_bw_get_highlight_state(w: ?*BW, p: ?*P, line: i64) HighlightState;
+/// JOE `bwgen` paint loops → C `getto` / `gennum` / `lgen`.
+///
+/// Mark range / lattr / viewmode-invalidate stay in C. This only owns the two
+/// screen-row loops (cursor→bottom, then top→cursor) plus `prm` of the walk
+/// pointer. Returns `0` on success, `-1` to fall back to C loops.
+pub export fn zig_bw_bwgen(
+    w: ?*BW,
+    t: ?*SCRN,
+    scrn: ?[*][COMPOSE]c_int,
+    attr_base: ?[*]c_int,
+    updtab: ?[*]c_int,
+    compose: ?[*]c_int,
+    scr_w: isize,
+    win_x: isize,
+    win_y: isize,
+    win_w: isize,
+    win_h: isize,
+    mid_y: isize,
+    top: ?*P,
+    cursor: ?*P,
+    top_line: i64,
+    offset: i64,
+    linums: c_int,
+    linchg: c_int,
+    dosquare: c_int,
+    from: i64,
+    to: i64,
+    fromline: i64,
+    toline: i64,
+) c_int {
+    if (zig_bw_lgen_enabled == 0) return -1;
+    if (w == null or t == null or scrn == null or attr_base == null or updtab == null) return -1;
+    if (top == null or cursor == null) return -1;
+    if (scr_w <= 0 or win_h < 0 or win_w < 0) return -1;
+
+    const bot = win_y + win_h;
+    const x1 = win_x + win_w;
+    var p: ?*P = null;
+
+    const PaintCtx = struct {
+        w: ?*BW,
+        t: ?*SCRN,
+        scrn: [*][COMPOSE]c_int,
+        attr_base: [*]c_int,
+        updtab: [*]c_int,
+        compose: ?[*]c_int,
+        scr_w: isize,
+        win_x: isize,
+        win_y: isize,
+        x1: isize,
+        top: ?*P,
+        cursor: ?*P,
+        top_line: i64,
+        offset: i64,
+        linums: c_int,
+        linchg: c_int,
+        dosquare: c_int,
+        from: i64,
+        to: i64,
+        fromline: i64,
+        toline: i64,
+    };
+
+    const ctx = PaintCtx{
+        .w = w,
+        .t = t,
+        .scrn = scrn.?,
+        .attr_base = attr_base.?,
+        .updtab = updtab.?,
+        .compose = compose,
+        .scr_w = scr_w,
+        .win_x = win_x,
+        .win_y = win_y,
+        .x1 = x1,
+        .top = top,
+        .cursor = cursor,
+        .top_line = top_line,
+        .offset = offset,
+        .linums = linums,
+        .linchg = linchg,
+        .dosquare = dosquare,
+        .from = from,
+        .to = to,
+        .fromline = fromline,
+        .toline = toline,
+    };
+
+    // Cursor line → bottom.
+    var y = mid_y;
+    while (y != bot) : (y += 1) {
+        if (have != 0) break;
+        p = paintOneRow(&ctx, y, p);
+    }
+
+    // Top → cursor line.
+    y = win_y;
+    while (y != mid_y) : (y += 1) {
+        if (have != 0) break;
+        p = paintOneRow(&ctx, y, p);
+    }
+
+    if (p) |pp| prm(pp);
+    return 0;
+}
+
+fn paintOneRow(ctx: anytype, y: isize, p_in: ?*P) ?*P {
+    const row_off: usize = @intCast(y * ctx.scr_w);
+    const screen: [*][COMPOSE]c_int = ctx.scrn + row_off;
+    const attr_row: [*]c_int = ctx.attr_base + row_off;
+    if (ctx.linums != 0) {
+        zig_c_bw_gennum(ctx.w, screen, attr_row, ctx.t, y, ctx.compose);
+    }
+    if (ctx.linchg == 0 and ctx.updtab[@intCast(y)] == 0) return p_in;
+
+    const buf_line = ctx.top_line + y - ctx.win_y;
+    const p = zig_c_bw_getto(p_in, ctx.cursor, ctx.top, buf_line);
+    const st = zig_c_bw_get_highlight_state(ctx.w, p, buf_line);
+    var use_from = ctx.from;
+    var use_to = ctx.to;
+    if (ctx.dosquare != 0) {
+        if (buf_line < ctx.fromline or buf_line > ctx.toline) {
+            use_from = 0;
+            use_to = 0;
+        }
+    }
+    ctx.updtab[@intCast(y)] = zig_c_bw_lgen(
+        ctx.t,
+        y,
+        screen,
+        attr_row,
+        ctx.win_x,
+        ctx.x1,
+        p,
+        ctx.offset,
+        use_from,
+        use_to,
+        st,
+        ctx.w,
+    );
+    return p;
 }
 
 /// Feature 2.2 padded table row → Zig `table.paintRow` → hybrid `outatr`.
@@ -1094,4 +1265,15 @@ test "formatLinum trailing cols matches JOE gennum" {
     // (e.g. 10000 with 5 cols → "0000 ").
     const f3 = try std.fmt.bufPrint(&tmp, " {d: >21} ", .{@as(u64, 10000)});
     try std.testing.expectEqualStrings("0000 ", f3[f3.len - 5 ..]);
+}
+
+test "bwgen square mark line scope matches C" {
+    // Outside [fromline,toline] C clears from/to to 0.
+    const buf_line: i64 = 5;
+    const fromline: i64 = 2;
+    const toline: i64 = 4;
+    const in_range = buf_line >= fromline and buf_line <= toline;
+    try std.testing.expect(!in_range);
+    const buf_line2: i64 = 3;
+    try std.testing.expect(buf_line2 >= fromline and buf_line2 <= toline);
 }

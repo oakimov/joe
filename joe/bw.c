@@ -27,6 +27,13 @@ extern int zig_bw_table_row(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *a
 extern int zig_bw_gennum(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
 	int *compose, int lincols, int have_number, off_t line_1based, int atr,
 	struct charmap *charmap);
+/* Path A: gated Zig bwgen paint loops (mark setup stays in C). */
+extern int zig_bw_bwgen(BW *w, SCRN *t, int (*scrn)[COMPOSE], int *attr_base,
+	int *updtab, int *compose, ptrdiff_t scr_w,
+	ptrdiff_t win_x, ptrdiff_t win_y, ptrdiff_t win_w, ptrdiff_t win_h,
+	ptrdiff_t mid_y, P *top, P *cursor, off_t top_line, off_t offset,
+	int linums, int linchg, int dosquare,
+	off_t from, off_t to, off_t fromline, off_t toline);
 
 /* Attributes for line numbers, and current line */
 int bg_linum = 0;
@@ -2641,6 +2648,30 @@ void bwgenh(BW *w)
 	prm(q);
 }
 
+/* C helpers for Zig Path A `zig_bw_bwgen` (static getto/lgen/gennum). */
+P *zig_c_bw_getto(P *p, P *cur, P *top, off_t line)
+{
+	return getto(p, cur, top, line);
+}
+
+int zig_c_bw_lgen(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
+	ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,
+	HIGHLIGHT_STATE st, BW *bw)
+{
+	return lgen(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
+}
+
+void zig_c_bw_gennum(BW *w, int (*screen)[COMPOSE], int *attr, SCRN *t,
+	ptrdiff_t y, int *comp)
+{
+	gennum(w, screen, attr, t, y, comp);
+}
+
+HIGHLIGHT_STATE zig_c_bw_get_highlight_state(BW *w, P *p, off_t line)
+{
+	return get_highlight_state(w, p, line);
+}
+
 void bwgen(BW *w, int linums, int linchg)
 {
 	int (*screen)[COMPOSE];
@@ -2703,6 +2734,17 @@ void bwgen(BW *w, int linums, int linchg)
 
 	if (marking && w == (BW *)maint->curwin->object)
 		msetI(t->updtab + w->y, 1, w->h);
+
+	/* Path A: Zig-native bwgen paint loops (JOE_ZIG_BW_LGEN). */
+	if (zig_bw_lgen_enabled) {
+		ptrdiff_t mid = TO_DIFF_OK(w->cursor->line - w->top->line) + w->y;
+		int zret = zig_bw_bwgen(w, t, t->scrn, t->attr, t->updtab, t->compose,
+			w->t->w, w->x, w->y, w->w, w->h, mid,
+			w->top, w->cursor, w->top->line, w->offset,
+			linums, linchg, dosquare, from, to, fromline, toline);
+		if (zret >= 0)
+			goto bwgen_viewmode_cursor;
+	}
 
 	q = pdup(w->cursor, "bwgen");
 
@@ -2769,6 +2811,7 @@ void bwgen(BW *w, int linums, int linchg)
 	if (p)
 		prm(p);
 
+bwgen_viewmode_cursor:
 	/* Feature 1.10: Update cursor position for view mode after rendering */
 	if (w->o.viewmode && viewmode_col_map && viewmode_col_map_size > 0) {
 		off_t buf_line = w->cursor->line;

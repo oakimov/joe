@@ -970,6 +970,34 @@ test "paintBody fills attrs from live Syntax JSF" {
     try testing.expectEqual(@as(u21, 'x'), c1.cp);
 }
 
+test "paintBody viewmode links carry OSC 8 urls through flush" {
+    var scr = try screen.Screen.init(testing.allocator, 40, 5);
+    defer scr.deinit();
+    const win = try scr.createText(null, null, 4);
+    scr.layout();
+    const t = win.asText().?;
+    const lines = [_][]const u8{"Go [here](http://example.com) now"};
+    t.body_lines = &lines;
+    t.viewmode = true;
+
+    var term = try TermScreen.init(testing.allocator, 40, 5);
+    defer term.deinit();
+    paintBody(&term, t, .none);
+
+    var found_url = false;
+    for (term.cells) |c| {
+        if (c.url) |u| {
+            try testing.expectEqualStrings("http://example.com", u);
+            found_url = true;
+            break;
+        }
+    }
+    try testing.expect(found_url);
+
+    try term.flush();
+    try testing.expect(std.mem.indexOf(u8, term.takeOut(), "\x1b]8;;http://example.com\x1b\\") != null);
+}
+
 test "paintBody paints padded table box-drawing in viewmode" {
     var scr = try screen.Screen.init(testing.allocator, 40, 8);
     defer scr.deinit();

@@ -84,13 +84,24 @@ pub const Cell = struct {
     /// Combining marks attached to `cp` (0-terminated / zero-padded).
     combine: [COMPOSE_MARKS]u21 = .{0} ** COMPOSE_MARKS,
     attr: Attribute = .none,
+    /// Optional OSC 8 hyperlink target (borrowed; usually from `Screen.internUrl`).
+    url: ?[]const u8 = null,
+
+    pub fn urlEql(a: ?[]const u8, b: ?[]const u8) bool {
+        if (a == null and b == null) return true;
+        const aa = a orelse return false;
+        const bb = b orelse return false;
+        if (aa.ptr == bb.ptr and aa.len == bb.len) return true;
+        return std.mem.eql(u8, aa, bb);
+    }
 
     pub fn eql(a: Cell, b: Cell) bool {
-        return a.cp == b.cp and Attribute.eql(a.attr, b.attr) and std.mem.eql(u21, &a.combine, &b.combine);
+        return a.cp == b.cp and Attribute.eql(a.attr, b.attr) and std.mem.eql(u21, &a.combine, &b.combine) and urlEql(a.url, b.url);
     }
 
     /// Visually blank with default attributes (space or zeroed cell).
     pub fn isBlankNone(self: Cell) bool {
+        if (self.url != null) return false;
         if (!(self.cp == 0 or self.cp == ' ') or !Attribute.eql(self.attr, .none)) return false;
         for (self.combine) |m| if (m != 0) return false;
         return true;
@@ -306,6 +317,8 @@ pub const Screen = struct {
     vpa_seq: ?[]const u8 = null,
     /// Output scratch buffer (obuf-style for Phase 0–5 compatibility).
     out: std.ArrayList(u8),
+    /// Interned OSC 8 hyperlink targets; `Cell.url` borrows these slices.
+    link_urls: std.ArrayList([]u8) = .empty,
 
     pub fn init(allocator: Allocator, width: u16, height: u16) !Screen {
         const n = @as(usize, width) * @as(usize, height);
@@ -330,6 +343,8 @@ pub const Screen = struct {
     }
 
     pub fn deinit(self: *Screen) void {
+        self.clearLinkUrls();
+        self.link_urls.deinit(self.allocator);
         self.out.deinit(self.allocator);
         self.dirty_rows.deinit();
         self.allocator.free(self.display);
@@ -351,6 +366,7 @@ pub const Screen = struct {
         self.allocator.free(self.cells);
         self.allocator.free(self.display);
         self.dirty_rows.deinit();
+        self.clearLinkUrls();
 
         self.width = width;
         self.height = height;
@@ -368,6 +384,7 @@ pub const Screen = struct {
         // ED wiped the physical screen — keep display in sync so the next
         // cell-diff flush does not repaint every blank cell.
         @memset(self.display, .{});
+        self.clearLinkUrls();
         self.dirty_rows.setRangeValue(.{ .start = 0, .end = self.height }, true);
         self.out.clearRetainingCapacity();
         // Emit clear-screen + home as a fast path.
@@ -1088,7 +1105,32 @@ pub const Screen = struct {
     }
 
     pub fn writeChar(self: *Screen, x: u16, y: u16, cp: u21, attr: Attribute) void {
-        self.writeCell(x, y, .{ .cp = cp, .attr = attr });
+        self.writeCell(x, y, .{ .cp = cp, .attr = attr, .url = null });
+    }
+
+    /// Write a glyph with an optional OSC 8 hyperlink URL (interned on Screen).
+    pub fn writeCharLink(self: *Screen, x: u16, y: u16, cp: u21, attr: Attribute, url: ?[]const u8) void {
+        const u = if (url) |raw| self.internUrl(raw) else null;
+        self.writeCell(x, y, .{ .cp = cp, .attr = attr, .url = u });
+    }
+
+    /// Intern `url` into `link_urls` (deduped). Returns null on empty/OOM.
+    pub fn internUrl(self: *Screen, url: []const u8) ?[]const u8 {
+        if (url.len == 0) return null;
+        for (self.link_urls.items) |u| {
+            if (std.mem.eql(u8, u, url)) return u;
+        }
+        const copy = self.allocator.dupe(u8, url) catch return null;
+        self.link_urls.append(self.allocator, copy) catch {
+            self.allocator.free(copy);
+            return null;
+        };
+        return copy;
+    }
+
+    pub fn clearLinkUrls(self: *Screen) void {
+        for (self.link_urls.items) |u| self.allocator.free(u);
+        self.link_urls.clearRetainingCapacity();
     }
 
     /// Write a full cell (base + combining marks + attr). No-op when equal.
@@ -1390,6 +1432,34 @@ pub const Screen = struct {
             break :blk @as(usize, 1);
         };
         try self.out.appendSlice(self.allocator, utf8_buf[0..len]);
+    }
+
+    fn appendSanitizedUrl(self: *Screen, url: []const u8) !void {
+        // Strip C0/C1/DEL to prevent terminal injection (JOE out_osc8_link).
+        for (url) |ch| {
+            if (ch < 0x20 or ch == 0x7F or (ch >= 0x80 and ch <= 0x9F)) continue;
+            try self.out.append(self.allocator, ch);
+        }
+    }
+
+    fn emitOsc8Close(self: *Screen, current: *?[]const u8) !void {
+        if (current.*) |_| {
+            try self.out.appendSlice(self.allocator, "\x1b]8;;\x1b\\");
+            current.* = null;
+        }
+    }
+
+    fn emitOsc8Open(self: *Screen, current: *?[]const u8, url: []const u8) !void {
+        try self.out.appendSlice(self.allocator, "\x1b]8;;");
+        try self.appendSanitizedUrl(url);
+        try self.out.appendSlice(self.allocator, "\x1b\\");
+        current.* = url;
+    }
+
+    fn emitOsc8Transition(self: *Screen, current: *?[]const u8, new_url: ?[]const u8) !void {
+        if (Cell.urlEql(current.*, new_url)) return;
+        try self.emitOsc8Close(current);
+        if (new_url) |u| try self.emitOsc8Open(current, u);
     }
 
     fn emitCell(self: *Screen, cell: Cell) !void {
@@ -1782,6 +1852,7 @@ pub const Screen = struct {
         const want_y = self.cursor_y;
         const want_attr = self.current_attr;
         var emit_attr: ?Attribute = null;
+        var emit_url: ?[]const u8 = null;
 
         if (self.findScrollMagic()) |sop| {
             try self.applyScrollMagic(sop);
@@ -1816,6 +1887,7 @@ pub const Screen = struct {
 
                 // Blank-none tail → EL (cheaper than painting spaces).
                 if (self.rowTailIsBlankNone(y, x) and self.rowTailDiffers(y, x)) {
+                    try self.emitOsc8Close(&emit_url);
                     try self.flushMoveTo(x, y);
                     if (emit_attr == null or !Attribute.eql(emit_attr.?, .none)) {
                         try self.appendAttr(.none);
@@ -1827,6 +1899,7 @@ pub const Screen = struct {
                 }
 
                 // Changed run: position once, then paint while cells differ.
+                try self.emitOsc8Close(&emit_url);
                 try self.flushMoveTo(x, y);
                 while (x < self.width) {
                     const run_idx = row_off + @as(usize, x);
@@ -1849,6 +1922,7 @@ pub const Screen = struct {
                         try self.appendAttr(run_cell.attr);
                         emit_attr = run_cell.attr;
                     }
+                    try self.emitOsc8Transition(&emit_url, run_cell.url);
                     try self.emitCell(run_cell);
                     self.display[run_idx] = run_cell;
 
@@ -1868,6 +1942,7 @@ pub const Screen = struct {
             self.dirty_rows.unset(y);
         }
 
+        try self.emitOsc8Close(&emit_url);
         try self.flushMoveTo(want_x, want_y);
         try self.appendAttr(want_attr);
         self.current_attr = want_attr;
@@ -2586,6 +2661,34 @@ test "Cell.eql and isBlankNone" {
     try testing.expect(Cell.isBlankNone(.{ .cp = 0, .attr = .none }));
     try testing.expect(!Cell.isBlankNone(.{ .cp = 'A', .attr = .none }));
     try testing.expect(!Cell.isBlankNone(.{ .cp = ' ', .attr = .{ .bold = true } }));
+    try testing.expect(!Cell.isBlankNone(.{ .cp = ' ', .url = "http://x" }));
+    try testing.expect(!Cell.eql(.{ .cp = 'A', .url = "a" }, .{ .cp = 'A', .url = "b" }));
+    try testing.expect(Cell.eql(.{ .cp = 'A', .url = "a" }, .{ .cp = 'A', .url = "a" }));
+}
+
+test "Screen.flush emits OSC 8 hyperlink sequences" {
+    var screen = try Screen.init(testing.allocator, 20, 2);
+    defer screen.deinit();
+    screen.writeCharLink(0, 0, 'h', .{ .underline = true }, "http://example.com");
+    screen.writeCharLink(1, 0, 'i', .{ .underline = true }, "http://example.com");
+    screen.writeChar(2, 0, '!', .none);
+    try screen.flush();
+    const out = screen.takeOut();
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b]8;;http://example.com\x1b\\") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "hi") != null);
+    const close = "\x1b]8;;\x1b\\";
+    try testing.expect(std.mem.indexOf(u8, out, close) != null);
+
+    // Sanitize: control chars stripped from URL
+    screen.clearOut();
+    @memset(screen.cells, .{});
+    @memset(screen.display, .{});
+    screen.dirty_rows.setRangeValue(.{ .start = 0, .end = screen.height }, true);
+    screen.writeCharLink(0, 0, 'x', .none, "http://a\x01b.com");
+    try screen.flush();
+    const out2 = screen.takeOut();
+    try testing.expect(std.mem.indexOf(u8, out2, "http://ab.com") != null);
+    try testing.expect(std.mem.indexOf(u8, out2, "\x01") == null);
 }
 
 test "Screen.flush with cursor_valid false always CUPs before paint" {

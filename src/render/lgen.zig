@@ -65,7 +65,7 @@ fn emitSpace(term: *TermScreen, sx: *u16, end_x: u16, y: u16, attr: Attribute) v
     sx.* += 1;
 }
 
-fn emitGlyph(term: *TermScreen, sx: *u16, end_x: u16, y: u16, cp: u21, wid: u8, attr: Attribute) void {
+fn emitGlyph(term: *TermScreen, sx: *u16, end_x: u16, y: u16, cp: u21, wid: u8, attr: Attribute, url: ?[]const u8) void {
     if (wid == 0) {
         // Combining mark: attach to previous base if possible.
         if (sx.* > 0) term.addCombining(sx.* - 1, y, cp);
@@ -78,7 +78,11 @@ fn emitGlyph(term: *TermScreen, sx: *u16, end_x: u16, y: u16, cp: u21, wid: u8, 
         }
         return;
     }
-    term.writeChar(sx.*, y, cp, attr);
+    if (url) |u| {
+        term.writeCharLink(sx.*, y, cp, attr, u);
+    } else {
+        term.writeChar(sx.*, y, cp, attr);
+    }
     if (wid >= 2 and sx.* + 1 < term.width) {
         term.writeChar(sx.* + 1, y, 0, attr);
     }
@@ -102,6 +106,7 @@ fn paintUnit(
     tab: u16,
     unit: Unit,
     base_attr: Attribute,
+    url: ?[]const u8,
 ) bool {
     // Returns false when the line ends (eol).
     switch (unit) {
@@ -110,7 +115,7 @@ fn paintUnit(
             if (logical.* >= offset) {
                 var a = base_attr;
                 a.underline = true;
-                emitGlyph(term, sx, end_x, y, 'X', 1, a);
+                emitGlyph(term, sx, end_x, y, 'X', 1, a, null);
             }
             logical.* += 1;
             return true;
@@ -138,7 +143,7 @@ fn paintUnit(
 
             if (wid == 0) {
                 if (logical.* >= offset and sx.* > x) {
-                    emitGlyph(term, sx, end_x, y, shown.cp, 0, attr);
+                    emitGlyph(term, sx, end_x, y, shown.cp, 0, attr, url);
                 }
                 return true;
             }
@@ -150,7 +155,7 @@ fn paintUnit(
 
             if (logical.* < offset) {
                 const skip = offset - logical.*;
-                emitGlyph(term, sx, end_x, y, '<', 1, attr);
+                emitGlyph(term, sx, end_x, y, '<', 1, attr, null);
                 logical.* = offset;
                 var rem = wid - @as(u8, @intCast(@min(skip, wid)));
                 while (rem > 0 and sx.* < end_x) : (rem -= 1) {
@@ -160,7 +165,7 @@ fn paintUnit(
                 return true;
             }
 
-            emitGlyph(term, sx, end_x, y, shown.cp, wid, attr);
+            emitGlyph(term, sx, end_x, y, shown.cp, wid, attr, url);
             logical.* += wid;
             return true;
         },
@@ -284,7 +289,8 @@ fn lgenUnits(
             }
         }
         const cell_attr = attrAt(base_attr, opts.attrs, byte_idx);
-        if (!paintUnit(term, &sx, end_x, y, x, &logical, offset, tab, u, cell_attr)) break;
+        const cell_url: ?[]const u8 = if (opts.view) |vt| vt.linkAt(byte_idx) else null;
+        if (!paintUnit(term, &sx, end_x, y, x, &logical, offset, tab, u, cell_attr, cell_url)) break;
         if (sx >= end_x) break;
     }
 
@@ -545,4 +551,34 @@ test "lgenLine applies viewmode hide and substitute" {
     try testing.expectEqual(@as(u21, 0x2502), term2.cells[0].cp);
     try testing.expectEqual(@as(u21, ' '), term2.cells[1].cp);
     try testing.expectEqual(@as(u21, 'q'), term2.cells[2].cp);
+}
+
+test "lgenLine applies viewmode link urls onto cells" {
+    var tables = ViewTables.init(testing.allocator);
+    defer tables.deinit();
+    const line = "See [here](http://example.com)";
+    var attrs: [64]Attribute = .{Attribute.none} ** 64;
+    try analyzeLine(&tables, line, attrs[0..line.len]);
+
+    var term = try TermScreen.init(testing.allocator, 40, 1);
+    defer term.deinit();
+    _ = lgenLine(&term, 0, 0, 40, line, .{ .view = &tables, .attrs = attrs[0..line.len] }, .none);
+
+    // 'h' of here — hidden '[' is a space before it
+    // "See  here  http://example.com "
+    // Find cell with 'h' that has URL
+    var found = false;
+    for (term.cells) |c| {
+        if (c.cp == 'h' and c.url != null) {
+            try testing.expectEqualStrings("http://example.com", c.url.?);
+            try testing.expect(c.attr.underline);
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+
+    try term.flush();
+    const out = term.takeOut();
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b]8;;http://example.com\x1b\\") != null);
 }

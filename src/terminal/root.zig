@@ -18,7 +18,15 @@ pub const MouseEvent = tty.MouseEvent;
 pub const Pty = pty.Pty;
 pub const Screen = screen.Screen;
 pub const Attribute = screen.Attribute;
+pub const Color = screen.Color;
+pub const Rgb = screen.Rgb;
 pub const displayWidth = screen.displayWidth;
+pub const mouse_enable_sgr = tty.mouse_enable_sgr;
+pub const mouse_disable_sgr = tty.mouse_disable_sgr;
+pub const takeWinchPending = tty.takeWinchPending;
+pub const noteWinch = tty.noteWinch;
+pub const pollResize = tty.pollResize;
+pub const installDefaultSigWinch = tty.installDefaultSigWinch;
 
 test {
     _ = terminfo;

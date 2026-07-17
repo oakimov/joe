@@ -11,7 +11,7 @@
 - ✅ Phase 2 complete (`rc` landed)
 - ✅ Hybrid Phase 3: `colors` + `syntax` + `termcap` + `tty` + `scrn` landed (replaces `joe/colors.c` + `joe/syntax.c` + `joe/termcap.c` + `joe/tty.c` + `joe/scrn.c`, 196/196 green)
 - ✅ Hybrid Phase 4: `kbd` + `macro` + `cmd` landed (replaces `joe/kbd.c` + `joe/macro.c` + `joe/cmd.c`, 196/196 green)
-- 🚧 Phase 3 redesign deepen: Zig-native `src/terminal/{terminfo,tty,pty,screen}.zig` unit-tested (`zig build terminal-test` **18/18**); UTF-8 `writeText` + display-width, `Key`/`KeyParser`/`readKey` CSI+SS3+SGR-mouse, terminfo rare-cap cache + `formatCup`/`tiparm` flush path; not yet replacing hybrid tty/termcap/scrn in the live binary
+- 🚧 Phase 3 redesign deepen: Zig-native `src/terminal/{terminfo,tty,pty,screen}.zig` unit-tested (`zig build terminal-test` **23/23**); UTF-8 `writeText` + display-width, `Key`/`KeyParser`/`readKey` CSI+SS3+SGR-mouse, `Tty.enableMouse`/`disableMouse`, truecolor/`Color` SGR, SIGWINCH pending/`pollResize`, terminfo rare-cap cache + `formatCup`/`tiparm` flush path; not yet replacing hybrid tty/termcap/scrn in the live binary
 - **Integration tests:** full suite **196/196 OK** (including viewmode)
 - **Recent hybrid fixes:** `binsb` uses `hallocFresh()` so freelist corruption cannot reclaim a still-live gap header and zero its `hole` (was wiping history into NULs/`@` on Command: prompt after 2× `blkcpy`); `inschn` skips `hfree` when `p.hdr == a`; `brm` uses `vsrm(current_dir)`; plus prior `brvs`/`vstrunc`, `binsmq`, `charmap->type`, unicode/`p_goto_bol`/`binsm`/`iskey` fixes
 - **Binary size:** Debug hybrid build via `zig build`
@@ -723,9 +723,9 @@ The build is always working — start with a binary that compiles and runs, then
 
 ### Phase 3: Terminal & Color (4-5 weeks) — IN PROGRESS
 - ✅ `terminal/terminfo.zig` — Zig-native terminfo binding (`setupterm`/`tiget*`/`tiparm` + cached rare caps + `formatCup`; unit-tested; not wired into live joe yet)
-- ✅ `terminal/tty.zig` — Zig-native raw mode + size + SIGWINCH helper + `Key`/`KeyParser`/`readKey` (CSI/SS3/UTF-8/SGR-mouse; unit-tested; parallel to hybrid `src/tty.zig`)
+- ✅ `terminal/tty.zig` — Zig-native raw mode + size + SIGWINCH pending/`pollResize` + `Key`/`KeyParser`/`readKey` (CSI/SS3/UTF-8/SGR-mouse) + mouse enable/disable sequences (unit-tested; parallel to hybrid `src/tty.zig`)
 - ✅ `terminal/pty.zig` — Zig-native `openpty`/`forkpty`/`login_tty` wrappers (unit-tested)
-- ✅ `terminal/screen.zig` — Zig-native cell grid + dirty-row flush via ANSI/terminfo-cup + UTF-8 `writeText` with display-width (obuf-style out buffer; cell-diff deferred to Phase 6; unit-tested)
+- ✅ `terminal/screen.zig` — Zig-native cell grid + dirty-row flush via ANSI/terminfo-cup + UTF-8 `writeText` with display-width + `Attribute`/`Color` (indexed + truecolor SGR; obuf-style out buffer; cell-diff deferred to Phase 6; unit-tested)
 - ✅ `colors.zig` — hybrid C-ABI port of jcf parser + attribute resolution (replaces `joe/colors.c`, 196 tests pass)
 - ✅ `syntax.zig` — hybrid C-ABI port of jsf parser + DFA engine (replaces `joe/syntax.c`, 196 tests pass)
 - ✅ `termcap.zig` — hybrid C-ABI port of termcap loader + `texec`/`tcost`/`tcompile` (replaces `joe/termcap.c`, non-TERMINFO path, 196 tests pass)

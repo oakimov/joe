@@ -1,7 +1,7 @@
 //! Zig-native raw-mode TTY driver + keyboard input parser.
 //!
-//! Uses `std.posix` termios — no C tty.c ABI. Signal helpers are available
-//! but SIGWINCH/etc. wiring into the editor loop comes later.
+//! Uses `std.posix` termios — no C tty.c ABI. `installDefaultSigWinch` /
+//! `takeWinchPending` / `pollResize` cover editor-loop resize wiring.
 //!
 //! `KeyParser` is byte-driven and unit-testable without a real TTY.
 //! `Tty.readKey` feeds the live fd into the same parser.
@@ -350,6 +350,11 @@ pub const Tty = struct {
         return getSizeFd(self.fd);
     }
 
+    /// If a SIGWINCH (or `noteWinch`) is pending, return the new size.
+    pub fn pollSizeChange(self: Tty) !?Size {
+        return pollResize(self.fd);
+    }
+
     pub fn writeAll(self: Tty, bytes: []const u8) !void {
         var written: usize = 0;
         while (written < bytes.len) {
@@ -358,6 +363,16 @@ pub const Tty = struct {
             if (n == 0) return error.EndOfStream;
             written += @intCast(n);
         }
+    }
+
+    /// Enable xterm mouse tracking + SGR 1006 coordinates (JOE `mouseopen`).
+    pub fn enableMouse(self: Tty) !void {
+        try self.writeAll(mouse_enable_sgr);
+    }
+
+    /// Disable xterm mouse tracking + SGR 1006.
+    pub fn disableMouse(self: Tty) !void {
+        try self.writeAll(mouse_disable_sgr);
     }
 
     /// Blocking single-byte read. Higher-level key parsing: `readKey`.
@@ -417,6 +432,19 @@ pub fn getSizeFd(fd: posix.fd_t) !Size {
     return .{ .rows = ws.row, .cols = ws.col };
 }
 
+/// Enable xterm mouse tracking + SGR 1006 coordinates (matches JOE mouseopen).
+pub const mouse_enable_sgr = "\x1b[?1000h\x1b[?1006h";
+/// Disable xterm mouse tracking + SGR 1006.
+pub const mouse_disable_sgr = "\x1b[?1000l\x1b[?1006l";
+
+/// Set by the default SIGWINCH handler; cleared by `takeWinchPending`.
+var winch_pending: std.atomic.Value(bool) = .init(false);
+
+fn defaultSigWinchHandler(sig: c_int) callconv(.c) void {
+    _ = sig;
+    winch_pending.store(true, .release);
+}
+
 /// Install a SIGWINCH handler; returns the previous action.
 pub fn installSigWinch(handler: posix.Sigaction.handler_fn) posix.Sigaction {
     const act = posix.Sigaction{
@@ -427,6 +455,28 @@ pub fn installSigWinch(handler: posix.Sigaction.handler_fn) posix.Sigaction {
     var old: posix.Sigaction = undefined;
     posix.sigaction(posix.SIG.WINCH, &act, &old);
     return old;
+}
+
+/// Install the default handler that sets `winch_pending` for the editor loop.
+pub fn installDefaultSigWinch() posix.Sigaction {
+    winch_pending.store(false, .release);
+    return installSigWinch(defaultSigWinchHandler);
+}
+
+/// Atomically read-and-clear the pending resize flag.
+pub fn takeWinchPending() bool {
+    return winch_pending.swap(false, .acq_rel);
+}
+
+/// Force the pending flag (tests / synthetic resize).
+pub fn noteWinch() void {
+    winch_pending.store(true, .release);
+}
+
+/// If a SIGWINCH (or `noteWinch`) is pending, refresh size from `fd`.
+pub fn pollResize(fd: posix.fd_t) !?Size {
+    if (!takeWinchPending()) return null;
+    return try getSizeFd(fd);
 }
 
 fn feedAll(parser: *KeyParser, bytes: []const u8) ?Key {
@@ -500,11 +550,6 @@ test "KeyParser SS3 and lone Escape flush" {
     try testing.expectEqual(@as(?Key, .escape), p.flushPending());
 }
 
-/// Enable xterm mouse tracking + SGR 1006 coordinates (matches JOE mouseopen).
-pub const mouse_enable_sgr = "\x1b[?1000h\x1b[?1006h";
-/// Disable xterm mouse tracking + SGR 1006.
-pub const mouse_disable_sgr = "\x1b[?1000l\x1b[?1006l";
-
 test "KeyParser SGR mouse press release and drag" {
     var p: KeyParser = .{};
     // Left press at (1-based) 5,10
@@ -535,4 +580,24 @@ test "KeyParser SGR mouse press release and drag" {
     const wheel = feedAll(&p, "\x1b[<65;1;1M").?;
     try testing.expect(wheel == .mouse);
     try testing.expectEqual(@as(u16, 65), wheel.mouse.button);
+}
+
+test "mouse enable/disable SGR sequences" {
+    try testing.expect(std.mem.indexOf(u8, mouse_enable_sgr, "?1000h") != null);
+    try testing.expect(std.mem.indexOf(u8, mouse_enable_sgr, "?1006h") != null);
+    try testing.expect(std.mem.indexOf(u8, mouse_disable_sgr, "?1000l") != null);
+    try testing.expect(std.mem.indexOf(u8, mouse_disable_sgr, "?1006l") != null);
+}
+
+test "winch pending flag set and clear" {
+    _ = takeWinchPending(); // clear any leftover
+    try testing.expect(!takeWinchPending());
+    noteWinch();
+    try testing.expect(takeWinchPending());
+    try testing.expect(!takeWinchPending());
+}
+
+test "pollResize returns null without pending winch" {
+    _ = takeWinchPending();
+    try testing.expect(try pollResize(posix.STDIN_FILENO) == null);
 }

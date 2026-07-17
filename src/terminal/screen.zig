@@ -10,8 +10,34 @@ const Allocator = std.mem.Allocator;
 const testing = std.testing;
 const terminfo = @import("terminfo.zig");
 
-/// Display attributes — Zig-native packing (not the C atr bitmask).
-pub const Attribute = packed struct(u32) {
+/// 24-bit RGB color (direct color / truecolor terminals).
+pub const Rgb = struct {
+    r: u8 = 0,
+    g: u8 = 0,
+    b: u8 = 0,
+
+    pub fn eql(a: Rgb, b: Rgb) bool {
+        return a.r == b.r and a.g == b.g and a.b == b.b;
+    }
+};
+
+/// Foreground/background color — default, 0–255 indexed, or 24-bit RGB.
+pub const Color = union(enum) {
+    default,
+    indexed: u8,
+    rgb: Rgb,
+
+    pub fn eql(a: Color, b: Color) bool {
+        return switch (a) {
+            .default => b == .default,
+            .indexed => |i| b == .indexed and b.indexed == i,
+            .rgb => |rgb| b == .rgb and Rgb.eql(rgb, b.rgb),
+        };
+    }
+};
+
+/// Display attributes — Zig-native (not the C atr bitmask).
+pub const Attribute = struct {
     bold: bool = false,
     dim: bool = false,
     italic: bool = false,
@@ -20,25 +46,29 @@ pub const Attribute = packed struct(u32) {
     blink: bool = false,
     inverse: bool = false,
     crossed_out: bool = false,
-    _pad0: u4 = 0,
-    /// 0 = default; 1..=256 = ANSI/256-color index+1; truecolor uses fg_rgb.
-    fg_kind: ColorKind = .default,
-    bg_kind: ColorKind = .default,
-    fg: u8 = 0,
-    bg: u8 = 0,
-
-    pub const ColorKind = enum(u2) {
-        default = 0,
-        indexed = 1,
-        // Reserved for truecolor path later.
-        truecolor = 2,
-        _unused = 3,
-    };
+    fg: Color = .default,
+    bg: Color = .default,
 
     pub const none: Attribute = .{};
 
     pub fn eql(a: Attribute, b: Attribute) bool {
-        return @as(u32, @bitCast(a)) == @as(u32, @bitCast(b));
+        return a.bold == b.bold and a.dim == b.dim and a.italic == b.italic and a.underline == b.underline and a.double_underline == b.double_underline and a.blink == b.blink and a.inverse == b.inverse and a.crossed_out == b.crossed_out and Color.eql(a.fg, b.fg) and Color.eql(a.bg, b.bg);
+    }
+
+    pub fn fgIndexed(index: u8) Attribute {
+        return .{ .fg = .{ .indexed = index } };
+    }
+
+    pub fn bgIndexed(index: u8) Attribute {
+        return .{ .bg = .{ .indexed = index } };
+    }
+
+    pub fn fgRgb(r: u8, g: u8, b: u8) Attribute {
+        return .{ .fg = .{ .rgb = .{ .r = r, .g = g, .b = b } } };
+    }
+
+    pub fn bgRgb(r: u8, g: u8, b: u8) Attribute {
+        return .{ .bg = .{ .rgb = .{ .r = r, .g = g, .b = b } } };
     }
 };
 
@@ -296,6 +326,28 @@ pub const Screen = struct {
         }
     }
 
+    fn appendColor(self: *Screen, color: Color, is_fg: bool) !void {
+        switch (color) {
+            .default => {},
+            .indexed => |idx| {
+                if (idx < 8) {
+                    const base: u8 = if (is_fg) 30 else 40;
+                    try self.out.print(self.allocator, ";{d}", .{base + idx});
+                } else if (idx < 16) {
+                    const base: u8 = if (is_fg) 90 else 100;
+                    try self.out.print(self.allocator, ";{d}", .{base + (idx - 8)});
+                } else {
+                    const prefix: []const u8 = if (is_fg) ";38;5;" else ";48;5;";
+                    try self.out.print(self.allocator, "{s}{d}", .{ prefix, idx });
+                }
+            },
+            .rgb => |rgb| {
+                const prefix: []const u8 = if (is_fg) ";38;2;" else ";48;2;";
+                try self.out.print(self.allocator, "{s}{d};{d};{d}", .{ prefix, rgb.r, rgb.g, rgb.b });
+            },
+        }
+    }
+
     fn appendAttr(self: *Screen, attr: Attribute) !void {
         // Reset then re-apply — simple and correct; optimize later.
         try self.out.appendSlice(self.allocator, "\x1b[0");
@@ -307,32 +359,8 @@ pub const Screen = struct {
         if (attr.inverse) try self.out.appendSlice(self.allocator, ";7");
         if (attr.crossed_out) try self.out.appendSlice(self.allocator, ";9");
         if (attr.double_underline) try self.out.appendSlice(self.allocator, ";21");
-        switch (attr.fg_kind) {
-            .default => {},
-            .indexed => {
-                if (attr.fg < 8) {
-                    try self.out.print(self.allocator, ";{d}", .{30 + attr.fg});
-                } else if (attr.fg < 16) {
-                    try self.out.print(self.allocator, ";{d}", .{90 + (attr.fg - 8)});
-                } else {
-                    try self.out.print(self.allocator, ";38;5;{d}", .{attr.fg});
-                }
-            },
-            else => {},
-        }
-        switch (attr.bg_kind) {
-            .default => {},
-            .indexed => {
-                if (attr.bg < 8) {
-                    try self.out.print(self.allocator, ";{d}", .{40 + attr.bg});
-                } else if (attr.bg < 16) {
-                    try self.out.print(self.allocator, ";{d}", .{100 + (attr.bg - 8)});
-                } else {
-                    try self.out.print(self.allocator, ";48;5;{d}", .{attr.bg});
-                }
-            },
-            else => {},
-        }
+        try self.appendColor(attr.fg, true);
+        try self.appendColor(attr.bg, false);
         try self.out.appendSlice(self.allocator, "m");
     }
 
@@ -397,18 +425,19 @@ pub const Screen = struct {
     }
 };
 
-test "Attribute packing roundtrip" {
+test "Attribute color helpers roundtrip" {
     const a = Attribute{
         .bold = true,
         .underline = true,
-        .fg_kind = .indexed,
-        .fg = 2,
+        .fg = .{ .indexed = 2 },
     };
     try testing.expect(a.bold);
     try testing.expect(a.underline);
     try testing.expect(!a.italic);
     try testing.expect(Attribute.eql(a, a));
     try testing.expect(!Attribute.eql(a, Attribute.none));
+    try testing.expect(Color.eql(Attribute.fgIndexed(2).fg, .{ .indexed = 2 }));
+    try testing.expect(Color.eql(Attribute.fgRgb(1, 2, 3).fg, .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } }));
 }
 
 test "Screen write + flush emits CUP and text" {
@@ -494,4 +523,26 @@ test "Screen.appendCup uses ANSI without terminfo" {
     screen.writeText(0, 0, "x", .none);
     try screen.flush();
     try testing.expect(std.mem.indexOf(u8, screen.takeOut(), "\x1b[1;1H") != null);
+}
+
+test "Screen flush emits truecolor SGR" {
+    var screen = try Screen.init(testing.allocator, 4, 1);
+    defer screen.deinit();
+    const attr = Attribute{
+        .fg = .{ .rgb = .{ .r = 10, .g = 20, .b = 30 } },
+        .bg = .{ .rgb = .{ .r = 40, .g = 50, .b = 60 } },
+    };
+    screen.writeText(0, 0, "x", attr);
+    try screen.flush();
+    const out = screen.takeOut();
+    try testing.expect(std.mem.indexOf(u8, out, ";38;2;10;20;30") != null);
+    try testing.expect(std.mem.indexOf(u8, out, ";48;2;40;50;60") != null);
+}
+
+test "Screen flush emits indexed 256-color SGR" {
+    var screen = try Screen.init(testing.allocator, 4, 1);
+    defer screen.deinit();
+    screen.writeText(0, 0, "x", Attribute.fgIndexed(196));
+    try screen.flush();
+    try testing.expect(std.mem.indexOf(u8, screen.takeOut(), ";38;5;196") != null);
 }

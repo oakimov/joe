@@ -8,6 +8,7 @@ pub const terminfo = @import("terminfo.zig");
 pub const tty = @import("tty.zig");
 pub const pty = @import("pty.zig");
 pub const screen = @import("screen.zig");
+pub const adapter = @import("adapter.zig");
 
 pub const TermInfo = terminfo.TermInfo;
 pub const Caps = terminfo.Caps;
@@ -21,6 +22,12 @@ pub const Attribute = screen.Attribute;
 pub const Color = screen.Color;
 pub const Rgb = screen.Rgb;
 pub const displayWidth = screen.displayWidth;
+pub const Hybrid = adapter.Hybrid;
+pub const TruecolorPalette = adapter.TruecolorPalette;
+pub const OutSink = adapter.OutSink;
+pub const attributeFromHybrid = adapter.attributeFromHybrid;
+pub const attributeToHybrid = adapter.attributeToHybrid;
+pub const drainScreenOut = adapter.drainScreenOut;
 pub const mouse_enable_sgr = tty.mouse_enable_sgr;
 pub const mouse_disable_sgr = tty.mouse_disable_sgr;
 pub const alt_screen_enter = tty.alt_screen_enter;
@@ -41,4 +48,5 @@ test {
     _ = tty;
     _ = pty;
     _ = screen;
+    _ = adapter;
 }

@@ -375,6 +375,26 @@ pub const Tty = struct {
         try self.writeAll(mouse_disable_sgr);
     }
 
+    /// Enter alternate screen (ANSI `?1049h`). Prefer terminfo `smcup` via Screen when available.
+    pub fn enableAltScreen(self: Tty) !void {
+        try self.writeAll(alt_screen_enter);
+    }
+
+    /// Leave alternate screen (ANSI `?1049l`).
+    pub fn disableAltScreen(self: Tty) !void {
+        try self.writeAll(alt_screen_leave);
+    }
+
+    /// Enable application cursor keys / keypad transmit.
+    pub fn enableKeypad(self: Tty) !void {
+        try self.writeAll(keypad_enable);
+    }
+
+    /// Restore normal cursor keys / keypad.
+    pub fn disableKeypad(self: Tty) !void {
+        try self.writeAll(keypad_disable);
+    }
+
     /// Blocking single-byte read. Higher-level key parsing: `readKey`.
     pub fn readByte(self: Tty) !u8 {
         var buf: [1]u8 = undefined;
@@ -436,6 +456,16 @@ pub fn getSizeFd(fd: posix.fd_t) !Size {
 pub const mouse_enable_sgr = "\x1b[?1000h\x1b[?1006h";
 /// Disable xterm mouse tracking + SGR 1006.
 pub const mouse_disable_sgr = "\x1b[?1000l\x1b[?1006l";
+
+/// Enter xterm alternate screen buffer (ANSI fallback when terminfo `smcup` absent).
+pub const alt_screen_enter = "\x1b[?1049h";
+/// Leave xterm alternate screen buffer (ANSI fallback for `rmcup`).
+pub const alt_screen_leave = "\x1b[?1049l";
+
+/// Application-cursor-keys + keypad transmit (ANSI/xterm fallback for `smkx`).
+pub const keypad_enable = "\x1b[?1h\x1b=";
+/// Normal cursor keys + keypad (ANSI/xterm fallback for `rmkx`).
+pub const keypad_disable = "\x1b[?1l\x1b>";
 
 /// Set by the default SIGWINCH handler; cleared by `takeWinchPending`.
 var winch_pending: std.atomic.Value(bool) = .init(false);
@@ -587,6 +617,15 @@ test "mouse enable/disable SGR sequences" {
     try testing.expect(std.mem.indexOf(u8, mouse_enable_sgr, "?1006h") != null);
     try testing.expect(std.mem.indexOf(u8, mouse_disable_sgr, "?1000l") != null);
     try testing.expect(std.mem.indexOf(u8, mouse_disable_sgr, "?1006l") != null);
+}
+
+test "alt-screen and keypad ANSI sequences" {
+    try testing.expect(std.mem.indexOf(u8, alt_screen_enter, "?1049h") != null);
+    try testing.expect(std.mem.indexOf(u8, alt_screen_leave, "?1049l") != null);
+    try testing.expect(std.mem.indexOf(u8, keypad_enable, "?1h") != null);
+    try testing.expect(std.mem.indexOf(u8, keypad_enable, "=") != null);
+    try testing.expect(std.mem.indexOf(u8, keypad_disable, "?1l") != null);
+    try testing.expect(std.mem.indexOf(u8, keypad_disable, ">") != null);
 }
 
 test "winch pending flag set and clear" {

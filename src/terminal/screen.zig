@@ -212,6 +212,9 @@ pub const Screen = struct {
     display: []Cell,
     dirty_rows: std.DynamicBitSet,
     terminfo: ?terminfo.TermInfo = null,
+    /// Inclusive scroll-region bounds (JOE `top`/`bot-1` style → last inclusive).
+    scroll_top: u16 = 0,
+    scroll_last: u16 = 0,
     /// Output scratch buffer (obuf-style for Phase 0–5 compatibility).
     out: std.ArrayList(u8),
 
@@ -232,6 +235,7 @@ pub const Screen = struct {
             .cells = cells,
             .display = display,
             .dirty_rows = dirty,
+            .scroll_last = height -| 1,
             .out = .empty,
         };
     }
@@ -264,6 +268,8 @@ pub const Screen = struct {
         self.cells = cells;
         self.display = display;
         self.dirty_rows = dirty;
+        self.scroll_top = 0;
+        self.scroll_last = height -| 1;
         self.cursor_x = @min(self.cursor_x, width -| 1);
         self.cursor_y = @min(self.cursor_y, height -| 1);
     }
@@ -373,6 +379,141 @@ pub const Screen = struct {
         }
         // ANSI CUP is 1-based.
         try self.out.print(self.allocator, "\x1b[{d};{d}H", .{ y + 1, x + 1 });
+    }
+
+    fn appendSeqOrAnsi(self: *Screen, maybe_seq: ?[]const u8, ansi: []const u8) !void {
+        if (maybe_seq) |seq| {
+            try self.out.appendSlice(self.allocator, seq);
+        } else {
+            try self.out.appendSlice(self.allocator, ansi);
+        }
+    }
+
+    /// Enter alternate screen / ca-mode. Prefers terminfo `smcup`, else ANSI `?1049h`.
+    pub fn enterAltScreen(self: *Screen) !void {
+        const seq: ?[]const u8 = if (self.terminfo) |ti| ti.caps.smcup else null;
+        try self.appendSeqOrAnsi(seq, "\x1b[?1049h");
+    }
+
+    /// Leave alternate screen / ca-mode. Prefers terminfo `rmcup`, else ANSI `?1049l`.
+    pub fn leaveAltScreen(self: *Screen) !void {
+        const seq: ?[]const u8 = if (self.terminfo) |ti| ti.caps.rmcup else null;
+        try self.appendSeqOrAnsi(seq, "\x1b[?1049l");
+    }
+
+    /// Enable application keypad / cursor keys (`smkx` or ANSI/xterm fallback).
+    pub fn enterKeypad(self: *Screen) !void {
+        const seq: ?[]const u8 = if (self.terminfo) |ti| ti.caps.smkx else null;
+        try self.appendSeqOrAnsi(seq, "\x1b[?1h\x1b=");
+    }
+
+    /// Restore normal keypad / cursor keys (`rmkx` or ANSI/xterm fallback).
+    pub fn leaveKeypad(self: *Screen) !void {
+        const seq: ?[]const u8 = if (self.terminfo) |ti| ti.caps.rmkx else null;
+        try self.appendSeqOrAnsi(seq, "\x1b[?1l\x1b>");
+    }
+
+    /// Set inclusive scroll region `[top, last]`. Emits terminfo `csr` or ANSI `CSI t;l r`.
+    pub fn setScrollRegion(self: *Screen, top: u16, last: u16) !void {
+        const t = @min(top, self.height -| 1);
+        const l = @min(@max(last, t), self.height -| 1);
+        self.scroll_top = t;
+        self.scroll_last = l;
+        if (self.terminfo) |ti| {
+            if (ti.formatCsr(t, l)) |seq| {
+                try self.out.appendSlice(self.allocator, seq);
+                return;
+            }
+        }
+        try self.out.print(self.allocator, "\x1b[{d};{d}r", .{ t + 1, l + 1 });
+    }
+
+    /// Reset scroll region to the full screen.
+    pub fn resetScrollRegion(self: *Screen) !void {
+        try self.setScrollRegion(0, self.height -| 1);
+    }
+
+    fn rowSlice(self: *Screen, y: u16) []Cell {
+        const start = @as(usize, y) * @as(usize, self.width);
+        return self.cells[start .. start + self.width];
+    }
+
+    fn markDirtyRange(self: *Screen, from: u16, to_inclusive: u16) void {
+        var y: u16 = from;
+        while (y <= to_inclusive) : (y += 1) {
+            self.dirty_rows.set(y);
+        }
+    }
+
+    /// Insert `count` blank lines at `y` within the current scroll region.
+    /// Shifts cells down and emits IL (terminfo or ANSI CSI L).
+    pub fn insertLines(self: *Screen, y: u16, count: u16) !void {
+        if (count == 0 or y < self.scroll_top or y > self.scroll_last) return;
+        const region_last = self.scroll_last;
+        const n = @min(count, region_last - y + 1);
+
+        // Shift rows down within [y, region_last].
+        var src: u16 = region_last - n + 1;
+        while (src > y) {
+            src -= 1;
+            const dst = src + n;
+            if (dst <= region_last) {
+                @memcpy(self.rowSlice(dst), self.rowSlice(src));
+            }
+        }
+        var clear_y: u16 = y;
+        while (clear_y < y + n) : (clear_y += 1) {
+            @memset(self.rowSlice(clear_y), .{});
+        }
+        self.markDirtyRange(y, region_last);
+
+        try self.appendCup(0, y);
+        if (self.terminfo) |ti| {
+            if (ti.formatIl(n)) |seq| {
+                if (seq.len != 0) {
+                    try self.out.appendSlice(self.allocator, seq);
+                    return;
+                }
+            }
+        }
+        if (n == 1) {
+            try self.out.appendSlice(self.allocator, "\x1b[L");
+        } else {
+            try self.out.print(self.allocator, "\x1b[{d}L", .{n});
+        }
+    }
+
+    /// Delete `count` lines at `y` within the current scroll region.
+    /// Shifts cells up and emits DL (terminfo or ANSI CSI M).
+    pub fn deleteLines(self: *Screen, y: u16, count: u16) !void {
+        if (count == 0 or y < self.scroll_top or y > self.scroll_last) return;
+        const region_last = self.scroll_last;
+        const n = @min(count, region_last - y + 1);
+
+        var dst: u16 = y;
+        while (dst + n <= region_last) : (dst += 1) {
+            @memcpy(self.rowSlice(dst), self.rowSlice(dst + n));
+        }
+        var clear_y: u16 = region_last - n + 1;
+        while (clear_y <= region_last) : (clear_y += 1) {
+            @memset(self.rowSlice(clear_y), .{});
+        }
+        self.markDirtyRange(y, region_last);
+
+        try self.appendCup(0, y);
+        if (self.terminfo) |ti| {
+            if (ti.formatDl(n)) |seq| {
+                if (seq.len != 0) {
+                    try self.out.appendSlice(self.allocator, seq);
+                    return;
+                }
+            }
+        }
+        if (n == 1) {
+            try self.out.appendSlice(self.allocator, "\x1b[M");
+        } else {
+            try self.out.print(self.allocator, "\x1b[{d}M", .{n});
+        }
     }
 
     /// Emit dirty rows to `out`, then copy cells → display and clear dirty bits.
@@ -545,4 +686,71 @@ test "Screen flush emits indexed 256-color SGR" {
     screen.writeText(0, 0, "x", Attribute.fgIndexed(196));
     try screen.flush();
     try testing.expect(std.mem.indexOf(u8, screen.takeOut(), ";38;5;196") != null);
+}
+
+test "Screen alt-screen and keypad ANSI fallbacks" {
+    var screen = try Screen.init(testing.allocator, 4, 2);
+    defer screen.deinit();
+    try testing.expect(screen.terminfo == null);
+
+    try screen.enterAltScreen();
+    try testing.expect(std.mem.indexOf(u8, screen.takeOut(), "?1049h") != null);
+    screen.clearOut();
+    try screen.leaveAltScreen();
+    try testing.expect(std.mem.indexOf(u8, screen.takeOut(), "?1049l") != null);
+    screen.clearOut();
+    try screen.enterKeypad();
+    try testing.expect(std.mem.indexOf(u8, screen.takeOut(), "?1h") != null);
+    screen.clearOut();
+    try screen.leaveKeypad();
+    try testing.expect(std.mem.indexOf(u8, screen.takeOut(), "?1l") != null);
+}
+
+test "Screen.setScrollRegion emits ANSI DECSTBM" {
+    var screen = try Screen.init(testing.allocator, 4, 10);
+    defer screen.deinit();
+    try screen.setScrollRegion(2, 7);
+    try testing.expectEqual(@as(u16, 2), screen.scroll_top);
+    try testing.expectEqual(@as(u16, 7), screen.scroll_last);
+    try testing.expect(std.mem.indexOf(u8, screen.takeOut(), "\x1b[3;8r") != null);
+    screen.clearOut();
+    try screen.resetScrollRegion();
+    try testing.expectEqual(@as(u16, 0), screen.scroll_top);
+    try testing.expectEqual(@as(u16, 9), screen.scroll_last);
+    try testing.expect(std.mem.indexOf(u8, screen.takeOut(), "\x1b[1;10r") != null);
+}
+
+test "Screen.insertLines shifts cells and emits IL" {
+    var screen = try Screen.init(testing.allocator, 3, 4);
+    defer screen.deinit();
+    screen.writeText(0, 0, "A", .none);
+    screen.writeText(0, 1, "B", .none);
+    screen.writeText(0, 2, "C", .none);
+    screen.writeText(0, 3, "D", .none);
+    screen.clearOut();
+
+    try screen.insertLines(1, 1);
+    try testing.expectEqual(@as(u21, 'A'), screen.cells[0].cp);
+    try testing.expectEqual(@as(u21, ' '), screen.cells[3].cp); // blank inserted row
+    try testing.expectEqual(@as(u21, 'B'), screen.cells[6].cp);
+    try testing.expectEqual(@as(u21, 'C'), screen.cells[9].cp);
+    // D pushed off
+    try testing.expect(std.mem.indexOf(u8, screen.takeOut(), "\x1b[L") != null);
+}
+
+test "Screen.deleteLines shifts cells and emits DL" {
+    var screen = try Screen.init(testing.allocator, 3, 4);
+    defer screen.deinit();
+    screen.writeText(0, 0, "A", .none);
+    screen.writeText(0, 1, "B", .none);
+    screen.writeText(0, 2, "C", .none);
+    screen.writeText(0, 3, "D", .none);
+    screen.clearOut();
+
+    try screen.deleteLines(1, 1);
+    try testing.expectEqual(@as(u21, 'A'), screen.cells[0].cp);
+    try testing.expectEqual(@as(u21, 'C'), screen.cells[3].cp);
+    try testing.expectEqual(@as(u21, 'D'), screen.cells[6].cp);
+    try testing.expectEqual(@as(u21, ' '), screen.cells[9].cp); // blank at bottom
+    try testing.expect(std.mem.indexOf(u8, screen.takeOut(), "\x1b[M") != null);
 }

@@ -44,6 +44,9 @@ pub const Caps = struct {
     flash: ?[:0]const u8 = null,
     /// Set scroll region / insert/delete line — useful before Phase 6 cell-diff.
     csr: ?[:0]const u8 = null,
+    /// Parameterized insert/delete lines (`il`/`dl`); prefer over repeating `il1`/`dl1`.
+    il: ?[:0]const u8 = null,
+    dl: ?[:0]const u8 = null,
     il1: ?[:0]const u8 = null,
     dl1: ?[:0]const u8 = null,
 };
@@ -90,6 +93,8 @@ pub const TermInfo = struct {
             .bel = presentStr("bel"),
             .flash = presentStr("flash"),
             .csr = presentStr("csr"),
+            .il = presentStr("il"),
+            .dl = presentStr("dl"),
             .il1 = presentStr("il1"),
             .dl1 = presentStr("dl1"),
         };
@@ -156,6 +161,38 @@ pub const TermInfo = struct {
         const p = c.tiparm(fmt.ptr, @as(c_int, y), @as(c_int, x)) orelse return null;
         return std.mem.span(p);
     }
+
+    /// Format scroll-region (`csr`) for 0-based inclusive first/last rows.
+    /// Returns null when the cap is missing or tiparm fails — caller should
+    /// fall back to ANSI `CSI top;bot r`.
+    pub fn formatCsr(self: TermInfo, top: u16, last: u16) ?[:0]const u8 {
+        const fmt = self.caps.csr orelse return null;
+        const p = c.tiparm(fmt.ptr, @as(c_int, top), @as(c_int, last)) orelse return null;
+        return std.mem.span(p);
+    }
+
+    /// Format insert-n-lines (`il`). Falls back to repeating `il1` when `il`
+    /// is absent. Returns null when neither cap works.
+    pub fn formatIl(self: TermInfo, count: u16) ?[]const u8 {
+        if (count == 0) return "";
+        if (self.caps.il) |fmt| {
+            const p = c.tiparm(fmt.ptr, @as(c_int, count)) orelse return null;
+            return std.mem.span(p);
+        }
+        if (count == 1) return self.caps.il1;
+        return null; // caller should emit ANSI CSI n L
+    }
+
+    /// Format delete-n-lines (`dl`). Falls back to `dl1` for count==1.
+    pub fn formatDl(self: TermInfo, count: u16) ?[]const u8 {
+        if (count == 0) return "";
+        if (self.caps.dl) |fmt| {
+            const p = c.tiparm(fmt.ptr, @as(c_int, count)) orelse return null;
+            return std.mem.span(p);
+        }
+        if (count == 1) return self.caps.dl1;
+        return null;
+    }
 };
 
 test "StrCap cancelled sentinel" {
@@ -193,5 +230,17 @@ test "TermInfo.init against current TERM" {
             }
         },
         else => {},
+    }
+    // Soft-check scroll-region / insert-line parameterization when caps exist.
+    if (ti.caps.csr != null) {
+        if (ti.formatCsr(0, 23)) |csr| {
+            try testing.expect(csr.len > 0);
+        }
+    }
+    if (ti.caps.il != null or ti.caps.il1 != null) {
+        _ = ti.formatIl(1);
+    }
+    if (ti.caps.dl != null or ti.caps.dl1 != null) {
+        _ = ti.formatDl(1);
     }
 }

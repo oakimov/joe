@@ -34,6 +34,12 @@ extern int zig_bw_bwgen(BW *w, SCRN *t, int (*scrn)[COMPOSE], int *attr_base,
 	ptrdiff_t mid_y, P *top, P *cursor, off_t top_line, off_t offset,
 	int linums, int linchg, int dosquare,
 	off_t from, off_t to, off_t fromline, off_t toline);
+/* Path A: gated Zig bwgenh hex dump paint (mark setup stays in C). */
+extern int zig_bw_bwgenh(SCRN *t, int (*scrn)[COMPOSE], int *attr_base,
+	ptrdiff_t scr_w, ptrdiff_t win_y, ptrdiff_t win_h, ptrdiff_t win_w,
+	off_t offset, P *top, off_t cursor_byte, int hiline,
+	off_t from, off_t to, int bg_text_atr, int bg_linum_atr,
+	int bg_curlinum_atr, int bg_cursor_atr);
 /* Path A Feature 2.1: gated Zig simple pipe substitute into vm_subst[]. */
 extern int zig_bw_table_simple(const unsigned char *line, int line_len, int row_type,
 	int *vm_subst, int vm_subst_len);
@@ -2588,6 +2594,18 @@ void bwgenh(BW *w)
 		to = 0;
 	}
 
+	/* Path A: Zig-native hex dump paint (JOE_ZIG_BW_LGEN). */
+	if (zig_bw_lgen_enabled) {
+		int zret = zig_bw_bwgenh(t, t->scrn, t->attr, w->t->w, w->y, w->h, w->w,
+			w->offset, w->top, w->cursor->byte, w->o.hiline,
+			from, to, BG_COLOR(bg_text), BG_COLOR(bg_linum),
+			BG_COLOR(bg_curlinum), BG_COLOR(bg_cursor));
+		if (zret >= 0) {
+			prm(q);
+			return;
+		}
+	}
+
 	y=w->y;
 	attr = t->attr + y*w->t->w;
 	for (screen = t->scrn + y * w->t->w; y != bot; ++y, (screen += w->t->w), (attr += w->t->w)) {
@@ -2662,7 +2680,12 @@ void bwgenh(BW *w)
 	prm(q);
 }
 
-/* C helpers for Zig Path A `zig_bw_bwgen` (static getto/lgen/gennum). */
+/* C helpers for Zig Path A `zig_bw_bwgen` / `zig_bw_bwgenh`. */
+off_t zig_c_bw_pbyte(P *p)
+{
+	return p ? p->byte : 0;
+}
+
 P *zig_c_bw_getto(P *p, P *cur, P *top, off_t line)
 {
 	return getto(p, cur, top, line);

@@ -9,6 +9,7 @@
 //! gutters use `zig_bw_gennum` (JOE `" %21lld "` trailing `lincols`; past-EOF blanks).
 //! Window paint loops use `zig_bw_bwgen` (mark/lattr/viewmode setup stays in C;
 //! loops call C `getto`/`lgen`/`gennum` so Path A body/gutter bridges still apply).
+//! Hex dump paint uses `zig_bw_bwgenh` (mark setup stays in C; loop calls C `genfield`).
 //! Feature 2.1 residual simple pipe substitute uses `zig_bw_table_simple`.
 //! Non-UTF-8 (byte) charmaps paint via `lgenLine` byte-mode.
 //! Default off until soak. Falls back to C when the gate is off.
@@ -37,6 +38,8 @@ const TableRowKind = render.table.RowKind;
 const COMPOSE = 4;
 const NO_MORE_DATA: c_int = -256;
 const max_line_bytes: usize = 256 * 1024;
+const INVERSE: c_int = 64;
+const UNDERLINE: c_int = 128;
 
 const SCRN = opaque {};
 const P = opaque {};
@@ -82,6 +85,21 @@ extern fn outatr(
 extern fn outatr_complete(t: ?*SCRN) void;
 extern fn eraeol(t: ?*SCRN, x: isize, y: isize, atr: c_int) c_int;
 extern fn ttputs(s: [*c]const u8) void;
+extern fn genfield(
+    t: ?*SCRN,
+    scrn: ?[*][COMPOSE]c_int,
+    attr: ?[*]c_int,
+    x: isize,
+    y: isize,
+    ofst: isize,
+    s: [*:0]const u8,
+    len: isize,
+    atr: c_int,
+    width: isize,
+    flg: c_int,
+    fmt: ?[*]c_int,
+) void;
+extern fn zig_c_bw_pbyte(p: ?*P) i64;
 
 /// Apply env gate (called from `ttopnn` alongside screen-swap).
 pub export fn zig_bw_lgen_apply_env() void {
@@ -345,6 +363,134 @@ fn paintOneRow(ctx: anytype, y: isize, p_in: ?*P) ?*P {
         ctx.w,
     );
     return p;
+}
+
+
+/// JOE `bwgenh` hex dump paint loop → C `genfield`.
+///
+/// Mark range setup stays in C (`bwgenh`). This owns the per-row hex formatting
+/// and `genfield` emit. Returns `0` on success, `-1` to fall back to C.
+pub export fn zig_bw_bwgenh(
+    t: ?*SCRN,
+    scrn: ?[*][COMPOSE]c_int,
+    attr_base: ?[*]c_int,
+    scr_w: isize,
+    win_y: isize,
+    win_h: isize,
+    win_w: isize,
+    offset: i64,
+    top: ?*P,
+    cursor_byte: i64,
+    hiline: c_int,
+    from: i64,
+    to: i64,
+    bg_text_atr: c_int,
+    bg_linum_atr: c_int,
+    bg_curlinum_atr: c_int,
+    bg_cursor_atr: c_int,
+) c_int {
+    if (zig_bw_lgen_enabled == 0) return -1;
+    if (t == null or scrn == null or attr_base == null or top == null) return -1;
+    if (scr_w <= 0 or win_h < 0 or win_w < 0) return -1;
+
+    const q = pdup(top, "zig_bw_bwgenh") orelse return -1;
+    defer prm(q);
+
+    var flg: c_int = 0;
+    var y: isize = win_y;
+    const bot = win_y + win_h;
+    const ofst: isize = if (offset < 0) 0 else @intCast(offset);
+
+    while (y != bot) : (y += 1) {
+        const screen: [*][COMPOSE]c_int = @ptrCast(scrn.? + @as(usize, @intCast(y * scr_w)));
+        const attr_row: [*]c_int = @ptrCast(attr_base.? + @as(usize, @intCast(y * scr_w)));
+
+        var txt: [80]u8 = undefined;
+        var fmt: [80]c_int = undefined;
+        @memset(txt[0..76], ' ');
+        @memset(fmt[0..76], bg_text_atr);
+        txt[76] = 0;
+
+        const qbyte = zig_c_bw_pbyte(q);
+        const same16 = (qbyte & ~@as(i64, 15)) == (cursor_byte & ~@as(i64, 15));
+        const addr_atr: c_int = if (hiline != 0 and same16) bg_curlinum_atr else bg_linum_atr;
+        @memset(fmt[0..9], addr_atr);
+
+        if (flg == 0) {
+            var bf: [16]u8 = undefined;
+            const addr_u: u64 = @bitCast(qbyte);
+            const addr = std.fmt.bufPrint(&bf, "{x: >8} ", .{addr_u}) catch return -1;
+            const n = @min(addr.len, @as(usize, 9));
+            @memcpy(txt[0..n], addr[0..n]);
+
+            var x: usize = 0;
+            while (x < 8) : (x += 1) {
+                const live = zig_c_bw_pbyte(q);
+                if (live == cursor_byte and flg == 0) {
+                    fmt[10 + x * 3] = bg_cursor_atr;
+                    fmt[10 + x * 3 + 1] = bg_cursor_atr;
+                }
+                if (live >= from and live < to and flg == 0) {
+                    fmt[10 + x * 3] |= UNDERLINE;
+                    fmt[10 + x * 3 + 1] |= UNDERLINE;
+                    fmt[60 + x] |= INVERSE;
+                }
+                const c = pgetb(q);
+                if (c != NO_MORE_DATA) {
+                    const hx = std.fmt.bufPrint(&bf, "{x:0>2}", .{@as(u8, @intCast(c))}) catch return -1;
+                    txt[10 + x * 3] = hx[0];
+                    txt[10 + x * 3 + 1] = hx[1];
+                    if (c >= 0x20 and c <= 0x7E)
+                        txt[60 + x] = @intCast(c)
+                    else
+                        txt[60 + x] = '.';
+                } else {
+                    flg = 1;
+                }
+            }
+            x = 8;
+            while (x < 16) : (x += 1) {
+                const live = zig_c_bw_pbyte(q);
+                if (live == cursor_byte and flg == 0) {
+                    fmt[11 + x * 3] = bg_cursor_atr;
+                    fmt[11 + x * 3 + 1] = bg_cursor_atr;
+                }
+                if (live >= from and live < to and flg == 0) {
+                    fmt[11 + x * 3] |= UNDERLINE;
+                    fmt[11 + x * 3 + 1] |= UNDERLINE;
+                    fmt[60 + x] |= INVERSE;
+                }
+                const c = pgetb(q);
+                if (c != NO_MORE_DATA) {
+                    const hx = std.fmt.bufPrint(&bf, "{x:0>2}", .{@as(u8, @intCast(c))}) catch return -1;
+                    txt[11 + x * 3] = hx[0];
+                    txt[11 + x * 3 + 1] = hx[1];
+                    if (c >= 0x20 and c <= 0x7E)
+                        txt[60 + x] = @intCast(c)
+                    else
+                        txt[60 + x] = '.';
+                } else {
+                    flg = 1;
+                }
+            }
+        }
+
+        genfield(
+            t,
+            screen,
+            attr_row,
+            0,
+            y,
+            ofst,
+            @ptrCast(&txt),
+            76,
+            bg_text_atr,
+            win_w,
+            1,
+            &fmt,
+        );
+    }
+    return 0;
 }
 
 /// Feature 2.2 padded table row → Zig `table.paintRow` → hybrid `outatr`.

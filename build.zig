@@ -40,6 +40,15 @@ pub fn build(b: *std.Build) void {
     terminal_mod.addIncludePath(.{ .cwd_relative = "/opt/local/include" });
     terminal_mod.addLibraryPath(.{ .cwd_relative = "/opt/local/lib" });
 
+    // ── Zig-native window redesign (Phase 5) ──────────────────────
+    // Parallel module tree; hybrid `src/{w,tw,pw,qw,menu,mmenu}.zig`
+    // remain the live path. Not wired into joe yet.
+    const window_mod = b.createModule(.{
+        .root_source_file = b.path("src/window/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // ── Pure Zig modules (replacing ported C files) ──────────────────
     // Each Zig module is compiled as an object and linked into the executable.
     // The Zig code exports C ABI functions that the remaining C code calls,
@@ -134,6 +143,14 @@ pub fn build(b: *std.Build) void {
     const run_terminal_tests = b.addRunArtifact(terminal_tests);
     const terminal_test_step = b.step("terminal-test", "Run Zig-native terminal unit tests");
     terminal_test_step.dependOn(&run_terminal_tests.step);
+
+    const window_tests = b.addTest(.{
+        .name = "window-tests",
+        .root_module = window_mod,
+    });
+    const run_window_tests = b.addRunArtifact(window_tests);
+    const window_test_step = b.step("window-test", "Run Zig-native window unit tests");
+    window_test_step.dependOn(&run_window_tests.step);
 
     // ── Run step ─────────────────────────────────────────────────────
     const run_cmd = b.addRunArtifact(exe);

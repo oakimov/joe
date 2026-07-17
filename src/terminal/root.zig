@@ -30,6 +30,7 @@ pub const attributeToHybrid = adapter.attributeToHybrid;
 pub const drainScreenOut = adapter.drainScreenOut;
 pub const drainScreenOutGated = adapter.drainScreenOutGated;
 pub const writeIntoObuf = adapter.writeIntoObuf;
+pub const syncHybridGridToScreen = adapter.syncHybridGridToScreen;
 pub const mouse_enable_sgr = tty.mouse_enable_sgr;
 pub const mouse_disable_sgr = tty.mouse_disable_sgr;
 pub const alt_screen_enter = tty.alt_screen_enter;

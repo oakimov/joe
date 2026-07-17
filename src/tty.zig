@@ -244,6 +244,13 @@ pub export fn ttopnn() void {
             zig_screen_drain_enabled = 0;
         }
     }
+    // Optional hybrid→Zig screen swap (default off). Implies drain while enabled.
+    // Declared in scrn.zig; set here so env is applied at tty open.
+    if (getenv("JOE_ZIG_SCREEN_SWAP")) |v| {
+        const on: c_int = if (v[0] == '1' or v[0] == 'y' or v[0] == 'Y') 1 else 0;
+        zig_screen_swap_enabled = on;
+        if (on != 0) zig_screen_drain_enabled = 1;
+    }
 }
 pub export fn ttclose() void {
     ttclsn();
@@ -464,6 +471,9 @@ pub fn drainZigScreen(scr: *terminal.Screen) !bool {
 
 /// C-visible gate (also set from `JOE_ZIG_SCREEN_DRAIN` in `ttopnn`). Default 0.
 pub export var zig_screen_drain_enabled: c_int = 0;
+
+/// Set from scrn.zig; tty reads env `JOE_ZIG_SCREEN_SWAP` in `ttopnn`.
+pub extern var zig_screen_swap_enabled: c_int;
 
 pub export fn ttshell(arg_cmd: [*c]u8) c_int {
     var cmd = arg_cmd;

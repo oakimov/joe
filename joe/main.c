@@ -69,7 +69,10 @@ void edupd(int flg)
 		}
 		w = (W *) (w->link.next);
 	} while (w != maint->curwin);
-	cpos(maint->t, maint->curwin->x + maint->curwin->curx, maint->curwin->y + maint->curwin->cury);
+	if (zig_screen_swap_enabled)
+		zig_scrn_swap_flush(maint->t, maint->curwin->x + maint->curwin->curx, maint->curwin->y + maint->curwin->cury);
+	else
+		cpos(maint->t, maint->curwin->x + maint->curwin->curx, maint->curwin->y + maint->curwin->cury);
 	staupd = 0;
 }
 

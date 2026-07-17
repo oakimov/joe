@@ -5,6 +5,8 @@
 //! path) via `zig translate-c`, then cleaned for the hybrid Zig+C build.
 
 const std = @import("std");
+const terminal = @import("terminal");
+const tty = @import("tty.zig");
 const ptrdiff_t = c_long;
 
 pub extern fn printf(fmt: [*c]const u8, ...) c_int;
@@ -393,6 +395,7 @@ pub export fn nresize(arg_t: [*c]SCRN, arg_w: ptrdiff_t, arg_h: ptrdiff_t) c_int
     t.*.ofst = @ptrCast(@alignCast(joe_malloc(t.*.co * @as(ptrdiff_t, @bitCast(@as(c_ulong, @truncate(@sizeOf(ptrdiff_t))))))));
     t.*.ary = @ptrCast(@alignCast(joe_malloc(t.*.co * @as(ptrdiff_t, @bitCast(@as(c_ulong, @truncate(@sizeOf(struct_hentry))))))));
     nredraw(t);
+    zigScrnSwapResize(t);
     return 1;
 }
 pub export fn nredraw(arg_t: [*c]SCRN) void {
@@ -1115,6 +1118,24 @@ pub export fn outatr_complete(arg_t: [*c]SCRN) void {
                 }
             }
             outatr_attrf.* = outatr_a;
+            // Hybrid scrn swap: keep shadow buffers, defer emission to Zig flush.
+            if (zig_screen_swap_enabled != 0) {
+                t.*.x = outatr_xx + @as(ptrdiff_t, outatr_wid);
+                t.*.y = outatr_yy;
+                while (outatr_wid > @as(c_int, 1)) {
+                    (blk: {
+                        const ref = &outatr_scrn;
+                        ref.* += 1;
+                        break :blk ref.*;
+                    })[0][0] = -@as(c_int, 1);
+                    (blk: {
+                        const ref = &outatr_attrf;
+                        ref.* += 1;
+                        break :blk ref.*;
+                    }).* = 0;
+                    outatr_wid -= 1;
+                }
+            } else {
             if (t.*.ins != 0) {
                 _ = clrins(t);
             }
@@ -1149,6 +1170,7 @@ pub export fn outatr_complete(arg_t: [*c]SCRN) void {
                     break :blk ref.*;
                 }).* = 0;
                 outatr_wid -= 1;
+            }
             }
         }
     }
@@ -1194,14 +1216,14 @@ pub export fn outatr(arg_map: [*c]struct_charmap, arg_t: [*c]SCRN, arg_scrn_1: [
                     outatr_scrn[@as(c_int, 0)][@as(c_int, 0)] = -@as(c_int, 1);
                     outatr_complete(t);
                     _ = utf8_encode(@ptrCast(@alignCast(&buf)), c);
-                    ttputs(@ptrCast(@alignCast(&buf)));
+                    if (zig_screen_swap_enabled == 0) ttputs(@ptrCast(@alignCast(&buf)));
                     outatr_state = 3;
                 }
             } else if (outatr_state == @as(c_int, 3)) {
                 var buf: [16]u8 = undefined;
                 _ = &buf;
                 _ = utf8_encode(@ptrCast(@alignCast(&buf)), c);
-                ttputs(@ptrCast(@alignCast(&buf)));
+                if (zig_screen_swap_enabled == 0) ttputs(@ptrCast(@alignCast(&buf)));
             }
         } else {
             var x: ptrdiff_t = undefined;
@@ -1285,6 +1307,10 @@ pub export fn outatr(arg_map: [*c]struct_charmap, arg_t: [*c]SCRN, arg_scrn_1: [
         if ((scrn_1[0][0] == c) and (attrf.* == a)) return;
         scrn_1[0][0] = c;
         attrf.* = a;
+        if (zig_screen_swap_enabled != 0) {
+            t.*.x = xx + 1;
+            t.*.y = yy;
+        } else {
         if (t.*.ins != 0) {
             _ = clrins(t);
         }
@@ -1309,6 +1335,7 @@ pub export fn outatr(arg_map: [*c]struct_charmap, arg_t: [*c]SCRN, arg_scrn_1: [
             if (!false) break;
         }
         t.*.x += 1;
+        }
     } else {
         var buf: [16]u8 = undefined;
         _ = &buf;
@@ -1327,6 +1354,23 @@ pub export fn outatr(arg_map: [*c]struct_charmap, arg_t: [*c]SCRN, arg_scrn_1: [
         wid = joe_wcwidth(0, c);
         scrn_1[0][0] = c;
         attrf.* = a;
+        if (zig_screen_swap_enabled != 0) {
+            t.*.x = xx + @as(ptrdiff_t, wid);
+            t.*.y = yy;
+            while (wid > @as(c_int, 1)) {
+                (blk: {
+                    const ref = &scrn_1;
+                    ref.* += 1;
+                    break :blk ref.*;
+                })[0][0] = -@as(c_int, 1);
+                (blk: {
+                    const ref = &attrf;
+                    ref.* += 1;
+                    break :blk ref.*;
+                }).* = 0;
+                wid -= 1;
+            }
+        } else {
         if (t.*.ins != 0) {
             _ = clrins(t);
         }
@@ -1350,6 +1394,7 @@ pub export fn outatr(arg_map: [*c]struct_charmap, arg_t: [*c]SCRN, arg_scrn_1: [
                 break :blk ref.*;
             }).* = 0;
             wid -= 1;
+        }
         }
     }
 }
@@ -1414,6 +1459,12 @@ pub export fn eraeol(arg_t: [*c]SCRN, arg_x: ptrdiff_t, arg_y: ptrdiff_t, arg_at
         if (!(ss != s)) break;
     }
     if (s != ss) {
+        if (zig_screen_swap_enabled != 0) {
+            mfill(s, ' ', w);
+            _ = msetI(@ptrCast(@alignCast(a)), atr, w);
+            s[0][0] = '\n';
+            return 0;
+        }
         if (t.*.ce != null) {
             _ = cpos(t, x, y);
             if (t.*.attrib != atr) {
@@ -2362,6 +2413,19 @@ pub fn doupscrl(arg_t: [*c]SCRN, arg_top: ptrdiff_t, arg_bot: ptrdiff_t, arg_amn
     var did: c_int = 0;
     _ = &did;
     if (!(amnt != 0)) return;
+    if (zig_screen_swap_enabled != 0) {
+        _ = mmove(@ptrCast(@alignCast(t.*.scrn + @as(usize, @bitCast(@as(isize, @intCast(top * t.*.co)))))), @ptrCast(@alignCast(t.*.scrn + @as(usize, @bitCast(@as(isize, @intCast((top + amnt) * t.*.co)))))), (((bot - top) - amnt) * t.*.co) * @as(ptrdiff_t, @bitCast(@as(c_ulong, @truncate(@sizeOf([4]c_int))))));
+        _ = mmove(@ptrCast(@alignCast(t.*.attr + @as(usize, @bitCast(@as(isize, @intCast(top * t.*.co)))))), @ptrCast(@alignCast(t.*.attr + @as(usize, @bitCast(@as(isize, @intCast((top + amnt) * t.*.co)))))), (((bot - top) - amnt) * t.*.co) * @as(ptrdiff_t, @bitCast(@as(c_ulong, @truncate(@sizeOf(c_int))))));
+        if ((bot == t.*.li) and (t.*.db != 0)) {
+            mfill(t.*.scrn + @as(usize, @bitCast(@as(isize, @intCast((t.*.li - amnt) * t.*.co)))), -@as(c_int, 1), amnt * t.*.co);
+            _ = msetI(@ptrCast(@alignCast(t.*.attr + @as(usize, @bitCast(@as(isize, @intCast((t.*.li - amnt) * t.*.co)))))), 0, amnt * t.*.co);
+            _ = msetI(@ptrCast(@alignCast((t.*.updtab + @as(usize, @bitCast(@as(isize, @intCast(t.*.li))))) - @as(usize, @bitCast(@as(isize, @intCast(amnt)))))), 1, amnt);
+        } else {
+            mfill(t.*.scrn + @as(usize, @bitCast(@as(isize, @intCast((bot - amnt) * t.*.co)))), ' ', amnt * t.*.co);
+            _ = msetI(@ptrCast(@alignCast(t.*.attr + @as(usize, @bitCast(@as(isize, @intCast((bot - amnt) * t.*.co)))))), 0, amnt * t.*.co);
+        }
+        return;
+    }
     _ = set_attr(t, atr);
     if (((top == @as(ptrdiff_t, 0)) and (bot == t.*.li)) and ((t.*.sf != null) or (t.*.SF != null))) {
         setregn(t, 0, t.*.li);
@@ -2472,6 +2536,19 @@ pub fn dodnscrl(arg_t: [*c]SCRN, arg_top: ptrdiff_t, arg_bot: ptrdiff_t, arg_amn
     var did: c_int = 0;
     _ = &did;
     if (!(amnt != 0)) return;
+    if (zig_screen_swap_enabled != 0) {
+        _ = mmove(@ptrCast(@alignCast(t.*.scrn + @as(usize, @bitCast(@as(isize, @intCast((top + amnt) * t.*.co)))))), @ptrCast(@alignCast(t.*.scrn + @as(usize, @bitCast(@as(isize, @intCast(top * t.*.co)))))), (((bot - top) - amnt) * t.*.co) * @as(ptrdiff_t, @bitCast(@as(c_ulong, @truncate(@sizeOf([4]c_int))))));
+        _ = mmove(@ptrCast(@alignCast(t.*.attr + @as(usize, @bitCast(@as(isize, @intCast((top + amnt) * t.*.co)))))), @ptrCast(@alignCast(t.*.attr + @as(usize, @bitCast(@as(isize, @intCast(top * t.*.co)))))), (((bot - top) - amnt) * t.*.co) * @as(ptrdiff_t, @bitCast(@as(c_ulong, @truncate(@sizeOf(c_int))))));
+        if (!(top != 0) and (t.*.da != 0)) {
+            mfill(t.*.scrn, -@as(c_int, 1), amnt * t.*.co);
+            _ = msetI(@ptrCast(@alignCast(t.*.attr)), 0, amnt * t.*.co);
+            _ = msetI(@ptrCast(@alignCast(t.*.updtab)), 1, amnt);
+        } else {
+            mfill(t.*.scrn + @as(usize, @bitCast(@as(isize, @intCast(t.*.co * top)))), ' ', amnt * t.*.co);
+            _ = msetI(@ptrCast(@alignCast(t.*.attr + @as(usize, @bitCast(@as(isize, @intCast(t.*.co * top)))))), 0, amnt * t.*.co);
+        }
+        return;
+    }
     _ = set_attr(t, atr);
     if (((top == @as(ptrdiff_t, 0)) and (bot == t.*.li)) and ((t.*.sr != null) or (t.*.SR != null))) {
         setregn(t, 0, t.*.li);
@@ -2682,6 +2759,7 @@ pub export fn nclose(arg_t: [*c]SCRN) void {
     }
     ttclose();
     rmcap(t.*.cap);
+    zigScrnSwapDestroy();
     joe_free(@ptrCast(@alignCast(t.*.scrn)));
     joe_free(@ptrCast(@alignCast(t.*.attr)));
     joe_free(@ptrCast(@alignCast(t.*.sary)));
@@ -3310,3 +3388,88 @@ pub export fn setextpal(arg_t: [*c]SCRN, arg_palette: [*c]c_int) void {
     t.*.palette = palette;
 }
 
+
+// ── Zig-native screen swap (Phase 3 redesign deepen) ─────────────────
+// When `JOE_ZIG_SCREEN_SWAP` / `zig_screen_swap_enabled` is on, hybrid paint
+// paths update the `scrn`/`attr` shadow only; `zig_scrn_swap_flush` syncs into
+// the redesign `Screen`, runs cell-diff (+ ICH/DCH magic) flush, and drains
+// into hybrid `obuf`. Default off — live path unchanged.
+
+/// C-visible gate (also set from `JOE_ZIG_SCREEN_SWAP` in `ttopnn`). Default 0.
+pub export var zig_screen_swap_enabled: c_int = 0;
+
+var zig_scr_storage: ?terminal.Screen = null;
+
+fn zigScrnSwapEnsure(t: [*c]SCRN) ?*terminal.Screen {
+    if (t == null) return null;
+    if (t.*.co <= 0 or t.*.li <= 0) return null;
+    const w: u16 = @intCast(t.*.co);
+    const h: u16 = @intCast(t.*.li);
+    if (zig_scr_storage) |*s| {
+        if (s.width != w or s.height != h) {
+            s.resize(w, h) catch return null;
+            s.clear();
+        }
+        return s;
+    }
+    zig_scr_storage = terminal.Screen.init(std.heap.c_allocator, w, h) catch return null;
+    return &zig_scr_storage.?;
+}
+
+fn zigScrnSwapResize(t: [*c]SCRN) void {
+    if (zig_screen_swap_enabled == 0) return;
+    _ = zigScrnSwapEnsure(t);
+}
+
+fn zigScrnSwapDestroy() void {
+    if (zig_scr_storage) |*s| {
+        s.deinit();
+        zig_scr_storage = null;
+    }
+}
+
+fn zigPaletteSlice(t: [*c]SCRN) ?[]const i32 {
+    if (t == null or t.*.palette == null) return null;
+    // JOE truecolor palette is 256 ints (index 0 unused).
+    return @as([*]const i32, @ptrCast(t.*.palette))[0..256];
+}
+
+/// End-of-frame swap emit: sync hybrid shadow → Zig Screen → flush → drain.
+/// Places the cursor at `(x, y)`. No-op when the swap gate is off.
+pub export fn zig_scrn_swap_flush(arg_t: [*c]SCRN, arg_x: ptrdiff_t, arg_y: ptrdiff_t) void {
+    const t = arg_t;
+    var x = arg_x;
+    var y = arg_y;
+    if (zig_screen_swap_enabled == 0 or t == null) return;
+    if (t.*.scrn == null or t.*.attr == null) return;
+
+    const scr = zigScrnSwapEnsure(t) orelse return;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x >= t.*.co) x = t.*.co - 1;
+    if (y >= t.*.li) y = t.*.li - 1;
+
+    const cells: [*]const [4]i32 = @ptrCast(@alignCast(t.*.scrn));
+    const attrs: [*]const i32 = @ptrCast(@alignCast(t.*.attr));
+    terminal.syncHybridGridToScreen(
+        scr,
+        cells,
+        attrs,
+        @intCast(t.*.co),
+        @intCast(t.*.li),
+        zigPaletteSlice(t),
+    );
+
+    scr.cursor_x = @intCast(x);
+    scr.cursor_y = @intCast(y);
+    scr.flush() catch {};
+
+    // Drain requires the drain gate; force on for this call then restore.
+    const old_drain = tty.zig_screen_drain_enabled;
+    tty.zig_screen_drain_enabled = 1;
+    defer tty.zig_screen_drain_enabled = old_drain;
+    _ = tty.drainZigScreen(scr) catch {};
+
+    t.*.x = x;
+    t.*.y = y;
+}

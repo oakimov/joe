@@ -238,6 +238,43 @@ pub fn writeIntoObuf(
     }
 }
 
+
+/// Sync hybrid `SCRN.scrn`/`attr` shadow grid into a redesign `Screen`.
+///
+/// `cells` is row-major `COMPOSE=4` int cells (only base codepoint slot 0 is
+/// used; combining marks are ignored — Zig `Cell` has no compose slots yet).
+/// Negative sentinels (JOE "unknown") become continuation/`cp=0`; the JOE
+/// erase-eol `'\n'` marker becomes a blank space. `width`/`height` are the
+/// hybrid grid dimensions (may exceed `scr` — excess is clipped).
+pub fn syncHybridGridToScreen(
+    scr: *Screen,
+    cells: [*]const [4]i32,
+    attrs: [*]const i32,
+    width: usize,
+    height: usize,
+    palette: ?[]const i32,
+) void {
+    const w = @min(width, @as(usize, scr.width));
+    const h = @min(height, @as(usize, scr.height));
+    var y: usize = 0;
+    while (y < h) : (y += 1) {
+        var x: usize = 0;
+        while (x < w) : (x += 1) {
+            const idx = y * width + x;
+            const raw = cells[idx][0];
+            const atr = attrs[idx];
+            const cp: u21 = if (raw < 0)
+                0
+            else if (raw == '\n')
+                ' '
+            else
+                @intCast(raw);
+            const attr = attributeFromHybrid(atr, palette);
+            scr.writeChar(@intCast(x), @intCast(y), cp, attr);
+        }
+    }
+}
+
 // --- tests ---
 
 test "hybrid style bits roundtrip" {
@@ -420,3 +457,29 @@ test "drainScreenOutGated drains when enabled into hybrid-style obuf" {
     try testing.expectEqualStrings("ABCDEFGHIJKLMNOP", obuf.captured.items);
     try testing.expectEqual(@as(usize, 0), obuf.pos);
 }
+
+test "syncHybridGridToScreen copies base cells and attrs" {
+    var scr = try Screen.init(testing.allocator, 4, 2);
+    defer scr.deinit();
+
+    var cells: [8][4]i32 = .{.{0} ** 4} ** 8;
+    var attrs: [8]i32 = .{0} ** 8;
+    cells[0][0] = 'A';
+    attrs[0] = Hybrid.BOLD | Hybrid.FG_NOT_DEFAULT | (@as(i32, 2) << Hybrid.FG_SHIFT);
+    cells[1][0] = 'B';
+    cells[4][0] = -1; // unknown → cp 0
+    cells[5][0] = '\n'; // eraeol marker → space
+
+    syncHybridGridToScreen(&scr, &cells, &attrs, 4, 2, null);
+
+    try testing.expectEqual(@as(u21, 'A'), scr.cells[0].cp);
+    try testing.expect(scr.cells[0].attr.bold);
+    try testing.expect(scr.cells[0].attr.fg == .indexed);
+    try testing.expectEqual(@as(u8, 2), scr.cells[0].attr.fg.indexed);
+    try testing.expectEqual(@as(u21, 'B'), scr.cells[1].cp);
+    try testing.expectEqual(@as(u21, 0), scr.cells[4].cp);
+    try testing.expectEqual(@as(u21, ' '), scr.cells[5].cp);
+    try testing.expect(scr.dirty_rows.isSet(0));
+    try testing.expect(scr.dirty_rows.isSet(1));
+}
+

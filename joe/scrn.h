@@ -380,3 +380,9 @@ extern int nolinefeeds;
 extern int opt_usetabs;
 extern int assume_color;
 extern int assume_256color;
+
+/* Zig-native screen swap (default off). When set, paint updates shadow
+ * buffers only; call zig_scrn_swap_flush() at end of edupd to emit via
+ * the redesign Screen cell-diff path. Env: JOE_ZIG_SCREEN_SWAP=1 */
+extern int zig_screen_swap_enabled;
+void zig_scrn_swap_flush(SCRN *t, ptrdiff_t x, ptrdiff_t y);

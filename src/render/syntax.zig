@@ -6,11 +6,12 @@
 //! `buffer` + `strings`/`istrings` keyword tables (including `"&"` delim),
 //! `save_c`/`save_s`/`push_c`/`push_s`/`pop_c`/`pop_s` delimiter match buffer+stack,
 //! local `.subr`/`.end` and external `call=file.subr()` / `call=file()` / `call=.name()`,
-//! `return`, `reset`, `mark`/`markend`/`recolormark`, and `\i`/`\c` character classes.
+//! `.ifdef` params, `return`, `reset`, `mark`/`markend`/`recolormark`, and `\i`/`\c`.
 //!
 //! External calls resolve through in-memory `SyntaxLibrary` (`loadWithLibrary`).
-//! Still missing: `.ifdef` params, `hold`, lattr cache. Fills per-byte attrs for
-//! `lgen`. Not wired into live `joe`.
+//! `.ifdef` / `.else` / `.endif` honor `call=…(params)` (including `-param`).
+//! Still missing: `hold`, lattr cache. Fills per-byte attrs for `lgen`.
+//! Not wired into live `joe`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -65,11 +66,18 @@ const DelimBuf = struct {
     }
 };
 
+const ParamDelta = struct {
+    name: []const u8,
+    remove: bool = false,
+};
+
 const CallSpec = struct {
     /// Syntax file name without `.jsf` (local calls use the current file name).
     file: []const u8,
     /// Subroutine name, or null to call the whole file (`call=file()`).
     subr: ?[]const u8 = null,
+    /// Parameter adds/removes from `call=…(a -b c)` relative to the caller.
+    deltas: []const ParamDelta = &.{},
 };
 
 /// In-memory `.jsf` sources available for external `call=file…`.
@@ -182,6 +190,8 @@ pub const Syntax = struct {
     name: []const u8,
     /// Subroutine name when this piece was loaded via `.subr`; empty for root.
     subr: []const u8 = "",
+    /// Active `.ifdef` parameter set for this loaded instance (sorted).
+    params: []const []const u8 = &.{},
     states: []State,
     /// Local subroutines loaded from the same source (root only).
     subrs: []SubrSlot = &.{},
@@ -806,14 +816,95 @@ fn parseQuotedString(s: []const u8, from: usize) !struct { str: []const u8, next
     return .{ .str = str, .next = i };
 }
 
-fn skipCallParams(s: []const u8, from: usize) usize {
+fn parseCallParamDeltas(arena: Allocator, s: []const u8, from: usize) LoadError!struct {
+    deltas: []const ParamDelta,
+    next: usize,
+} {
     var i = skipWs(s, from);
-    if (i >= s.len or s[i] != '(') return i;
-    // Params are for `.ifdef` (not applied yet); skip to matching ')'.
+    if (i >= s.len or s[i] != '(') return .{ .deltas = &.{}, .next = i };
     i += 1;
-    while (i < s.len and s[i] != ')') : (i += 1) {}
-    if (i < s.len and s[i] == ')') i += 1;
-    return i;
+    var deltas: std.ArrayList(ParamDelta) = .empty;
+    while (true) {
+        i = skipWs(s, i);
+        if (i >= s.len) return error.BadSyntax;
+        if (s[i] == ')') {
+            i += 1;
+            break;
+        }
+        var remove = false;
+        if (s[i] == '-') {
+            remove = true;
+            i += 1;
+        }
+        const id = parseIdent(s, i) orelse return error.BadSyntax;
+        i = id.next;
+        try deltas.append(arena, .{
+            .name = try arena.dupe(u8, id.name),
+            .remove = remove,
+        });
+    }
+    return .{ .deltas = try deltas.toOwnedSlice(arena), .next = i };
+}
+
+fn paramIndex(params: []const []const u8, name: []const u8) ?usize {
+    for (params, 0..) |p, idx| {
+        if (std.mem.eql(u8, p, name)) return idx;
+    }
+    return null;
+}
+
+fn applyParamDeltas(
+    arena: Allocator,
+    base: []const []const u8,
+    deltas: []const ParamDelta,
+) LoadError![]const []const u8 {
+    var list: std.ArrayList([]const u8) = .empty;
+    try list.appendSlice(arena, base);
+    for (deltas) |d| {
+        if (d.remove) {
+            if (paramIndex(list.items, d.name)) |idx| {
+                _ = list.orderedRemove(idx);
+            }
+        } else if (paramIndex(list.items, d.name) == null) {
+            // Keep sorted like JOE.
+            var insert_at: usize = 0;
+            while (insert_at < list.items.len and std.mem.order(u8, list.items[insert_at], d.name) == .lt) : (insert_at += 1) {}
+            try list.insert(arena, insert_at, try arena.dupe(u8, d.name));
+        }
+    }
+    return try list.toOwnedSlice(arena);
+}
+
+const IfFrame = struct {
+    ignore: bool,
+    skip: bool,
+    else_seen: bool = false,
+};
+
+fn ifdefIgnoring(stack: *const std.ArrayList(IfFrame)) bool {
+    return stack.items.len > 0 and stack.items[stack.items.len - 1].ignore;
+}
+
+fn ifdefPush(stack: *std.ArrayList(IfFrame), allocator: Allocator, params: []const []const u8, name: []const u8) !void {
+    const parent_ignore = ifdefIgnoring(stack);
+    var frame = IfFrame{ .ignore = true, .skip = true };
+    if (!parent_ignore) {
+        frame.ignore = paramIndex(params, name) == null;
+        frame.skip = false;
+    }
+    try stack.append(allocator, frame);
+}
+
+fn ifdefElse(stack: *std.ArrayList(IfFrame)) void {
+    if (stack.items.len == 0) return;
+    const frame = &stack.items[stack.items.len - 1];
+    if (frame.else_seen) return;
+    frame.else_seen = true;
+    if (!frame.skip) frame.ignore = !frame.ignore;
+}
+
+fn ifdefPop(stack: *std.ArrayList(IfFrame)) void {
+    if (stack.items.len > 0) _ = stack.pop();
 }
 
 fn parseTransitionOptions(
@@ -889,10 +980,12 @@ fn parseTransitionOptions(
                 i += 1;
                 const id = parseIdent(s, i) orelse return error.BadSyntax;
                 i = id.next;
-                i = skipCallParams(s, i);
+                const pd = try parseCallParamDeltas(arena, s, i);
+                i = pd.next;
                 cmd.call_spec = .{
                     .file = try arena.dupe(u8, current_file),
                     .subr = try arena.dupe(u8, id.name),
+                    .deltas = pd.deltas,
                 };
             } else {
                 const file_id = parseIdent(s, i) orelse return error.BadSyntax;
@@ -904,10 +997,12 @@ fn parseTransitionOptions(
                     i = sid.next;
                     subr = try arena.dupe(u8, sid.name);
                 }
-                i = skipCallParams(s, i);
+                const pd = try parseCallParamDeltas(arena, s, i);
+                i = pd.next;
                 cmd.call_spec = .{
                     .file = try arena.dupe(u8, file_id.name),
                     .subr = subr,
+                    .deltas = pd.deltas,
                 };
             }
             continue;
@@ -977,12 +1072,12 @@ const LoadCtx = struct {
     /// Current file being parsed by `loadPiece`.
     name: []const u8,
     source: []const u8,
+    /// Active parameter set while `loadPiece` runs.
+    params: []const []const u8 = &.{},
     class_attr: std.StringHashMap(Attribute),
     library: SyntaxLibrary,
-    /// Cache key = `file\x00` or `file\x00subr` → loaded piece.
+    /// Cache key = `file\x00subr\x00params…` → loaded piece.
     syntax_cache: std.StringHashMap(*Syntax),
-    /// Files whose local `.subr` pieces have been loaded.
-    prepared: std.StringHashMap(void),
     /// All callable pieces registered on the root (local + external).
     all_slots: std.ArrayList(SubrSlot),
 };
@@ -1016,7 +1111,8 @@ fn loadPiece(ctx: *LoadCtx, want_subr: ?[]const u8) LoadError!*Syntax {
 
     var inside_subr = false;
     var this_one = want_subr == null;
-    var ifdef_ignore: i32 = 0; // nest depth of ignored .ifdef regions (best-effort skip)
+    var if_stack: std.ArrayList(IfFrame) = .empty;
+    defer if_stack.deinit(allocator);
 
     // Pass 1: collect :state headers in the selected region.
     var line_start: usize = 0;
@@ -1031,6 +1127,20 @@ fn loadPiece(ctx: *LoadCtx, want_subr: ?[]const u8) LoadError!*Syntax {
 
         if (line[0] == '.') {
             const rest = std.mem.trim(u8, line[1..], " \t");
+            if (std.mem.startsWith(u8, rest, "ifdef")) {
+                const id = parseIdent(rest, "ifdef".len) orelse return error.BadSyntax;
+                try ifdefPush(&if_stack, allocator, ctx.params, id.name);
+                continue;
+            }
+            if (std.mem.startsWith(u8, rest, "else") and (rest.len == 4 or !isIdentCont(rest[4]))) {
+                ifdefElse(&if_stack);
+                continue;
+            }
+            if (std.mem.startsWith(u8, rest, "endif") and (rest.len == 5 or !isIdentCont(rest[5]))) {
+                ifdefPop(&if_stack);
+                continue;
+            }
+            if (ifdefIgnoring(&if_stack)) continue;
             if (std.mem.startsWith(u8, rest, "subr")) {
                 const id = parseIdent(rest, "subr".len) orelse continue;
                 inside_subr = true;
@@ -1042,23 +1152,10 @@ fn loadPiece(ctx: *LoadCtx, want_subr: ?[]const u8) LoadError!*Syntax {
                 this_one = want_subr == null;
                 continue;
             }
-            if (std.mem.startsWith(u8, rest, "ifdef")) {
-                // Params not modeled: ignore bodies unless we later add params.
-                // Keep nesting so .else/.endif stay balanced.
-                ifdef_ignore += 1;
-                continue;
-            }
-            if (std.mem.startsWith(u8, rest, "else")) {
-                continue;
-            }
-            if (std.mem.startsWith(u8, rest, "endif")) {
-                if (ifdef_ignore > 0) ifdef_ignore -= 1;
-                continue;
-            }
             continue;
         }
 
-        if (ifdef_ignore > 0) continue;
+        if (ifdefIgnoring(&if_stack)) continue;
         // Main file skips subr bodies; subr load skips outside.
         if (want_subr == null and inside_subr) continue;
         if (want_subr != null and !this_one) continue;
@@ -1112,7 +1209,7 @@ fn loadPiece(ctx: *LoadCtx, want_subr: ?[]const u8) LoadError!*Syntax {
     // Pass 2: transitions.
     inside_subr = false;
     this_one = want_subr == null;
-    ifdef_ignore = 0;
+    if_stack.clearRetainingCapacity();
     var cur_state: ?usize = null;
 
     line_start = 0;
@@ -1128,6 +1225,20 @@ fn loadPiece(ctx: *LoadCtx, want_subr: ?[]const u8) LoadError!*Syntax {
 
         if (trimmed[0] == '.') {
             const rest = std.mem.trim(u8, trimmed[1..], " \t");
+            if (std.mem.startsWith(u8, rest, "ifdef")) {
+                const id = parseIdent(rest, "ifdef".len) orelse return error.BadSyntax;
+                try ifdefPush(&if_stack, allocator, ctx.params, id.name);
+                continue;
+            }
+            if (std.mem.startsWith(u8, rest, "else") and (rest.len == 4 or !isIdentCont(rest[4]))) {
+                ifdefElse(&if_stack);
+                continue;
+            }
+            if (std.mem.startsWith(u8, rest, "endif") and (rest.len == 5 or !isIdentCont(rest[5]))) {
+                ifdefPop(&if_stack);
+                continue;
+            }
+            if (ifdefIgnoring(&if_stack)) continue;
             if (std.mem.startsWith(u8, rest, "subr")) {
                 const id = parseIdent(rest, "subr".len) orelse continue;
                 inside_subr = true;
@@ -1141,19 +1252,10 @@ fn loadPiece(ctx: *LoadCtx, want_subr: ?[]const u8) LoadError!*Syntax {
                 cur_state = null;
                 continue;
             }
-            if (std.mem.startsWith(u8, rest, "ifdef")) {
-                ifdef_ignore += 1;
-                continue;
-            }
-            if (std.mem.startsWith(u8, rest, "else")) continue;
-            if (std.mem.startsWith(u8, rest, "endif")) {
-                if (ifdef_ignore > 0) ifdef_ignore -= 1;
-                continue;
-            }
             continue;
         }
 
-        if (ifdef_ignore > 0) continue;
+        if (ifdefIgnoring(&if_stack)) continue;
         if (want_subr == null and inside_subr) continue;
         if (want_subr != null and !this_one) continue;
         if (trimmed[0] == '=') continue;
@@ -1258,12 +1360,20 @@ fn loadPiece(ctx: *LoadCtx, want_subr: ?[]const u8) LoadError!*Syntax {
         .allocator = allocator,
         .name = try arena.dupe(u8, ctx.name),
         .subr = if (want_subr) |w| try arena.dupe(u8, w) else "",
+        .params = try dupeParams(arena, ctx.params),
         .states = states,
         .subrs = &.{},
         .arena_ptr = ctx.arena_ptr,
         .owns_arena = false,
     };
     return syn_ptr;
+}
+
+fn dupeParams(arena: Allocator, params: []const []const u8) ![]const []const u8 {
+    if (params.len == 0) return &.{};
+    const out = try arena.alloc([]const u8, params.len);
+    for (params, 0..) |p, i| out[i] = try arena.dupe(u8, p);
+    return out;
 }
 
 fn collectLocalSubrNames(allocator: Allocator, source: []const u8) ![][]const u8 {
@@ -1351,9 +1461,17 @@ fn loadColorsInto(
 }
 
 
-fn cacheKey(arena: Allocator, file: []const u8, subr: ?[]const u8) ![]const u8 {
-    if (subr) |s| return try std.fmt.allocPrint(arena, "{s}\x00{s}", .{ file, s });
-    return try std.fmt.allocPrint(arena, "{s}\x00", .{file});
+fn cacheKey(arena: Allocator, file: []const u8, subr: ?[]const u8, params: []const []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(arena, file);
+    try out.append(arena, 0);
+    if (subr) |s| try out.appendSlice(arena, s);
+    try out.append(arena, 0);
+    for (params) |p| {
+        try out.appendSlice(arena, p);
+        try out.append(arena, 0);
+    }
+    return try out.toOwnedSlice(arena);
 }
 
 fn resolveSource(ctx: *LoadCtx, file: []const u8) LoadError![]const u8 {
@@ -1361,9 +1479,14 @@ fn resolveSource(ctx: *LoadCtx, file: []const u8) LoadError![]const u8 {
     return ctx.library.find(file) orelse error.UnknownSyntax;
 }
 
-fn prepareFile(ctx: *LoadCtx, file: []const u8) LoadError!void {
-    if (ctx.prepared.contains(file)) return;
-    try ctx.prepared.put(try ctx.arena.dupe(u8, file), {});
+fn ensureLoaded(
+    ctx: *LoadCtx,
+    file: []const u8,
+    subr: ?[]const u8,
+    params: []const []const u8,
+) LoadError!*Syntax {
+    const key = try cacheKey(ctx.arena, file, subr, params);
+    if (ctx.syntax_cache.get(key)) |s| return s;
 
     const source = try resolveSource(ctx, file);
     var colors = std.StringHashMap(Attribute).init(ctx.allocator);
@@ -1373,68 +1496,34 @@ fn prepareFile(ctx: *LoadCtx, file: []const u8) LoadError!void {
     const saved_attr = ctx.class_attr;
     const saved_source = ctx.source;
     const saved_name = ctx.name;
+    const saved_params = ctx.params;
     ctx.class_attr = colors;
     ctx.source = source;
     ctx.name = file;
+    ctx.params = params;
 
-    const subr_names = try collectLocalSubrNames(ctx.allocator, source);
-    defer {
-        for (subr_names) |n| ctx.allocator.free(n);
-        ctx.allocator.free(subr_names);
-    }
-
-    var loaded: std.ArrayList(*Syntax) = .empty;
-    defer loaded.deinit(ctx.allocator);
-
-    for (subr_names) |sn| {
-        const key = try cacheKey(ctx.arena, file, sn);
-        if (ctx.syntax_cache.contains(key)) continue;
-        const syn = try loadPiece(ctx, sn);
-        try ctx.syntax_cache.put(key, syn);
-        const slot_name = try std.fmt.allocPrint(ctx.arena, "{s}.{s}", .{ file, sn });
-        try ctx.all_slots.append(ctx.arena, .{ .name = slot_name, .syn = syn });
-        try loaded.append(ctx.allocator, syn);
-    }
+    const syn = loadPiece(ctx, subr) catch |err| {
+        ctx.class_attr = saved_attr;
+        ctx.source = saved_source;
+        ctx.name = saved_name;
+        ctx.params = saved_params;
+        colors.deinit();
+        return err;
+    };
 
     ctx.class_attr = saved_attr;
     ctx.source = saved_source;
     ctx.name = saved_name;
+    ctx.params = saved_params;
     colors.deinit();
 
-    for (loaded.items) |syn| {
-        try bindCalls(ctx, syn);
-    }
-}
-
-fn ensureLoaded(ctx: *LoadCtx, file: []const u8, subr: ?[]const u8) LoadError!*Syntax {
-    const key = try cacheKey(ctx.arena, file, subr);
-    if (ctx.syntax_cache.get(key)) |s| return s;
-
-    try prepareFile(ctx, file);
-    if (ctx.syntax_cache.get(key)) |s| return s;
-
-    if (subr != null) return error.UnknownSubr;
-
-    // Whole-file piece (`call=file()`).
-    const source = try resolveSource(ctx, file);
-    var colors = std.StringHashMap(Attribute).init(ctx.allocator);
-    errdefer colors.deinit();
-    try loadColorsInto(&colors, ctx.arena, ctx.allocator, source);
-
-    const saved_attr = ctx.class_attr;
-    const saved_source = ctx.source;
-    const saved_name = ctx.name;
-    ctx.class_attr = colors;
-    ctx.source = source;
-    ctx.name = file;
-    const syn = try loadPiece(ctx, null);
-    ctx.class_attr = saved_attr;
-    ctx.source = saved_source;
-    ctx.name = saved_name;
-    colors.deinit();
-
+    // Cache before bind so recursive calls can reuse this instance.
     try ctx.syntax_cache.put(key, syn);
-    try ctx.all_slots.append(ctx.arena, .{ .name = try ctx.arena.dupe(u8, file), .syn = syn });
+    const slot_name = if (subr) |s|
+        try std.fmt.allocPrint(ctx.arena, "{s}.{s}", .{ file, s })
+    else
+        try ctx.arena.dupe(u8, file);
+    try ctx.all_slots.append(ctx.arena, .{ .name = slot_name, .syn = syn });
     try bindCalls(ctx, syn);
     return syn;
 }
@@ -1465,23 +1554,19 @@ pub fn loadWithLibrary(
         .root_source = source,
         .name = name,
         .source = source,
+        .params = &.{},
         .class_attr = std.StringHashMap(Attribute).init(allocator),
         .library = library,
         .syntax_cache = std.StringHashMap(*Syntax).init(allocator),
-        .prepared = std.StringHashMap(void).init(allocator),
         .all_slots = .empty,
     };
     defer ctx.class_attr.deinit();
     defer ctx.syntax_cache.deinit();
-    defer ctx.prepared.deinit();
 
     try loadColorsInto(&ctx.class_attr, arena, allocator, source);
 
-    // Local `.subr` pieces (and any external calls they make).
-    try prepareFile(&ctx, name);
-
     const main_ptr = try loadPiece(&ctx, null);
-    const main_key = try cacheKey(arena, name, null);
+    const main_key = try cacheKey(arena, name, null, &.{});
     try ctx.syntax_cache.put(main_key, main_ptr);
     try bindCalls(&ctx, main_ptr);
 
@@ -1494,25 +1579,26 @@ pub fn loadWithLibrary(
 
 fn bindCalls(ctx: *LoadCtx, syn: *Syntax) LoadError!void {
     for (syn.states) |*st| {
-        if (st.dflt) |*d| try bindCmd(ctx, d);
-        if (st.delim) |*d| try bindCmd(ctx, d);
-        if (st.same_delim) |*d| try bindCmd(ctx, d);
+        if (st.dflt) |*d| try bindCmd(ctx, d, syn.params);
+        if (st.delim) |*d| try bindCmd(ctx, d, syn.params);
+        if (st.same_delim) |*d| try bindCmd(ctx, d, syn.params);
         for (st.transitions) |*tr| {
-            try bindCmd(ctx, &tr.cmd);
+            try bindCmd(ctx, &tr.cmd, syn.params);
             for (tr.cmd.keywords) |*kw| {
-                try bindCmd(ctx, @constCast(&kw.cmd));
+                try bindCmd(ctx, @constCast(&kw.cmd), syn.params);
             }
-            if (tr.cmd.strings_delim) |dptr| try bindCmd(ctx, dptr);
+            if (tr.cmd.strings_delim) |dptr| try bindCmd(ctx, dptr, syn.params);
         }
         if (st.dflt) |*d| {
-            if (d.strings_delim) |dptr| try bindCmd(ctx, dptr);
+            if (d.strings_delim) |dptr| try bindCmd(ctx, dptr, syn.params);
         }
     }
 }
 
-fn bindCmd(ctx: *LoadCtx, cmd: *Command) LoadError!void {
+fn bindCmd(ctx: *LoadCtx, cmd: *Command, caller_params: []const []const u8) LoadError!void {
     if (cmd.call_spec) |spec| {
-        cmd.call = try ensureLoaded(ctx, spec.file, spec.subr);
+        const resolved = try applyParamDeltas(ctx.arena, caller_params, spec.deltas);
+        cmd.call = try ensureLoaded(ctx, spec.file, spec.subr, resolved);
     }
 }
 
@@ -2103,3 +2189,111 @@ test "external call unknown file returns UnknownSyntax" {
     try testing.expectError(error.UnknownSyntax, loadWithLibrary(testing.allocator, "host", src, .{}));
 }
 
+
+test "ifdef params select then/else branches" {
+    const src =
+        \\=Idle
+        \\=Comment
+        \\=String
+        \\:idle Idle
+        \\  *    idle
+        \\  "a"    idle    noeat call=.piece(long)
+        \\  "b"    idle    noeat call=.piece()
+        \\.subr piece
+        \\.ifdef long
+        \\:body String string
+        \\  *    NULL    noeat return
+        \\.else
+        \\:body Comment comment
+        \\  *    NULL    noeat return
+        \\.endif
+        \\.end
+    ;
+    var syn = try load(testing.allocator, "host", src);
+    defer syn.deinit();
+
+    // Two param instantiations of the same subr.
+    try testing.expect(syn.subrs.len >= 2);
+
+    var attrs: [8]Attribute = undefined;
+    _ = syn.parseLine("a", .initial, attrs[0..1]);
+    try testing.expect(Color.eql(attrs[0].fg, .{ .indexed = 3 })); // String
+
+    _ = syn.parseLine("b", .initial, attrs[0..1]);
+    try testing.expect(attrs[0].dim or Color.eql(attrs[0].fg, .{ .indexed = 2 })); // Comment
+}
+
+test "ifdef nested and -param removal" {
+    const src =
+        \\=Idle
+        \\=Comment
+        \\=String
+        \\=Type
+        \\:idle Idle
+        \\  *    idle
+        \\  "x"    idle    noeat call=.piece(outer inner)
+        \\  "y"    idle    noeat call=.piece(outer)
+        \\  "z"    idle    noeat call=.piece(outer -inner)
+        \\.subr piece
+        \\.ifdef outer
+        \\.ifdef inner
+        \\:body Type
+        \\  *    NULL    noeat return
+        \\.else
+        \\:body String string
+        \\  *    NULL    noeat return
+        \\.endif
+        \\.else
+        \\:body Comment comment
+        \\  *    NULL    noeat return
+        \\.endif
+        \\.end
+    ;
+    var syn = try load(testing.allocator, "host", src);
+    defer syn.deinit();
+
+    var attrs: [8]Attribute = undefined;
+    _ = syn.parseLine("x", .initial, attrs[0..1]);
+    try testing.expect(attrs[0].bold); // Type
+    try testing.expect(Color.eql(attrs[0].fg, .{ .indexed = 4 }));
+
+    _ = syn.parseLine("y", .initial, attrs[0..1]);
+    try testing.expect(Color.eql(attrs[0].fg, .{ .indexed = 3 })); // String (outer, not inner)
+
+    // z: start from outer then -inner → same as outer only → String
+    _ = syn.parseLine("z", .initial, attrs[0..1]);
+    try testing.expect(Color.eql(attrs[0].fg, .{ .indexed = 3 }));
+}
+
+test "ifdef params propagate through external call" {
+    const lib_src =
+        \\=Comment
+        \\=String
+        \\.subr piece
+        \\.ifdef fancy
+        \\:body String string
+        \\  *    NULL    noeat return
+        \\.else
+        \\:body Comment comment
+        \\  *    NULL    noeat return
+        \\.endif
+        \\.end
+    ;
+    const src =
+        \\=Idle
+        \\:idle Idle
+        \\  *    idle
+        \\  "a"    idle    noeat call=lib.piece(fancy)
+        \\  "b"    idle    noeat call=lib.piece()
+    ;
+    var syn = try loadWithLibrary(testing.allocator, "host", src, .{
+        .files = &.{.{ .name = "lib", .source = lib_src }},
+    });
+    defer syn.deinit();
+
+    var attrs: [8]Attribute = undefined;
+    _ = syn.parseLine("a", .initial, attrs[0..1]);
+    try testing.expect(Color.eql(attrs[0].fg, .{ .indexed = 3 }));
+    _ = syn.parseLine("b", .initial, attrs[0..1]);
+    try testing.expect(attrs[0].dim or Color.eql(attrs[0].fg, .{ .indexed = 2 }));
+}

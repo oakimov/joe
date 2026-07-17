@@ -23,6 +23,10 @@ extern int zig_bw_table_row(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *a
 	int ncols, const int *widths, const int *aligns, int row_type,
 	struct charmap *charmap, int defatr, int *palette, int palette_len,
 	off_t *col_map, int col_map_size);
+/* Path A: gated Zig gennum line-number gutter (same JOE_ZIG_BW_LGEN gate). */
+extern int zig_bw_gennum(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
+	int *compose, int lincols, int have_number, off_t line_1based, int atr,
+	struct charmap *charmap);
 
 /* Attributes for line numbers, and current line */
 int bg_linum = 0;
@@ -2489,6 +2493,18 @@ static void gennum(BW *w, int (*screen)[COMPOSE], int *attr, SCRN *t, ptrdiff_t 
 	char buf[24];
 	ptrdiff_t z, x;
 	off_t lin = w->top->line + y - w->y;
+	int atr = (w->o.hiline && lin == w->cursor->line) ? bg_curlinum : bg_linum;
+
+	/* Path A: Zig-native line-number gutter (JOE_ZIG_BW_LGEN). */
+	if (zig_bw_lgen_enabled && w->lincols > 0) {
+		int have_number = (lin <= w->b->eof->line);
+		off_t line_1based = have_number ? (lin + 1) : 0;
+		int zret = zig_bw_gennum(t, y, screen, attr, comp, w->lincols,
+			have_number, line_1based, BG_COLOR(atr),
+			w->b && w->b->o.charmap ? w->b->o.charmap : NULL);
+		if (zret >= 0)
+			return;
+	}
 
 	if (lin <= w->b->eof->line)
 #ifdef HAVE_LONG_LONG
@@ -2501,7 +2517,6 @@ static void gennum(BW *w, int (*screen)[COMPOSE], int *attr, SCRN *t, ptrdiff_t 
 			buf[x] = ' ';
 		buf[x] = 0;
 	}
-	int atr = (w->o.hiline && lin == w->cursor->line) ? bg_curlinum : bg_linum;
 	for (z = SIZEOF(buf) - w->lincols - 1, x = 0; buf[z]; ++z, ++x) {
 		outatr(w->b->o.charmap, t, screen + x, attr + x, x, y, buf[z], BG_COLOR(atr));
 		comp[x] = buf[z];

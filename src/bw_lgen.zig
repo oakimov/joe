@@ -1,13 +1,14 @@
-//! Gated live bridge: JOE `lgen_core` / Feature 2.2 table rows → Zig-native paint.
+//! Gated live bridge: JOE `lgen_core` / Feature 2.2 table rows / `gennum` → Zig paint.
 //!
 //! When `JOE_ZIG_BW_LGEN` / `zig_bw_lgen_enabled` is on, plain UTF-8 lines
 //! (including linear/square mark inverse + viewmode hide/substitute/link tables +
 //! `-visiblews` glyphs + `-ansi` ESC hiding) paint through the Phase 6 renderer
 //! and emit via hybrid `outatr` (works with screen-swap shadow + classic tty
 //! path). Feature 2.2 padded table rows use `zig_bw_table_row` → `render.table.paintRow`
-//! with C-computed widths/aligns (region detect stays in C `lgen_view`). Default
-//! off until soak. Falls back to C when the gate is off or the line is unsupported
-//! (non-UTF-8). Feature 2.1 simple pipe substitute stays in C.
+//! with C-computed widths/aligns (region detect stays in C `lgen_view`). Line-number
+//! gutters use `zig_bw_gennum` (JOE `" %21lld "` trailing `lincols`; past-EOF blanks).
+//! Default off until soak. Falls back to C when the gate is off or unsupported
+//! (non-UTF-8 body). Feature 2.1 simple pipe substitute stays in C.
 //!
 //! Hybrid `syntax.parse` fills `attr_buf` **per character** (`pgetc`); native
 //! `lgenLine` expects **per-byte** attrs — this bridge expands before paint.
@@ -84,6 +85,61 @@ pub export fn zig_bw_lgen_apply_env() void {
     if (std.c.getenv("JOE_ZIG_BW_LGEN")) |v| {
         zig_bw_lgen_enabled = if (v[0] == '1' or v[0] == 'y' or v[0] == 'Y') 1 else 0;
     }
+}
+
+/// JOE `gennum` line-number gutter → hybrid `outatr`.
+///
+/// Formats like C / `window.paint.paintLinum`: `" {d: >21} "` then trailing
+/// `lincols` chars. Past-EOF (`have_number==0`) paints spaces. Paints at absolute
+/// columns `0..lincols-1` to match live C `gennum`. Fills optional `compose`.
+/// Returns `0` on success, `-1` to fall back to C.
+pub export fn zig_bw_gennum(
+    t: ?*SCRN,
+    y: isize,
+    screen: ?[*][COMPOSE]c_int,
+    attr_row: ?[*]c_int,
+    compose: ?[*]c_int,
+    lincols: c_int,
+    have_number: c_int,
+    line_1based: i64,
+    atr: c_int,
+    charmap: ?*Charmap,
+) c_int {
+    if (zig_bw_lgen_enabled == 0) return -1;
+    if (t == null or screen == null or attr_row == null) return -1;
+    if (lincols <= 0 or lincols > 64) return -1;
+
+    const cols: usize = @intCast(lincols);
+    var buf: [24]u8 = .{' '} ** 24;
+
+    if (have_number != 0) {
+        if (line_1based < 0) return -1;
+        var tmp: [24]u8 = undefined;
+        const n: u64 = @intCast(line_1based);
+        const formatted = std.fmt.bufPrint(&tmp, " {d: >21} ", .{n}) catch return -1;
+        const take = @min(cols, formatted.len);
+        const src = formatted[formatted.len - take ..];
+        @memcpy(buf[0..take], src);
+    }
+
+    var x: usize = 0;
+    while (x < cols) : (x += 1) {
+        const ch: c_int = buf[x];
+        const xx: isize = @intCast(x);
+        outatr(
+            charmap,
+            t,
+            @ptrCast(screen.? + x),
+            @ptrCast(attr_row.? + x),
+            xx,
+            y,
+            ch,
+            atr,
+        );
+        if (compose) |comp| comp[x] = ch;
+    }
+    outatr_complete(t);
+    return 0;
 }
 
 /// Feature 2.2 padded table row → Zig `table.paintRow` → hybrid `outatr`.
@@ -1025,4 +1081,17 @@ test "stripAnsiEscapes compacts attrs with escapes" {
 test "emitOsc8Link no-op when unchanged" {
     const u = "http://example.com";
     try std.testing.expectEqual(@as(?[]const u8, u), emitOsc8Link(u, u));
+}
+
+test "formatLinum trailing cols matches JOE gennum" {
+    // Mirror zig_bw_gennum formatting without SCRN (JOE `" %21lld "`).
+    var tmp: [24]u8 = undefined;
+    const formatted = try std.fmt.bufPrint(&tmp, " {d: >21} ", .{@as(u64, 42)});
+    try std.testing.expectEqualStrings(" 42 ", formatted[formatted.len - 4 ..]);
+    const f2 = try std.fmt.bufPrint(&tmp, " {d: >21} ", .{@as(u64, 1)});
+    try std.testing.expectEqualStrings("  1 ", f2[f2.len - 4 ..]);
+    // When lincols is narrower than digits+padding, C takes the trailing slice
+    // (e.g. 10000 with 5 cols → "0000 ").
+    const f3 = try std.fmt.bufPrint(&tmp, " {d: >21} ", .{@as(u64, 10000)});
+    try std.testing.expectEqualStrings("0000 ", f3[f3.len - 5 ..]);
 }

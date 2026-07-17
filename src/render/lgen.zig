@@ -2,7 +2,8 @@
 //!
 //! Renders one UTF-8 buffer line into a `terminal.Screen` row window. Handles
 //! tab expansion, display-column scroll (`bw->offset`), C0/DEL control glyphs,
-//! and wide-char clipping (`>` filler). No syntax/highlight/viewmode/mark yet.
+//! and wide-char clipping (`>` filler). Optional per-byte `attrs` (JOE `attr_buf`).
+//! No full JSF DFA/viewmode/mark yet.
 //! Not wired into live `joe` — unit-tested only.
 
 const std = @import("std");
@@ -10,18 +11,26 @@ const testing = std.testing;
 
 const terminal = @import("terminal");
 const gap = @import("gap.zig");
+const attr_mod = @import("attr.zig");
 
 pub const TermScreen = terminal.Screen;
 pub const Attribute = terminal.Attribute;
+pub const Color = terminal.Color;
 pub const displayWidth = terminal.displayWidth;
 pub const GapBuffer = gap.GapBuffer;
 pub const Point = gap.Point;
+pub const mergeHighlight = attr_mod.mergeHighlight;
+pub const attrAt = attr_mod.attrAt;
+pub const fromHybridRow = attr_mod.fromHybridRow;
 
 pub const Options = struct {
     /// Tab stop width — JOE `o.tab` (default 8).
     tab: u16 = 8,
     /// First visible display column — JOE `bw->offset` / `scr`.
     offset: u64 = 0,
+    /// Per-byte syntax attributes from BOL (JOE `attr_buf`). Lead byte wins
+    /// for multi-byte UTF-8. `null` ⇒ paint everything with `base_attr`.
+    attrs: ?[]const Attribute = null,
 };
 
 fn tabWidth(tab: u16, col: u64) u16 {
@@ -154,9 +163,12 @@ fn paintUnit(
 const SliceIter = struct {
     text: []const u8,
     i: usize = 0,
+    /// Byte index (from BOL / slice start) of the unit returned by the last `next`.
+    last_byte: usize = 0,
 
     fn next(self: *SliceIter) ?Unit {
         if (self.i >= self.text.len) return null;
+        self.last_byte = self.i;
         const b = self.text[self.i];
         if (b == '\n' or b == '\r') return .eol;
 
@@ -179,6 +191,22 @@ const SliceIter = struct {
         };
         self.i += seq_len;
         return .{ .cp = cp };
+    }
+};
+
+/// Point walker that reports byte offsets relative to the line start (`p` at BOL).
+const PointIter = struct {
+    p: *Point,
+    line_start: usize,
+    last_byte: usize = 0,
+
+    fn init(p: *Point) PointIter {
+        return .{ .p = p, .line_start = p.byte };
+    }
+
+    fn next(self: *PointIter) ?gap.Unit {
+        self.last_byte = self.p.byte - self.line_start;
+        return self.p.next();
     }
 };
 
@@ -209,7 +237,8 @@ pub fn lgenPoint(
     opts: Options,
     base_attr: Attribute,
 ) u16 {
-    return lgenUnits(term, x, y, w, p, opts, base_attr);
+    var it = PointIter.init(p);
+    return lgenUnits(term, x, y, w, &it, opts, base_attr);
 }
 
 fn lgenUnits(
@@ -231,7 +260,7 @@ fn lgenUnits(
 
     while (sx < end_x) {
         const unit = iter.next() orelse break;
-        // Point.nextUnit / SliceIter.next both yield Unit.
+        const byte_idx: usize = iter.last_byte;
         const u: Unit = switch (@TypeOf(unit)) {
             gap.Unit => switch (unit) {
                 .cp => |cp| .{ .cp = cp },
@@ -241,7 +270,8 @@ fn lgenUnits(
             Unit => unit,
             else => @compileError("unsupported unit iterator"),
         };
-        if (!paintUnit(term, &sx, end_x, y, x, &logical, offset, tab, u, base_attr)) break;
+        const cell_attr = attrAt(base_attr, opts.attrs, byte_idx);
+        if (!paintUnit(term, &sx, end_x, y, x, &logical, offset, tab, u, cell_attr)) break;
         if (sx >= end_x) break;
     }
 
@@ -403,4 +433,81 @@ test "lgenPoint sees edits across the gap" {
     try testing.expectEqual(@as(u21, 'X'), term.cells[2].cp);
     try testing.expectEqual(@as(u21, 'Y'), term.cells[3].cp);
     try testing.expectEqual(@as(u21, 'l'), term.cells[4].cp);
+}
+
+test "lgenLine applies per-byte attrs (lead byte for UTF-8)" {
+    var term = try TermScreen.init(testing.allocator, 10, 1);
+    defer term.deinit();
+    // "a" + U+00E9 (é = 2 bytes c3 a9) + "b"
+    const line = "a\u{00e9}b";
+    var row: [4]Attribute = .{
+        Attribute.fgIndexed(1), // 'a'
+        Attribute{ .bold = true, .fg = .{ .indexed = 2 } }, // lead of é
+        Attribute.fgIndexed(9), // continuation — ignored by paint
+        Attribute{ .underline = true, .fg = .{ .indexed = 3 } }, // 'b'
+    };
+    _ = lgenLine(&term, 0, 0, 8, line, .{ .attrs = &row }, .none);
+    try testing.expectEqual(@as(u21, 'a'), term.cells[0].cp);
+    try testing.expect(Color.eql(term.cells[0].attr.fg, .{ .indexed = 1 }));
+    try testing.expectEqual(@as(u21, 0xe9), term.cells[1].cp);
+    try testing.expect(term.cells[1].attr.bold);
+    try testing.expect(Color.eql(term.cells[1].attr.fg, .{ .indexed = 2 }));
+    try testing.expectEqual(@as(u21, 'b'), term.cells[2].cp);
+    try testing.expect(term.cells[2].attr.underline);
+    try testing.expect(Color.eql(term.cells[2].attr.fg, .{ .indexed = 3 }));
+}
+
+test "lgenLine merges missing FG from base_attr" {
+    var term = try TermScreen.init(testing.allocator, 6, 1);
+    defer term.deinit();
+    const base = Attribute.fgIndexed(7);
+    var row: [2]Attribute = .{
+        .{ .bold = true }, // fg default → inherit 7
+        .{ .fg = .{ .indexed = 4 } },
+    };
+    _ = lgenLine(&term, 0, 0, 4, "ab", .{ .attrs = &row }, base);
+    try testing.expect(term.cells[0].attr.bold);
+    try testing.expect(Color.eql(term.cells[0].attr.fg, .{ .indexed = 7 }));
+    try testing.expect(Color.eql(term.cells[1].attr.fg, .{ .indexed = 4 }));
+}
+
+test "lgenPoint applies attrs across the gap" {
+    var buf = try GapBuffer.init(testing.allocator);
+    defer buf.deinit();
+    try buf.append("xy");
+    buf.moveGap(1);
+    try buf.insert(1, "Z");
+
+    // attrs for "xZy"
+    var row: [3]Attribute = .{
+        Attribute.fgIndexed(1),
+        Attribute{ .inverse = true, .fg = .{ .indexed = 2 } },
+        Attribute.fgIndexed(3),
+    };
+    var term = try TermScreen.init(testing.allocator, 8, 1);
+    defer term.deinit();
+    var p = Point.bof(&buf);
+    _ = lgenPoint(&term, 0, 0, 6, &p, .{ .attrs = &row }, .none);
+    try testing.expectEqual(@as(u21, 'x'), term.cells[0].cp);
+    try testing.expect(Color.eql(term.cells[0].attr.fg, .{ .indexed = 1 }));
+    try testing.expectEqual(@as(u21, 'Z'), term.cells[1].cp);
+    try testing.expect(term.cells[1].attr.inverse);
+    try testing.expectEqual(@as(u21, 'y'), term.cells[2].cp);
+    try testing.expect(Color.eql(term.cells[2].attr.fg, .{ .indexed = 3 }));
+}
+
+test "lgenLine hybrid attr_buf row via fromHybridRow" {
+    var term = try TermScreen.init(testing.allocator, 6, 1);
+    defer term.deinit();
+    const Hybrid = terminal.Hybrid;
+    const src = [_]i32{
+        Hybrid.BOLD | Hybrid.CONTEXT_STRING,
+        Hybrid.UNDERLINE | Hybrid.FG_NOT_DEFAULT | (5 << Hybrid.FG_SHIFT),
+    };
+    var row: [2]Attribute = undefined;
+    fromHybridRow(&row, &src, null);
+    _ = lgenLine(&term, 0, 0, 4, "ab", .{ .attrs = &row }, .none);
+    try testing.expect(term.cells[0].attr.bold);
+    try testing.expect(term.cells[1].attr.underline);
+    try testing.expect(Color.eql(term.cells[1].attr.fg, .{ .indexed = 5 }));
 }

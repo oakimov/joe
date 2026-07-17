@@ -244,6 +244,7 @@ pub fn paintBody(term: *TermScreen, t: *const tw.TextWindow, attr: Attribute) vo
         const opts: render.Options = .{
             .tab = t.tab,
             .offset = t.offset,
+            .attrs = t.lineAttrRow(line_idx),
         };
         if (t.buffer) |buf| {
             var p = render.Point.bof(buf);
@@ -759,6 +760,32 @@ test "paintBody walks live gap buffer with tabs and linums" {
     try testing.expectEqual(@as(u21, '2'), cellAt(&term, 1, @intCast(t.y + 1)).cp);
     try testing.expectEqual(@as(u21, 'x'), cellAt(&term, t.x, @intCast(t.y + 1)).cp);
     try testing.expectEqual(@as(u21, 'y'), cellAt(&term, t.x + 1, @intCast(t.y + 1)).cp);
+}
+
+
+test "paintBody applies line_attrs from syntax attr_buf rows" {
+    var scr = try screen.Screen.init(testing.allocator, 16, 5);
+    defer scr.deinit();
+    const win = try scr.createText(null, null, 4);
+    scr.layout();
+    const t = win.asText().?;
+
+    const lines = [_][]const u8{"ab"};
+    t.body_lines = &lines;
+    const row0 = [_]Attribute{
+        Attribute.fgIndexed(2),
+        Attribute{ .bold = true, .fg = .{ .indexed = 3 } },
+    };
+    const rows = [_][]const Attribute{&row0};
+    t.line_attrs = &rows;
+
+    var term = try TermScreen.init(testing.allocator, 16, 5);
+    defer term.deinit();
+    paintBody(&term, t, .none);
+    try testing.expectEqual(@as(u21, 'a'), cellAt(&term, t.x, @intCast(t.y)).cp);
+    try testing.expect(terminal.Color.eql(cellAt(&term, t.x, @intCast(t.y)).attr.fg, .{ .indexed = 2 }));
+    try testing.expectEqual(@as(u21, 'b'), cellAt(&term, t.x + 1, @intCast(t.y)).cp);
+    try testing.expect(cellAt(&term, t.x + 1, @intCast(t.y)).attr.bold);
 }
 
 test "paintBody clears content when no stub lines" {

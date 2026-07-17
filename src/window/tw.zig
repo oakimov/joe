@@ -11,6 +11,7 @@ const testing = std.testing;
 const screen = @import("screen.zig");
 const fmt_esc = @import("fmt.zig");
 const render = @import("render");
+const terminal = @import("terminal");
 
 fn onResize(w: *screen.Window, wi: u16, he: u16) void {
     const t = w.asText() orelse return;
@@ -52,6 +53,9 @@ pub const TextWindow = struct {
     /// Optional live Zig-native gap buffer (Phase 6). When set, paint walks
     /// `Point`s via `render.lgenPoint` instead of `body_lines`.
     buffer: ?*render.GapBuffer = null,
+    /// Optional per-line per-byte syntax attrs (JOE `attr_buf` rows).
+    /// Index matches buffer/`body_lines` line index. Borrowed; tests-only.
+    line_attrs: ?[]const []const terminal.Attribute = null,
     /// First visible buffer line — JOE `bw->top->line`.
     top_line: u64 = 0,
     /// Horizontal scroll in display columns — JOE `bw->offset`.
@@ -144,6 +148,13 @@ pub const TextWindow = struct {
         if (self.buffer) |buf| return buf.lineCount();
         if (self.body_lines) |lines| return @as(u64, @intCast(lines.len));
         return null;
+    }
+
+    /// Borrowed per-byte attr row for `line`, if present.
+    pub fn lineAttrRow(self: *const TextWindow, line: u64) ?[]const terminal.Attribute {
+        const rows = self.line_attrs orelse return null;
+        if (line >= rows.len) return null;
+        return rows[@intCast(line)];
     }
 };
 

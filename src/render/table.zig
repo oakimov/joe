@@ -2,7 +2,8 @@
 //!
 //! Detects contiguous `|`-delimited table regions, computes per-column display
 //! widths + alignment from separator markers, and paints padded rows with
-//! Unicode box-drawing borders. Not wired into live `joe` — unit-tested only.
+//! Unicode box-drawing borders. Live Path A uses `layoutAt` via
+//! `zig_bw_table_detect` and `paintRow` via `zig_bw_table_row`.
 
 const std = @import("std");
 const testing = std.testing;
@@ -14,7 +15,7 @@ pub const displayWidth = terminal.displayWidth;
 
 pub const max_cols: usize = 64;
 /// Max lines scanned for a single table region (JOE scans up to 200).
-pub const max_scan_lines: usize = 128;
+pub const max_scan_lines: usize = 200;
 
 pub const Align = enum(u8) {
     left = 0,

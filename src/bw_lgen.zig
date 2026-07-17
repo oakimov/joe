@@ -10,6 +10,7 @@
 //! Window paint loops use `zig_bw_bwgen` (mark/lattr/viewmode setup stays in C;
 //! loops call C `getto`/`lgen`/`gennum` so Path A body/gutter bridges still apply).
 //! Hex dump paint uses `zig_bw_bwgenh` (mark setup stays in C; loop calls C `genfield`).
+//! Table region detect uses `zig_bw_table_detect` → `table.layoutAt` (fills C widths/aligns).
 //! Feature 2.1 residual simple pipe substitute uses `zig_bw_table_simple`.
 //! Non-UTF-8 (byte) charmaps paint via `lgenLine` byte-mode.
 //! Default off until soak. Falls back to C when the gate is off.
@@ -100,6 +101,9 @@ extern fn genfield(
     fmt: ?[*]c_int,
 ) void;
 extern fn zig_c_bw_pbyte(p: ?*P) i64;
+extern fn zig_c_bw_eof_line(p: ?*P) i64;
+/// Read buffer line into `buf` (no newline). Returns len, -2 if too long, -1 on error/EOF-past.
+extern fn zig_c_bw_read_line(anchor: ?*P, line: i64, buf: ?[*]u8, buf_cap: c_int) c_int;
 
 /// Apply env gate (called from `ttopnn` alongside screen-swap).
 pub export fn zig_bw_lgen_apply_env() void {
@@ -163,6 +167,123 @@ pub export fn zig_bw_gennum(
     return 0;
 }
 
+
+
+/// Feature 2.1/2.2 table region detect → Zig `table.layoutAt`.
+///
+/// Fills `out_*` the same way C's scan fills its statics. Returns:
+/// - `0` — detection complete (`out_start == -1` means no region)
+/// - `-1` — fall back to C scan
+pub export fn zig_bw_table_detect(
+    anchor: ?*P,
+    buf_line: i64,
+    out_start: ?*i64,
+    out_end: ?*i64,
+    out_sep: ?*i64,
+    out_ncols: ?*c_int,
+    out_widths: ?[*]c_int,
+    out_aligns: ?[*]c_int,
+    out_cap: c_int,
+) c_int {
+    if (zig_bw_lgen_enabled == 0) return -1;
+    if (anchor == null or out_start == null or out_end == null or out_sep == null) return -1;
+    if (out_ncols == null or out_widths == null or out_aligns == null) return -1;
+    if (buf_line < 0 or out_cap <= 0) return -1;
+    const cap: usize = @intCast(@min(out_cap, @as(c_int, @intCast(render.table.max_cols))));
+
+    const eof_line = zig_c_bw_eof_line(anchor);
+    if (eof_line < 0 or buf_line > eof_line) {
+        out_start.?.* = -1;
+        out_end.?.* = -1;
+        out_sep.?.* = -1;
+        out_ncols.?.* = 0;
+        return 0;
+    }
+
+    // Match C: backward ≤50 from current; forward window covers JOE's 200-line scan.
+    const back_lim: i64 = @max(@as(i64, 0), buf_line - 50);
+    const fwd_lim: i64 = @min(eof_line, buf_line + 199);
+    if (fwd_lim < back_lim) {
+        out_start.?.* = -1;
+        out_end.?.* = -1;
+        out_sep.?.* = -1;
+        out_ncols.?.* = 0;
+        return 0;
+    }
+
+    const around: usize = @intCast(buf_line - back_lim);
+
+    const alloc = std.heap.c_allocator;
+
+    var storage: std.ArrayList(u8) = .empty;
+    defer storage.deinit(alloc);
+    var starts: std.ArrayList(usize) = .empty;
+    defer starts.deinit(alloc);
+    var lens: std.ArrayList(usize) = .empty;
+    defer lens.deinit(alloc);
+
+    var li: i64 = back_lim;
+    while (li <= fwd_lim) : (li += 1) {
+        var tmp: [16 * 1024]u8 = undefined;
+        const rc = zig_c_bw_read_line(anchor, li, &tmp, @intCast(tmp.len));
+        const slice: []const u8 = blk: {
+            if (rc == -2) {
+                // Too long: not a table line (breaks regions), store non-pipe marker.
+                break :blk "x";
+            }
+            if (rc < 0) break :blk "";
+            break :blk tmp[0..@intCast(rc)];
+        };
+        const start = storage.items.len;
+        storage.appendSlice(alloc, slice) catch return -1;
+        starts.append(alloc, start) catch return -1;
+        lens.append(alloc, slice.len) catch return -1;
+    }
+
+    if (starts.items.len == 0 or around >= starts.items.len) {
+        out_start.?.* = -1;
+        out_end.?.* = -1;
+        out_sep.?.* = -1;
+        out_ncols.?.* = 0;
+        return 0;
+    }
+
+    const line_ptrs = alloc.alloc([]const u8, starts.items.len) catch return -1;
+    defer alloc.free(line_ptrs);
+    for (starts.items, lens.items, 0..) |st, ln, i| {
+        line_ptrs[i] = storage.items[st .. st + ln];
+    }
+
+    const layout = render.table.layoutAt(line_ptrs, around) orelse {
+        out_start.?.* = -1;
+        out_end.?.* = -1;
+        out_sep.?.* = -1;
+        out_ncols.?.* = 0;
+        var z: usize = 0;
+        while (z < cap) : (z += 1) {
+            out_widths.?[z] = 0;
+            out_aligns.?[z] = 0;
+        }
+        return 0;
+    };
+
+    out_start.?.* = back_lim + @as(i64, @intCast(layout.start));
+    out_end.?.* = back_lim + @as(i64, @intCast(layout.end));
+    out_sep.?.* = if (layout.sep) |s| back_lim + @as(i64, @intCast(s)) else -1;
+    out_ncols.?.* = @intCast(layout.ncols);
+
+    var z: usize = 0;
+    while (z < cap) : (z += 1) {
+        if (z < layout.ncols) {
+            out_widths.?[z] = layout.widths[z];
+            out_aligns.?[z] = @intFromEnum(layout.aligns[z]);
+        } else {
+            out_widths.?[z] = 0;
+            out_aligns.?[z] = 0;
+        }
+    }
+    return 0;
+}
 
 /// Feature 2.1 residual: fill `vm_subst` via `table.applySimpleBorders`.
 /// Live C only mutates separator rows when `table_col_count==0`; header/body/last

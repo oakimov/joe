@@ -40,6 +40,10 @@ extern int zig_bw_bwgenh(SCRN *t, int (*scrn)[COMPOSE], int *attr_base,
 	off_t offset, P *top, off_t cursor_byte, int hiline,
 	off_t from, off_t to, int bg_text_atr, int bg_linum_atr,
 	int bg_curlinum_atr, int bg_cursor_atr);
+/* Path A Feature 2.1/2.2: gated Zig table region detect (widths/aligns). */
+extern int zig_bw_table_detect(P *anchor, off_t buf_line,
+	off_t *out_start, off_t *out_end, off_t *out_sep, int *out_ncols,
+	int *out_widths, int *out_aligns, int out_cap);
 /* Path A Feature 2.1: gated Zig simple pipe substitute into vm_subst[]. */
 extern int zig_bw_table_simple(const unsigned char *line, int line_len, int row_type,
 	int *vm_subst, int vm_subst_len);
@@ -1682,6 +1686,20 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 						goto skip_table_scan;
 					}
 
+					/* Path A: Zig-native table region detect (JOE_ZIG_BW_LGEN). */
+					if (zig_bw_lgen_enabled) {
+						int zdet = zig_bw_table_detect(p, buf_line,
+							&table_region_start, &table_region_end,
+							&table_separator_line, &table_col_count,
+							table_col_width, table_col_align, MAX_TABLE_COLS);
+						if (zdet >= 0) {
+							if (table_region_start == -1)
+								table_no_region_line = buf_line;
+							table_cached_for_line = buf_line;
+							goto skip_table_scan;
+						}
+					}
+
 					/* Try to find the table start by scanning backward from current line */
 				off_t backward_first = -1;
 				{
@@ -1901,8 +1919,8 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 		if (row_type != TABLE_ROW_NONE) {
 			if (table_col_count > 0) {
 				/* Feature 2.2: Full table layout engine.
-				 * Path A: try Zig padded row when gate+UTF-8; fall back to C.
-				 * Region detect / widths / aligns stay in C. */
+				 * Path A: Zig region detect fills widths/aligns; Zig padded row
+				 * when gate+UTF-8; C fallback retained. */
 				{
 					int need = line_len > 0 ? line_len : 1;
 					if (!viewmode_col_map || viewmode_col_map_size < need) {
@@ -2684,6 +2702,39 @@ void bwgenh(BW *w)
 off_t zig_c_bw_pbyte(P *p)
 {
 	return p ? p->byte : 0;
+}
+
+off_t zig_c_bw_eof_line(P *p)
+{
+	return (p && p->b && p->b->eof) ? p->b->eof->line : -1;
+}
+
+/* Read line `line` (no newline) into buf. Returns len, -2 if too long, -1 on error. */
+int zig_c_bw_read_line(P *anchor, off_t line, unsigned char *buf, int buf_cap)
+{
+	P *tmp;
+	int ll = 0;
+	int ch;
+
+	if (!anchor || !anchor->b || !buf || buf_cap <= 0 || line < 0)
+		return -1;
+	if (!anchor->b->eof || line > anchor->b->eof->line)
+		return -1;
+
+	tmp = pdup(anchor, "zig_c_bw_read_line");
+	if (!tmp)
+		return -1;
+	pline(tmp, line);
+	p_goto_bol(tmp);
+	while ((ch = pgetb(tmp)) != NO_MORE_DATA && ch != '\n') {
+		if (ll >= VIEWMODE_TABLE_SCAN_MAX_BYTES || ll >= buf_cap) {
+			prm(tmp);
+			return -2;
+		}
+		buf[ll++] = (unsigned char)ch;
+	}
+	prm(tmp);
+	return ll;
 }
 
 P *zig_c_bw_getto(P *p, P *cur, P *top, off_t line)

@@ -306,6 +306,85 @@ pub const Screen = struct {
         return self.createWindow(&menu.vtable, after, target, org, height, null);
     }
 
+    /// Abort one window (and dependents) during `layout` without relayouting.
+    /// Returns reclaimed height — JOE `doabort` used by `wfit` child squeeze.
+    fn abortForFit(self: *Screen, id: WindowId) u16 {
+        const w = self.get(id) orelse return 0;
+        const amnt: u16 = if (w.nh != 0) w.nh else if (w.h != 0) w.h else self.desiredHeight(w);
+
+        var kill_ids: std.ArrayList(WindowId) = .empty;
+        defer kill_ids.deinit(self.allocator);
+        kill_ids.append(self.allocator, id) catch return 0;
+
+        var changed = true;
+        while (changed) {
+            changed = false;
+            for (self.order.items) |cand| {
+                if (cand.id == id) continue;
+                const depends = (cand.target == id) or (cand.main == id and cand.id != id) or (cand.org == id);
+                if (!depends) continue;
+                var already = false;
+                for (kill_ids.items) |kid| {
+                    if (kid == cand.id) {
+                        already = true;
+                        break;
+                    }
+                }
+                if (!already) {
+                    kill_ids.append(self.allocator, cand.id) catch return amnt;
+                    changed = true;
+                }
+            }
+        }
+
+        if (w.org) |oid| {
+            if (self.get(oid)) |donor| {
+                const cur = if (donor.h != 0) donor.h else if (donor.nh != 0) donor.nh else self.desiredHeight(donor);
+                self.setHeight(donor, cur + amnt);
+            }
+        }
+
+        if (self.cur_id == id) {
+            if (w.target) |t| {
+                self.cur_id = t;
+            } else if (w.org) |o| {
+                self.cur_id = o;
+            } else if (self.indexOf(id)) |idx| {
+                if (self.order.items.len > 1) {
+                    const nidx = if (idx + 1 < self.order.items.len) idx + 1 else idx -| 1;
+                    self.cur_id = self.order.items[nidx].id;
+                }
+            }
+        }
+        if (self.top_id == id and self.order.items.len > 1) {
+            if (self.indexOf(id)) |idx| {
+                const nidx = if (idx + 1 < self.order.items.len) idx + 1 else 0;
+                self.top_id = self.order.items[nidx].id;
+            }
+        }
+
+        var ki = kill_ids.items.len;
+        while (ki > 0) {
+            ki -= 1;
+            const kid = kill_ids.items[ki];
+            const node = self.get(kid) orelse continue;
+            if (node.vtable.on_abort) |ab| _ = ab(node);
+            if (self.indexOf(kid)) |idx| {
+                _ = self.order.orderedRemove(idx);
+            }
+            _ = self.by_id.remove(kid);
+            self.allocator.destroy(node);
+        }
+
+        if (self.get(self.cur_id) == null and self.order.items.len > 0) {
+            self.cur_id = self.order.items[0].id;
+        }
+        if (self.get(self.top_id) == null and self.order.items.len > 0) {
+            self.top_id = self.order.items[0].id;
+        }
+        return amnt;
+    }
+
     /// Fit windows onto the screen — simplified JOE `wfit` (geometry only).
     pub fn layout(self: *Screen) void {
         if (self.order.items.len == 0) return;
@@ -347,10 +426,18 @@ pub const Screen = struct {
                     w.ny = y;
                     if (w.target == null) {
                         prev_main = w;
-                        if (adj > 0) {
-                            const nh_i: i16 = @intCast(w.nh);
-                            w.nh = @intCast(@max(nh_i - adj, @as(i16, 0)));
+                        var nh_i: i16 = @intCast(w.nh);
+                        if (adj > 0) nh_i -= adj;
+                        // JOE wfit: abort following children until main has space.
+                        while (nh_i < 0 or (w.id == self.cur_id and nh_i < 1)) {
+                            if (j + 1 >= self.order.items.len) break;
+                            const child = self.order.items[j + 1];
+                            if (child.main != fam_top.main or child.target == null) break;
+                            const got = self.abortForFit(child.id);
+                            if (got == 0) break;
+                            nh_i += @as(i16, @intCast(got));
                         }
+                        w.nh = @intCast(@max(nh_i, @as(i16, 0)));
                     }
                     if (w.id == self.cur_id) cursor_placed = true;
                     y += @intCast(w.nh);
@@ -915,6 +1002,92 @@ test "closing child does not transfer messages" {
     prompt.setMsgBot("child-msg");
     try scr.close(prompt.id);
     try testing.expect(twnd.msg_bot == null);
+}
+
+test "off-screen families when screen is full" {
+    var scr = try Screen.init(testing.allocator, 80, 10);
+    defer scr.deinit();
+
+    // Three independent families each wanting most of the screen.
+    const a = try scr.createText(null, null, 8);
+    const b = try scr.createText(a.id, null, 8);
+    const c = try scr.createText(b.id, null, 8);
+    scr.cur_id = a.id;
+    scr.top_id = a.id;
+    scr.layout();
+
+    try testing.expect(a.y >= 0);
+    try testing.expect(b.y < 0);
+    try testing.expect(c.y < 0);
+    try testing.expectEqual(@as(u16, 10), a.h);
+}
+
+test "nextWindow brings off-screen family into view" {
+    var scr = try Screen.init(testing.allocator, 80, 10);
+    defer scr.deinit();
+
+    const a = try scr.createText(null, null, 8);
+    const b = try scr.createText(a.id, null, 8);
+    const c = try scr.createText(b.id, null, 8);
+    scr.cur_id = a.id;
+    scr.top_id = a.id;
+    scr.layout();
+    try testing.expect(b.y < 0);
+
+    try testing.expect(scr.nextWindow());
+    try testing.expectEqual(b.id, scr.cur_id);
+    try testing.expect(b.y >= 0);
+    try testing.expect(a.y < 0 or c.y < 0);
+
+    try testing.expect(scr.nextWindow());
+    try testing.expectEqual(c.id, scr.cur_id);
+    try testing.expect(c.y >= 0);
+}
+
+test "prevWindow jumps top to off-screen family" {
+    var scr = try Screen.init(testing.allocator, 80, 10);
+    defer scr.deinit();
+
+    const a = try scr.createText(null, null, 8);
+    const b = try scr.createText(a.id, null, 8);
+    const c = try scr.createText(b.id, null, 8);
+    scr.cur_id = a.id;
+    scr.top_id = a.id;
+    scr.layout();
+
+    try testing.expect(scr.prevWindow());
+    try testing.expectEqual(c.id, scr.cur_id);
+    try testing.expect(c.y >= 0);
+    try testing.expectEqual(scr.findTopOfFamily(c).id, scr.top_id);
+}
+
+test "layout aborts children to fit main" {
+    var scr = try Screen.init(testing.allocator, 80, 8);
+    defer scr.deinit();
+
+    const main_w = try scr.createText(null, null, 8);
+    scr.layout();
+    // Orphan-org children still count in family height and force squeeze.
+    _ = try scr.createWindow(&pw.vtable, main_w.id, main_w.id, null, 3, null);
+    _ = try scr.createWindow(&pw.vtable, scr.order.items[scr.order.items.len - 1].id, main_w.id, null, 3, null);
+    _ = try scr.createWindow(&pw.vtable, scr.order.items[scr.order.items.len - 1].id, main_w.id, null, 3, null);
+    scr.cur_id = main_w.id;
+    scr.top_id = main_w.id;
+    scr.layout();
+
+    // Main must remain visible with at least 1 row; surplus children aborted.
+    try testing.expect(main_w.y >= 0);
+    try testing.expect(main_w.h >= 1);
+    var child_h: u16 = 0;
+    var child_n: usize = 0;
+    for (scr.order.items) |w| {
+        if (w.main == main_w.id and w.id != main_w.id) {
+            child_n += 1;
+            child_h += w.h;
+        }
+    }
+    try testing.expect(child_n < 3);
+    try testing.expectEqual(@as(u16, 8), main_w.h + child_h);
 }
 
 test "vtable kinds resolve" {

@@ -16,7 +16,7 @@ extern int zig_bw_lgen(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
 	HIGHLIGHT_STATE st, struct charmap *charmap, int tab, int defatr,
 	int *palette, int palette_len, off_t from, off_t to, off_t line_byte,
 	int viewmode, char *vm_hide, int vm_hide_len, int *vm_subst, int vm_subst_len,
-	char **vm_urls, int vm_urls_len, int visiblews);
+	char **vm_urls, int vm_urls_len, int visiblews, int square);
 
 /* Attributes for line numbers, and current line */
 int bg_linum = 0;
@@ -666,12 +666,11 @@ static int lgen_core(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
          			/* Starting column to display */
               			/* Range for marked block */
 {
-	/* Path A: Zig-native paint for plain UTF-8 lines (+ linear marks + viewmode
-	 * tables + visiblews). Keep C for square / ansi. Table padded rows skip
+	/* Path A: Zig-native paint for plain UTF-8 lines (+ linear/square marks +
+	 * viewmode tables + visiblews). Keep C for ansi. Table padded rows skip
 	 * lgen_core entirely. dspasis lives in outatr. */
 	if (zig_bw_lgen_enabled
 	    && !bw->o.ansi
-	    && !square
 	    && p && p->b && p->b->o.charmap && p->b->o.charmap->type) {
 		int defatr = (bw->o.hiline && bw->cursor->line == y - bw->y + bw->top->line)
 			? (bg_text & curlinmask) | bg_curlin
@@ -683,7 +682,7 @@ static int lgen_core(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 			viewmode_skip_parse ? viewmode_hide : NULL, viewmode_hide_size,
 			viewmode_skip_parse ? viewmode_substitute : NULL, viewmode_substitute_size,
 			viewmode_skip_parse ? viewmode_link_url : NULL, viewmode_link_url_size,
-			bw->o.visiblews);
+			bw->o.visiblews, square);
 		if (z >= 0)
 			return z;
 	}

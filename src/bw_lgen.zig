@@ -1,18 +1,19 @@
 //! Gated live bridge: JOE `lgen_core` → Zig-native `render.lgenLine`.
 //!
 //! When `JOE_ZIG_BW_LGEN` / `zig_bw_lgen_enabled` is on, plain UTF-8 lines
-//! (including linear mark inverse + viewmode hide/substitute/link tables +
+//! (including linear/square mark inverse + viewmode hide/substitute/link tables +
 //! `-visiblews` glyphs) paint through the Phase 6 renderer and emit via hybrid
 //! `outatr` (works with screen-swap shadow + classic tty path). Default off
 //! until soak. Falls back to C `lgen_core` when the gate is off or the line is
-//! unsupported (square / ansi / non-UTF-8). Table padded rows stay in C
+//! unsupported (ansi / non-UTF-8). Table padded rows stay in C
 //! (`viewmode_table_rendered` skips `lgen_core`).
 //!
 //! Hybrid `syntax.parse` fills `attr_buf` **per character** (`pgetc`); native
 //! `lgenLine` expects **per-byte** attrs — this bridge expands before paint.
 //! When `viewmode!=0`, C `lgen_view` already parsed+mutated `attr_buf` — do
-//! **not** re-parse. Linear marks (`from`/`to` byte range, non-square) force
-//! `inverse` on bytes in range, matching C `SELECT_IF` + default
+//! **not** re-parse. Linear marks (`from`/`to` byte range) force `inverse` on
+//! bytes in range; square marks use display-column `xcol` range (`SELECT_IF`
+//! tab end-col `(from, to]` / char start-col `[from, to)`). Default
 //! `selectatr=INVERSE`. Visible whitespace uses C `vspace`/`vtab`/`vrtn` +
 //! `vwsatr` (JOE `((atr & vwsmask) | (vwsatr & ~vwsmask))` default).
 
@@ -111,6 +112,7 @@ pub export fn zig_bw_lgen(
     vm_urls: ?[*]?[*:0]u8,
     vm_urls_len: c_int,
     visiblews: c_int,
+    square: c_int,
 ) c_int {
     if (zig_bw_lgen_enabled == 0) return -1;
     if (t == null or screen == null or attr_row == null or p == null) return -1;
@@ -196,14 +198,20 @@ pub export fn zig_bw_lgen(
         native_attrs = byte_attrs;
     }
 
-    // Linear mark inverse (JOE non-square `SELECT_IF(byte >= from && byte < to)`).
+    // Mark inverse: linear byte range, or square display-column range.
+    // `bwgen` already scopes square to mark lines (passes from=to=0 off-line).
     if (from != to and content.len > 0) {
         if (attrs_owned == null) {
             const byte_attrs = alloc.alloc(Attribute, content.len) catch return -1;
             @memset(byte_attrs, .none);
             attrs_owned = byte_attrs;
         }
-        applyLinearMarkInverse(attrs_owned.?, line_byte, from, to);
+        if (square != 0) {
+            const tab_u16: u16 = if (tab <= 0) 1 else @intCast(tab);
+            applySquareMarkInverse(attrs_owned.?, content, tab_u16, from, to);
+        } else {
+            applyLinearMarkInverse(attrs_owned.?, line_byte, from, to);
+        }
         native_attrs = attrs_owned;
     }
 
@@ -405,6 +413,49 @@ fn applyLinearMarkInverse(attrs: []Attribute, line_byte: i64, from: i64, to: i64
     }
 }
 
+/// Display width matching `lgen` / JOE C0→caret (width 1) + `displayWidth`.
+fn squareUnitWidth(cp: u21) u8 {
+    if (cp < 32 or cp == 127) return 1;
+    return terminal.displayWidth(cp);
+}
+
+/// Force inverse for square marks: `from`/`to` are display columns (`xcol`).
+/// JOE `SELECT_IF`: tab uses end-col `tcol > from && tcol <= to` (whole run);
+/// other units use start-col `col >= from && col < to`.
+fn applySquareMarkInverse(attrs: []Attribute, line: []const u8, tab: u16, from: i64, to: i64) void {
+    if (from == to) return;
+    const t: i64 = if (tab == 0) 1 else tab;
+    var col: i64 = 0;
+    var i: usize = 0;
+    while (i < line.len and i < attrs.len) {
+        const b = line[i];
+        if (b == '\n' or b == '\r') break;
+        if (b == '\t') {
+            const tcol = col + t - @rem(col, t);
+            if (tcol > from and tcol <= to) attrs[i].inverse = true;
+            col = tcol;
+            i += 1;
+            continue;
+        }
+        const seq_len = utf8SeqLen(b);
+        const end = @min(i + seq_len, @min(line.len, attrs.len));
+        var wid: u8 = 1;
+        if (seq_len >= 1 and i + seq_len <= line.len) {
+            if (std.unicode.utf8Decode(line[i..][0..seq_len])) |cp| {
+                wid = squareUnitWidth(cp);
+            } else |_| {
+                wid = 1;
+            }
+        }
+        if (col >= from and col < to) {
+            var k = i;
+            while (k < end) : (k += 1) attrs[k].inverse = true;
+        }
+        col += wid;
+        i = if (i + seq_len > line.len) line.len else i + seq_len;
+    }
+}
+
 /// Expand hybrid per-character `attr_buf` (from `parse`/`pgetc`) into per-byte
 /// attrs for UTF-8 `lgenLine` (lead + continuation share the char's atr).
 fn expandCharAttrsToBytes(line: []const u8, char_attrs: []const Attribute, out: []Attribute) void {
@@ -488,6 +539,34 @@ test "applyLinearMarkInverse no-op when from==to" {
     try std.testing.expect(!attrs[0].inverse);
     try std.testing.expect(!attrs[1].inverse);
     try std.testing.expect(!attrs[2].inverse);
+}
+
+test "applySquareMarkInverse tab uses end-col inclusive" {
+    var attrs = [_]Attribute{.{}} ** 4;
+    // "ab\tc" tab=4 → a@0 b@1 tab→4 c@4; from=1 to=4 selects b + tab
+    applySquareMarkInverse(&attrs, "ab\tc", 4, 1, 4);
+    try std.testing.expect(!attrs[0].inverse);
+    try std.testing.expect(attrs[1].inverse);
+    try std.testing.expect(attrs[2].inverse);
+    try std.testing.expect(!attrs[3].inverse);
+}
+
+test "applySquareMarkInverse tab excluded when end past to" {
+    var attrs = [_]Attribute{.{}} ** 3;
+    // "\tX" tab=8, from=2 to=5: tcol=8 not in (2,5] → unselected
+    applySquareMarkInverse(&attrs, "\tX", 8, 2, 5);
+    try std.testing.expect(!attrs[0].inverse);
+    try std.testing.expect(!attrs[1].inverse);
+}
+
+test "applySquareMarkInverse covers UTF-8 start column" {
+    const line = "a\u{00e9}b";
+    var attrs = [_]Attribute{.{}} ** 4;
+    applySquareMarkInverse(&attrs, line, 8, 1, 2);
+    try std.testing.expect(!attrs[0].inverse);
+    try std.testing.expect(attrs[1].inverse);
+    try std.testing.expect(attrs[2].inverse);
+    try std.testing.expect(!attrs[3].inverse);
 }
 
 test "emitOsc8Link no-op when unchanged" {

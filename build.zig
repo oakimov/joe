@@ -50,7 +50,7 @@ pub fn build(b: *std.Build) void {
             // REMOVED: joe/b.c — replaced by src/gapbuffer.zig
             // REMOVED: joe/blocks.c — replaced by src/blocks.zig
             "joe/bw.c",
-            "joe/cmd.c",
+            // REMOVED: joe/cmd.c — replaced by src/cmd.zig
             // REMOVED: joe/hash.c — replaced by src/hash.zig
             "joe/help.c",
             // REMOVED: joe/kbd.c — replaced by src/kbd.zig

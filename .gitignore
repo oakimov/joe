@@ -26,3 +26,7 @@ charmaps/klingon
 
 .claude/
 .pytest_cache/
+.zig-cache/
+zig-out/
+.DS_Store
+.obsidian/

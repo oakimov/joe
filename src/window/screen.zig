@@ -171,6 +171,12 @@ pub const Screen = struct {
         return h;
     }
 
+    fn minHeightThis(_: *Screen, w: *const Window) u16 {
+        if (w.fixed != 0) return w.fixed;
+        if (w.target != null) return 1;
+        return fit_min;
+    }
+
     /// Create a window after `after` (or at end if null). `target == null` starts a family.
     /// `org` donates `height` rows when non-null.
     pub fn createWindow(
@@ -356,34 +362,144 @@ pub const Screen = struct {
         }
     }
 
-    pub fn nextWindow(self: *Screen) void {
-        if (self.order.items.len == 0) return;
-        const idx = self.indexOf(self.cur_id) orelse 0;
-        var i = if (idx + 1 < self.order.items.len) idx + 1 else 0;
-        var tries: usize = 0;
-        while (tries < self.order.items.len) : (tries += 1) {
-            if (self.order.items[i].y >= 0) {
-                self.cur_id = self.order.items[i].id;
-                return;
-            }
-            i = if (i + 1 < self.order.items.len) i + 1 else 0;
-        }
-        self.cur_id = self.order.items[i].id;
+    /// Switch to next window in order. Relayouts if the target is off-screen.
+    pub fn nextWindow(self: *Screen) bool {
+        if (self.order.items.len <= 1) return false;
+        const idx = self.indexOf(self.cur_id) orelse return false;
+        const nidx = if (idx + 1 < self.order.items.len) idx + 1 else 0;
+        if (nidx == idx) return false;
+        const dest = self.order.items[nidx];
+        self.cur_id = dest.id;
+        if (dest.y < 0) self.layout();
+        return true;
     }
 
-    pub fn prevWindow(self: *Screen) void {
-        if (self.order.items.len == 0) return;
-        const idx = self.indexOf(self.cur_id) orelse 0;
-        var i: usize = if (idx == 0) self.order.items.len - 1 else idx - 1;
-        var tries: usize = 0;
-        while (tries < self.order.items.len) : (tries += 1) {
-            if (self.order.items[i].y >= 0) {
-                self.cur_id = self.order.items[i].id;
-                return;
-            }
-            i = if (i == 0) self.order.items.len - 1 else i - 1;
+    /// Switch to previous window. If off-screen, set `top_id` to its family top then layout.
+    pub fn prevWindow(self: *Screen) bool {
+        if (self.order.items.len <= 1) return false;
+        const idx = self.indexOf(self.cur_id) orelse return false;
+        const pidx: usize = if (idx == 0) self.order.items.len - 1 else idx - 1;
+        const dest = self.order.items[pidx];
+        self.cur_id = dest.id;
+        if (dest.y < 0) {
+            self.top_id = self.findTopOfFamily(dest).id;
+            self.layout();
         }
-        self.cur_id = self.order.items[i].id;
+        return true;
+    }
+
+    fn nextVariableAfter(self: *Screen, from_idx: usize) ?*Window {
+        var i = if (from_idx + 1 < self.order.items.len) from_idx + 1 else return null;
+        while (i < self.order.items.len) : (i += 1) {
+            const w = self.order.items[i];
+            if (w.fixed == 0) return w;
+        }
+        return null;
+    }
+
+    /// Grow window by 1 row from the next variable-size window (JOE `wgrow`).
+    pub const GrowShrinkError = error{ UnknownWindow, CannotGrow, CannotShrink };
+
+    pub fn grow(self: *Screen, id: WindowId) GrowShrinkError!void {
+        const w = self.get(id) orelse return error.UnknownWindow;
+        const idx = self.indexOf(id) orelse return error.UnknownWindow;
+
+        // Last on-screen window: shrink previous main instead.
+        const is_last_on_screen = (idx + 1 >= self.order.items.len) or (self.order.items[idx + 1].y < 0);
+        if (is_last_on_screen and w.id != self.top_id) {
+            if (idx == 0) return error.CannotGrow;
+            const prev_main_id = self.order.items[idx - 1].main;
+            return self.shrink(prev_main_id);
+        }
+
+        const nextw = self.nextVariableAfter(idx) orelse return error.CannotGrow;
+        if (nextw.y < 0 or nextw.h <= fit_height) return error.CannotGrow;
+
+        self.setHeight(w, w.h + 1);
+        self.setHeight(nextw, nextw.h - 1);
+        self.layout();
+    }
+
+    /// Shrink window by 1 row, giving space to the next variable-size window (JOE `wshrink`).
+    pub fn shrink(self: *Screen, id: WindowId) GrowShrinkError!void {
+        const w = self.get(id) orelse return error.UnknownWindow;
+        const idx = self.indexOf(id) orelse return error.UnknownWindow;
+
+        const is_last_on_screen = (idx + 1 >= self.order.items.len) or (self.order.items[idx + 1].y < 0);
+        if (is_last_on_screen and w.id != self.top_id) {
+            if (idx == 0) return error.CannotShrink;
+            const prev_main_id = self.order.items[idx - 1].main;
+            return self.grow(prev_main_id);
+        }
+
+        if (w.h <= fit_height) return error.CannotShrink;
+        const nextw = self.nextVariableAfter(idx) orelse return error.CannotShrink;
+
+        self.setHeight(w, w.h - 1);
+        self.setHeight(nextw, nextw.h + 1);
+        self.layout();
+    }
+
+    /// Equalize main windows across the screen (JOE `wshowall`).
+    pub fn showAll(self: *Screen) void {
+        var n: usize = 0;
+        for (self.order.items) |w| {
+            if (w.target == null) n += 1;
+        }
+        if (n == 0) return;
+        var set: u16 = @intCast(self.usableHeight() / n);
+        if (set < fit_height) set = fit_height;
+        for (self.order.items) |w| {
+            if (w.target != null) continue;
+            // Approximate getminh for lone mains (no children booked via family scan)
+            const fam_min = self.minHeightThis(w); // children would add; ok for equalize scaffold
+            if (fam_min >= set) self.setHeight(w, fit_min) else self.setHeight(w, set - (fam_min - fit_min));
+            w.org = null;
+        }
+        self.layout();
+    }
+
+    /// Give almost all space to one family (JOE `wshowone`).
+    pub fn showOne(self: *Screen, id: WindowId) !void {
+        const focus = self.get(id) orelse return error.UnknownWindow;
+        const focus_main = focus.main;
+        for (self.order.items) |w| {
+            if (w.target != null) continue;
+            const fam_extra = self.minHeightThis(w) -| fit_min;
+            if (w.main == focus_main) {
+                self.setHeight(w, self.usableHeight() - fam_extra);
+            } else {
+                self.setHeight(w, self.usableHeight() - fam_extra); // JOE sets every main huge then fit drops others
+            }
+            w.org = null;
+        }
+        // JOE sets every main to (h-wind)-(getminh-FITMIN); fit then keeps cursor family.
+        self.cur_id = focus_main;
+        self.top_id = self.findTopOfFamily(self.get(focus_main).?).id;
+        self.layout();
+    }
+
+    /// Split a main text window horizontally, taking half its height for a new sibling.
+    pub fn splitText(self: *Screen, id: WindowId) !*Window {
+        const w = self.get(id) orelse return error.UnknownWindow;
+        if (w.target != null) return error.NotMainWindow;
+        if (w.h < fit_height * 2) return error.NotEnoughSpace;
+        const half: u16 = w.h / 2;
+        const other: u16 = w.h - half;
+        self.setHeight(w, other);
+        // create after w, new family, no org (force others — but we already resized w)
+        const neu = try self.createWindow(&tw.vtable, w.id, null, null, half, null);
+        self.layout();
+        return neu;
+    }
+
+    /// Reserve help lines at top (JOE `wind`) and relayout.
+    pub fn setHelpLines(self: *Screen, lines: u16) void {
+        self.wind = lines;
+        if (self.usableHeight() < fit_min) {
+            self.wind = self.height -| fit_min;
+        }
+        self.layout();
     }
 
     /// Abort window and its dependents; return height to `org` when present.
@@ -551,11 +667,11 @@ test "next and prev cycle on-screen windows" {
     const b = try scr.createText(a.id, null, 12);
     scr.layout();
     scr.cur_id = a.id;
-    scr.nextWindow();
+    try testing.expect(scr.nextWindow());
     try testing.expectEqual(b.id, scr.cur_id);
-    scr.nextWindow();
+    try testing.expect(scr.nextWindow());
     try testing.expectEqual(a.id, scr.cur_id);
-    scr.prevWindow();
+    try testing.expect(scr.prevWindow());
     try testing.expectEqual(b.id, scr.cur_id);
 }
 
@@ -596,6 +712,58 @@ test "windowAt hits correct window" {
     try testing.expect(scr.windowAt(0, 0) == a);
     try testing.expect(scr.windowAt(0, 12) == b);
     try testing.expect(scr.windowAt(0, 23) == b);
+}
+
+test "grow and shrink transfer one row" {
+    var scr = try Screen.init(testing.allocator, 80, 24);
+    defer scr.deinit();
+
+    const a = try scr.createText(null, null, 12);
+    const b = try scr.createText(a.id, null, 12);
+    scr.layout();
+    try scr.grow(a.id);
+    try testing.expectEqual(@as(u16, 13), a.h);
+    try testing.expectEqual(@as(u16, 11), b.h);
+    try scr.shrink(a.id);
+    try testing.expectEqual(@as(u16, 12), a.h);
+    try testing.expectEqual(@as(u16, 12), b.h);
+}
+
+test "splitText halves a main window" {
+    var scr = try Screen.init(testing.allocator, 80, 24);
+    defer scr.deinit();
+
+    const a = try scr.createText(null, null, 24);
+    scr.layout();
+    const b = try scr.splitText(a.id);
+    try testing.expectEqual(@as(usize, 2), scr.countMain());
+    try testing.expectEqual(@as(u16, 24), a.h + b.h);
+    try testing.expect(a.h >= fit_height);
+    try testing.expect(b.h >= fit_height);
+}
+
+test "setHelpLines reserves wind rows" {
+    var scr = try Screen.init(testing.allocator, 80, 24);
+    defer scr.deinit();
+
+    const a = try scr.createText(null, null, 24);
+    scr.layout();
+    scr.setHelpLines(2);
+    try testing.expectEqual(@as(u16, 2), scr.wind);
+    try testing.expectEqual(@as(i16, 2), a.y);
+    try testing.expectEqual(@as(u16, 22), a.h);
+}
+
+test "showAll equalizes main windows" {
+    var scr = try Screen.init(testing.allocator, 80, 24);
+    defer scr.deinit();
+
+    const a = try scr.createText(null, null, 18);
+    const b = try scr.createText(a.id, null, 6);
+    scr.layout();
+    scr.showAll();
+    try testing.expectEqual(a.h, b.h);
+    try testing.expectEqual(@as(u16, 24), a.h + b.h);
 }
 
 test "vtable kinds resolve" {

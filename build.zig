@@ -83,7 +83,7 @@ pub fn build(b: *std.Build) void {
             "joe/tab.c",
             // REMOVED: joe/termcap.c — replaced by src/termcap.zig
             // REMOVED: joe/tty.c — replaced by src/tty.zig
-            "joe/tw.c",
+            // REMOVED: joe/tw.c — replaced by src/tw.zig
             "joe/ublock.c",
             "joe/uedit.c",
             "joe/uerror.c",

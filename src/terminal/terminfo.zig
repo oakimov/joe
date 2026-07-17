@@ -69,6 +69,9 @@ pub const Caps = struct {
     /// Save / restore cursor position (`sc`/`rc`).
     sc: ?[:0]const u8 = null,
     rc: ?[:0]const u8 = null,
+    /// Forward / back tab (`ta`/`bt`) for relative cursor costing.
+    ta: ?[:0]const u8 = null,
+    bt: ?[:0]const u8 = null,
 };
 
 pub const TermInfo = struct {
@@ -133,6 +136,8 @@ pub const TermInfo = struct {
             .cub1 = presentStr("cub1"),
             .sc = presentStr("sc"),
             .rc = presentStr("rc"),
+            .ta = presentStr("ta"),
+            .bt = presentStr("bt"),
         };
     }
 
@@ -301,6 +306,27 @@ pub const TermInfo = struct {
         if (count == 1) return self.caps.cub1;
         return null;
     }
+
+    /// Tab width from terminfo `it` (or `tw`). Null when absent/invalid.
+    pub fn tabWidth(self: TermInfo) ?u16 {
+        if (self.getNum("it")) |n| {
+            if (n > 0) return @intCast(n);
+        }
+        if (self.getNum("tw")) |n| {
+            if (n > 0) return @intCast(n);
+        }
+        return null;
+    }
+
+    /// True when tabs are destructive (`xt`) and should not be used for motion.
+    pub fn destructiveTabs(self: TermInfo) bool {
+        return self.getFlag("xt");
+    }
+
+    /// True when the terminal has hardware tabs (`pt`) — JOE falls back to `\t`.
+    pub fn hasHardwareTabs(self: TermInfo) bool {
+        return self.getFlag("pt");
+    }
 };
 
 test "StrCap cancelled sentinel" {
@@ -376,4 +402,10 @@ test "TermInfo.init against current TERM" {
     }
     _ = ti.caps.sc;
     _ = ti.caps.rc;
+    // Soft-check tab / back-tab caps + width when present.
+    _ = ti.caps.ta;
+    _ = ti.caps.bt;
+    _ = ti.tabWidth();
+    _ = ti.destructiveTabs();
+    _ = ti.hasHardwareTabs();
 }

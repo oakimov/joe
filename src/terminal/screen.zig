@@ -239,6 +239,14 @@ pub const Screen = struct {
     /// Inclusive scroll-region bounds (JOE `top`/`bot-1` style → last inclusive).
     scroll_top: u16 = 0,
     scroll_last: u16 = 0,
+    /// When true, relative column motion may use tab / back-tab (JOE `opt_usetabs`).
+    /// Default false matches JOE; enable explicitly for tab-aware `moveTo`.
+    use_tabs: bool = false,
+    /// Fallback tab width when terminfo `it`/`tw` is absent (JOE default 8).
+    tab_width: u16 = 8,
+    /// Optional sequence overrides (unit tests / hosts without terminfo).
+    tab_seq: ?[]const u8 = null,
+    back_tab_seq: ?[]const u8 = null,
     /// Output scratch buffer (obuf-style for Phase 0–5 compatibility).
     out: std.ArrayList(u8),
 
@@ -378,7 +386,8 @@ pub const Screen = struct {
     }
 
     /// Relative move by signed deltas. Emits CUU/CUD/CUF/CUB for the clamped
-    /// distance actually traveled (no-op axes are skipped).
+    /// distance actually traveled (no-op axes are skipped). Does not use tabs;
+    /// prefer `moveTo` when tab-aware column motion is desired.
     pub fn moveBy(self: *Screen, dx: i32, dy: i32) !void {
         if (dy < 0) {
             try self.cursorUp(@intCast(-dy));
@@ -406,8 +415,160 @@ pub const Screen = struct {
         return ansiRelativeLen(count);
     }
 
-    /// Cost of CUU/CUD + CUF/CUB from `(from_x, from_y)` to `(to_x, to_y)`.
-    /// Mirrors JOE `relcost` for the simple relative-motion subset (no tabs).
+    fn nextTabStop(col: u16, tw: u16) u16 {
+        if (tw == 0) return col;
+        return col + (tw - (col % tw));
+    }
+
+    fn prevTabStop(col: u16, tw: u16) u16 {
+        if (tw == 0 or col == 0) return 0;
+        const rem = col % tw;
+        if (rem == 0) return col - tw;
+        return col - rem;
+    }
+
+    fn effectiveTabWidth(self: *const Screen) u16 {
+        if (self.terminfo) |ti| {
+            if (ti.tabWidth()) |w| {
+                if (w > 0) return w;
+            }
+        }
+        return if (self.tab_width == 0) 8 else self.tab_width;
+    }
+
+    /// Forward-tab sequence when tabs are enabled; null if unavailable.
+    fn fwdTabSeq(self: *const Screen) ?[]const u8 {
+        if (!self.use_tabs) return null;
+        if (self.tab_seq) |s| return s;
+        if (self.terminfo) |ti| {
+            if (ti.destructiveTabs()) return null;
+            if (ti.caps.ta) |s| return s;
+            if (ti.hasHardwareTabs()) return "\t";
+            return null;
+        }
+        return "\t";
+    }
+
+    /// Back-tab sequence when tabs are enabled; null if unavailable.
+    fn backTabSeq(self: *const Screen) ?[]const u8 {
+        if (!self.use_tabs) return null;
+        if (self.back_tab_seq) |s| return s;
+        if (self.terminfo) |ti| {
+            if (ti.destructiveTabs()) return null;
+            if (ti.caps.bt) |s| return s;
+            return null;
+        }
+        // ANSI CBT — usable in unit tests without terminfo.
+        return "\x1b[Z";
+    }
+
+    const ColumnPlan = struct {
+        cost: usize,
+        kind: enum { plain, fwd_tabs, back_tabs } = .plain,
+        count: u16 = 0,
+    };
+
+    fn plainColumnCost(self: *const Screen, from_x: u16, to_x: u16) usize {
+        if (to_x > from_x) {
+            return self.relativeAxisCost(to_x - from_x, terminfo.TermInfo.formatCuf);
+        } else if (to_x < from_x) {
+            return self.relativeAxisCost(from_x - to_x, terminfo.TermInfo.formatCub);
+        }
+        return 0;
+    }
+
+    /// JOE-style `ta`/`bt` column costing via simulated tab landings.
+    /// Remainders use CUF/CUB (this redesign does not rewrite cells for motion).
+    fn columnMovePlan(self: *const Screen, from_x: u16, to_x: u16) ColumnPlan {
+        const simple = self.plainColumnCost(from_x, to_x);
+        var best: ColumnPlan = .{ .cost = simple };
+        if (from_x == to_x) return best;
+
+        const tw = self.effectiveTabWidth();
+        if (tw == 0) return best;
+
+        if (to_x > from_x) {
+            const ta = self.fwdTabSeq() orelse return best;
+            if (ta.len == 0) return best;
+            const cta = ta.len;
+            var n: u16 = 0;
+            var col = from_x;
+            while (n < self.width) {
+                const next = nextTabStop(col, tw);
+                if (next <= col) break; // tw guard
+                n += 1;
+                col = next;
+                const cost = cta * @as(usize, n) + self.plainColumnCost(col, to_x);
+                // Strict `<` keeps plain CU* on ties (matches moveTo / JOE cposs).
+                if (cost < best.cost) {
+                    best = .{ .cost = cost, .kind = .fwd_tabs, .count = n };
+                }
+                // Enough overshoot once a full tab past the target.
+                if (col >= to_x and col - to_x >= tw) break;
+                if (col >= self.width) break;
+            }
+        } else {
+            const bt = self.backTabSeq() orelse return best;
+            if (bt.len == 0) return best;
+            const cbt = bt.len;
+            var n: u16 = 0;
+            var col = from_x;
+            while (n < self.width and col > 0) {
+                const prev = prevTabStop(col, tw);
+                if (prev >= col and col != 0) break;
+                n += 1;
+                col = prev;
+                const cost = cbt * @as(usize, n) + self.plainColumnCost(col, to_x);
+                if (cost < best.cost) {
+                    best = .{ .cost = cost, .kind = .back_tabs, .count = n };
+                }
+                if (col <= to_x and to_x - col >= tw) break;
+                if (col == 0) break;
+            }
+        }
+        return best;
+    }
+
+    fn appendColumnMove(self: *Screen, to_x: u16) !void {
+        const tx = @min(to_x, self.width -| 1);
+        const plan = self.columnMovePlan(self.cursor_x, tx);
+        const tw = self.effectiveTabWidth();
+        switch (plan.kind) {
+            .plain => {},
+            .fwd_tabs => {
+                const ta = self.fwdTabSeq() orelse {
+                    try self.moveBy(@as(i32, @intCast(tx)) - @as(i32, @intCast(self.cursor_x)), 0);
+                    return;
+                };
+                var n = plan.count;
+                while (n > 0) : (n -= 1) {
+                    try self.out.appendSlice(self.allocator, ta);
+                    self.cursor_x = nextTabStop(self.cursor_x, tw);
+                    if (self.cursor_x >= self.width) {
+                        self.cursor_x = self.width -| 1;
+                        break;
+                    }
+                }
+            },
+            .back_tabs => {
+                const bt = self.backTabSeq() orelse {
+                    try self.moveBy(@as(i32, @intCast(tx)) - @as(i32, @intCast(self.cursor_x)), 0);
+                    return;
+                };
+                var n = plan.count;
+                while (n > 0) : (n -= 1) {
+                    try self.out.appendSlice(self.allocator, bt);
+                    self.cursor_x = prevTabStop(self.cursor_x, tw);
+                }
+            },
+        }
+        const dx: i32 = @as(i32, @intCast(tx)) - @as(i32, @intCast(self.cursor_x));
+        if (dx != 0) try self.moveBy(dx, 0);
+    }
+
+    /// Cost of relative motion from `(from_x, from_y)` to `(to_x, to_y)`.
+    /// Row axis uses CUU/CUD; column axis may use `ta`/`bt` when `use_tabs`.
+    /// Mirrors JOE `relcost` (tab-aware subset; remainders via CUF/CUB).
     fn relativeMoveCost(self: *const Screen, from_x: u16, from_y: u16, to_x: u16, to_y: u16) usize {
         var cost: usize = 0;
         if (to_y > from_y) {
@@ -415,11 +576,7 @@ pub const Screen = struct {
         } else if (to_y < from_y) {
             cost += self.relativeAxisCost(from_y - to_y, terminfo.TermInfo.formatCuu);
         }
-        if (to_x > from_x) {
-            cost += self.relativeAxisCost(to_x - from_x, terminfo.TermInfo.formatCuf);
-        } else if (to_x < from_x) {
-            cost += self.relativeAxisCost(from_x - to_x, terminfo.TermInfo.formatCub);
-        }
+        cost += self.columnMovePlan(from_x, to_x).cost;
         return cost;
     }
 
@@ -458,8 +615,8 @@ pub const Screen = struct {
         self.cursor_y = 0;
     }
 
-    /// Move cursor to `(x, y)`, choosing the cheapest among relative CU*/CUP/
-    /// CR+relative / home+relative (JOE `cposs`/`relcost` style, simplified).
+    /// Move cursor to `(x, y)`, choosing the cheapest among relative CU*/tabs/CUP/
+    /// CR+relative / home+relative (JOE `cposs`/`relcost` style).
     /// Updates logical cursor and emits escape sequences into `out`.
     pub fn moveTo(self: *Screen, x: u16, y: u16) !void {
         const tx = @min(x, self.width -| 1);
@@ -507,20 +664,20 @@ pub const Screen = struct {
             .cr_relative => {
                 try self.out.append(self.allocator, '\r');
                 self.cursor_x = 0;
-                const dx: i32 = @as(i32, @intCast(tx)) - @as(i32, @intCast(self.cursor_x));
                 const dy: i32 = @as(i32, @intCast(ty)) - @as(i32, @intCast(self.cursor_y));
-                try self.moveBy(dx, dy);
+                if (dy != 0) try self.moveBy(0, dy);
+                try self.appendColumnMove(tx);
             },
             .home_relative => {
                 try self.appendHome();
-                const dx: i32 = @as(i32, @intCast(tx)) - @as(i32, @intCast(self.cursor_x));
                 const dy: i32 = @as(i32, @intCast(ty)) - @as(i32, @intCast(self.cursor_y));
-                try self.moveBy(dx, dy);
+                if (dy != 0) try self.moveBy(0, dy);
+                try self.appendColumnMove(tx);
             },
             .relative => {
-                const dx: i32 = @as(i32, @intCast(tx)) - @as(i32, @intCast(self.cursor_x));
                 const dy: i32 = @as(i32, @intCast(ty)) - @as(i32, @intCast(self.cursor_y));
-                try self.moveBy(dx, dy);
+                if (dy != 0) try self.moveBy(0, dy);
+                try self.appendColumnMove(tx);
             },
         }
     }
@@ -1366,6 +1523,72 @@ test "Screen.moveTo no-ops when already there and clamps" {
     try testing.expectEqual(@as(u16, 9), screen.cursor_x);
     try testing.expectEqual(@as(u16, 7), screen.cursor_y);
     try testing.expect(screen.takeOut().len > 0);
+}
+
+test "Screen.moveTo with tabs prefers forward tabs for long runs" {
+    var screen = try Screen.init(testing.allocator, 80, 24);
+    defer screen.deinit();
+    screen.use_tabs = true;
+    screen.tab_width = 8;
+
+    screen.setCursor(0, 5);
+    try screen.moveTo(24, 5); // 3× `\t` (3) beats CUF24 (5) and CUP
+    try testing.expectEqual(@as(u16, 24), screen.cursor_x);
+    try testing.expectEqual(@as(u16, 5), screen.cursor_y);
+    try testing.expectEqualStrings("\t\t\t", screen.takeOut());
+}
+
+test "Screen.moveTo with tabs uses tab then CUF for remainder" {
+    var screen = try Screen.init(testing.allocator, 80, 24);
+    defer screen.deinit();
+    screen.use_tabs = true;
+    // tw=8: `\t`+CUF2 ties CUF10 (both 5); strict `<` keeps plain CU*.
+    screen.tab_width = 10;
+
+    screen.setCursor(0, 0);
+    try screen.moveTo(11, 0); // `\t` to 10 + CUF1 (4) beats CUF11 (5)
+    try testing.expectEqual(@as(u16, 11), screen.cursor_x);
+    try testing.expectEqualStrings("\t\x1b[C", screen.takeOut());
+}
+
+test "columnMovePlan selects forward tabs and cheap back-tabs" {
+    var screen = try Screen.init(testing.allocator, 80, 24);
+    defer screen.deinit();
+    screen.use_tabs = true;
+    screen.tab_width = 8;
+
+    const fwd = screen.columnMovePlan(0, 24);
+    try testing.expect(fwd.kind == .fwd_tabs);
+    try testing.expectEqual(@as(u16, 3), fwd.count);
+    try testing.expectEqual(@as(usize, 3), fwd.cost);
+
+    const near = screen.columnMovePlan(5, 6);
+    try testing.expect(near.kind == .plain);
+    try testing.expectEqual(@as(usize, 3), near.cost); // CUF1
+
+    // Default ANSI CBT (3 bytes) loses to CUB16 (5).
+    const back_ansi = screen.columnMovePlan(24, 8);
+    try testing.expect(back_ansi.kind == .plain);
+    try testing.expectEqual(@as(usize, 5), back_ansi.cost);
+
+    screen.back_tab_seq = "B";
+    const back = screen.columnMovePlan(24, 8);
+    try testing.expect(back.kind == .back_tabs);
+    try testing.expectEqual(@as(u16, 2), back.count);
+    try testing.expectEqual(@as(usize, 2), back.cost);
+}
+
+test "Screen.moveTo emits back-tabs when override makes them cheap" {
+    var screen = try Screen.init(testing.allocator, 80, 24);
+    defer screen.deinit();
+    screen.use_tabs = true;
+    screen.tab_width = 8;
+    screen.back_tab_seq = "B"; // 1-byte stand-in for terminfo `bt`
+
+    screen.setCursor(24, 1);
+    try screen.moveTo(8, 1); // 2× `B` (2) beats CUB16 (5)
+    try testing.expectEqual(@as(u16, 8), screen.cursor_x);
+    try testing.expectEqualStrings("BB", screen.takeOut());
 }
 
 test "ansi cursor cost helpers" {

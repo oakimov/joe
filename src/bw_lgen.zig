@@ -1,15 +1,18 @@
 //! Gated live bridge: JOE `lgen_core` → Zig-native `render.lgenLine`.
 //!
 //! When `JOE_ZIG_BW_LGEN` / `zig_bw_lgen_enabled` is on, plain UTF-8 lines
-//! (including linear mark inverse) paint through the Phase 6 renderer and
-//! emit via hybrid `outatr` (works with screen-swap shadow + classic tty path).
-//! Default off until soak. Falls back to C `lgen_core` when the gate is off
-//! or the line is unsupported (viewmode / square / ansi / visiblews / non-UTF-8).
+//! (including linear mark inverse + viewmode hide/substitute/link tables)
+//! paint through the Phase 6 renderer and emit via hybrid `outatr` (works
+//! with screen-swap shadow + classic tty path). Default off until soak.
+//! Falls back to C `lgen_core` when the gate is off or the line is unsupported
+//! (square / ansi / visiblews / non-UTF-8). Table padded rows stay in C
+//! (`viewmode_table_rendered` skips `lgen_core`).
 //!
 //! Hybrid `syntax.parse` fills `attr_buf` **per character** (`pgetc`); native
 //! `lgenLine` expects **per-byte** attrs — this bridge expands before paint.
-//! Linear marks (`from`/`to` byte range, non-square) force `inverse` on bytes
-//! in range, matching C `SELECT_IF(byte >= from && byte < to)` + default
+//! When `viewmode!=0`, C `lgen_view` already parsed+mutated `attr_buf` — do
+//! **not** re-parse. Linear marks (`from`/`to` byte range, non-square) force
+//! `inverse` on bytes in range, matching C `SELECT_IF` + default
 //! `selectatr=INVERSE`.
 
 const std = @import("std");
@@ -18,6 +21,7 @@ const render = @import("render");
 
 const Attribute = terminal.Attribute;
 const TruecolorPalette = terminal.TruecolorPalette;
+const ViewTables = render.ViewTables;
 
 const COMPOSE = 4;
 const NO_MORE_DATA: c_int = -256;
@@ -62,6 +66,7 @@ extern fn outatr(
 ) void;
 extern fn outatr_complete(t: ?*SCRN) void;
 extern fn eraeol(t: ?*SCRN, x: isize, y: isize, atr: c_int) c_int;
+extern fn ttputs(s: [*c]const u8) void;
 
 /// Apply env gate (called from `ttopnn` alongside screen-swap).
 pub export fn zig_bw_lgen_apply_env() void {
@@ -92,6 +97,13 @@ pub export fn zig_bw_lgen(
     from: i64,
     to: i64,
     line_byte: i64,
+    viewmode: c_int,
+    vm_hide: ?[*]u8,
+    vm_hide_len: c_int,
+    vm_subst: ?[*]c_int,
+    vm_subst_len: c_int,
+    vm_urls: ?[*]?[*:0]u8,
+    vm_urls_len: c_int,
 ) c_int {
     if (zig_bw_lgen_enabled == 0) return -1;
     if (t == null or screen == null or attr_row == null or p == null) return -1;
@@ -101,6 +113,7 @@ pub export fn zig_bw_lgen(
     const win_w_isize = x1 - x0;
     if (win_w_isize <= 0 or win_w_isize > 10000) return -1;
     const win_w: u16 = @intCast(win_w_isize);
+    const preparsed = viewmode != 0;
 
     const alloc = std.heap.c_allocator;
     var line_buf: std.ArrayList(u8) = .empty;
@@ -121,8 +134,8 @@ pub export fn zig_bw_lgen(
     }
 
     const highlight = (syntax != null and st.state != -1);
-    if (highlight) {
-        // Separate dup: `parse` consumes through the newline via `pgetc`.
+    // Viewmode: `lgen_view` already ran `parse` and mutated `attr_buf` (links etc).
+    if (highlight and !preparsed) {
         const parse_tmp = pdup(p, "zig_bw_lgen_parse") orelse return -1;
         defer prm(parse_tmp);
         _ = parse(syntax, parse_tmp, st, charmap);
@@ -147,8 +160,10 @@ pub export fn zig_bw_lgen(
     defer if (attrs_owned) |a| alloc.free(a);
     var native_attrs: ?[]const Attribute = null;
 
-    if (highlight and attr_buf != null and attr_size > 0 and line.len > 0) {
+    const use_attr_buf = (highlight or preparsed) and attr_buf != null and attr_size > 0 and line.len > 0;
+    if (use_attr_buf) {
         // Hybrid `parse`/`pgetc` fills one atr per character, not per byte.
+        // Viewmode ASCII-mostly lines: char index ≡ byte index after C mutations.
         const nchar = @min(utf8CharCount(line), @as(usize, @intCast(attr_size)));
         const char_attrs = alloc.alloc(Attribute, nchar) catch return -1;
         defer alloc.free(char_attrs);
@@ -161,7 +176,6 @@ pub export fn zig_bw_lgen(
     }
 
     // Linear mark inverse (JOE non-square `SELECT_IF(byte >= from && byte < to)`).
-    // Default selectatr/selectmask force INVERSE; we set `inverse` on marked bytes.
     if (from != to and line.len > 0) {
         if (attrs_owned == null) {
             const byte_attrs = alloc.alloc(Attribute, line.len) catch return -1;
@@ -170,6 +184,71 @@ pub export fn zig_bw_lgen(
         }
         applyLinearMarkInverse(attrs_owned.?, line_byte, from, to);
         native_attrs = attrs_owned;
+    }
+
+    // Borrow C `lgen_view` side tables. `col_map` is cursor-only (stays in C).
+    var hide_owned: ?[]u8 = null;
+    defer if (hide_owned) |h| alloc.free(h);
+    var subst_owned: ?[]u21 = null;
+    defer if (subst_owned) |s| alloc.free(s);
+    var links_owned: ?[]?[]const u8 = null;
+    defer if (links_owned) |l| alloc.free(l);
+
+    var view_tables: ViewTables = undefined;
+    var view_ptr: ?*const ViewTables = null;
+
+    if (preparsed and line.len > 0) {
+        const n = line.len;
+
+        const hide_slice: []u8 = blk: {
+            if (vm_hide != null and vm_hide_len > 0) {
+                const hn = @min(n, @as(usize, @intCast(vm_hide_len)));
+                if (hn == n) break :blk vm_hide.?[0..hn];
+                const padded = alloc.alloc(u8, n) catch return -1;
+                @memset(padded, 0);
+                @memcpy(padded[0..hn], vm_hide.?[0..hn]);
+                hide_owned = padded;
+                break :blk padded;
+            }
+            const zeros = alloc.alloc(u8, n) catch return -1;
+            @memset(zeros, 0);
+            hide_owned = zeros;
+            break :blk zeros;
+        };
+
+        const subst = alloc.alloc(u21, n) catch return -1;
+        @memset(subst, 0);
+        if (vm_subst != null and vm_subst_len > 0) {
+            const sn = @min(n, @as(usize, @intCast(vm_subst_len)));
+            var i: usize = 0;
+            while (i < sn) : (i += 1) {
+                const v = vm_subst.?[i];
+                if (v > 0) subst[i] = @intCast(v);
+            }
+        }
+        subst_owned = subst;
+
+        const links = alloc.alloc(?[]const u8, n) catch return -1;
+        @memset(links, null);
+        if (vm_urls != null and vm_urls_len > 0) {
+            const un = @min(n, @as(usize, @intCast(vm_urls_len)));
+            var i: usize = 0;
+            while (i < un) : (i += 1) {
+                if (vm_urls.?[i]) |up| links[i] = std.mem.span(up);
+            }
+        }
+        links_owned = links;
+
+        view_tables = .{
+            .allocator = alloc,
+            .owns_memory = false,
+            .hide = hide_slice,
+            .substitute = subst,
+            .link_url = links,
+            .col_map = &.{},
+            .len = n,
+        };
+        view_ptr = &view_tables;
     }
 
     const base_attr = terminal.attributeFromHybrid(defatr, pal);
@@ -182,7 +261,7 @@ pub export fn zig_bw_lgen(
         .tab = tab_u,
         .offset = if (scr_offset < 0) 0 else @intCast(scr_offset),
         .attrs = native_attrs,
-        .view = null,
+        .view = view_ptr,
     };
     _ = render.lgenLine(&scratch, 0, 0, win_w, line, opts, base_attr);
 
@@ -199,11 +278,14 @@ pub export fn zig_bw_lgen(
         }
     }
 
+    var current_url: ?[]const u8 = null;
     var cx: u16 = 0;
     while (cx < win_w) : (cx += 1) {
         const cell = scratch.cells[cx];
         // Wide-continuation cells (cp==0) are filled by `outatr_complete`.
         if (cell.cp == 0) continue;
+
+        if (preparsed) current_url = emitOsc8Link(current_url, cell.url);
 
         const atr: c_int = attributeToHybridOrDef(cell.attr, &tc_pal, defatr);
         const xx: isize = x0 + @as(isize, @intCast(cx));
@@ -231,6 +313,7 @@ pub export fn zig_bw_lgen(
             );
         }
     }
+    if (preparsed) _ = emitOsc8Link(current_url, null);
     outatr_complete(t);
 
     // Advance caller's P to next line (JOE lgen contract).
@@ -242,6 +325,39 @@ pub export fn zig_bw_lgen(
 
 fn attributeToHybridOrDef(attr: Attribute, palette: *TruecolorPalette, defatr: c_int) c_int {
     return terminal.attributeToHybrid(attr, palette) catch defatr;
+}
+
+/// JOE `out_osc8_link` shaped — content equality (C uses pointer equality on shared URLs).
+fn emitOsc8Link(old: ?[]const u8, new_url: ?[]const u8) ?[]const u8 {
+    const same = blk: {
+        if (old == null and new_url == null) break :blk true;
+        if (old == null or new_url == null) break :blk false;
+        break :blk std.mem.eql(u8, old.?, new_url.?);
+    };
+    if (same) return old;
+
+    if (old != null) ttputs("\x1b]8;;\x1b\\");
+    if (new_url) |url| {
+        ttputs("\x1b]8;;");
+        var buf: [256]u8 = undefined;
+        var n: usize = 0;
+        for (url) |ch| {
+            if (ch < 0x20 or ch == 0x7F or (ch >= 0x80 and ch <= 0x9F)) continue;
+            if (n + 1 >= buf.len) {
+                buf[n] = 0;
+                ttputs(@ptrCast(&buf));
+                n = 0;
+            }
+            buf[n] = ch;
+            n += 1;
+        }
+        if (n > 0) {
+            buf[n] = 0;
+            ttputs(@ptrCast(&buf));
+        }
+        ttputs("\x1b\\");
+    }
+    return new_url;
 }
 
 /// Force inverse on bytes whose absolute buffer offset is in `[from, to)`.
@@ -312,22 +428,18 @@ test "expandCharAttrsToBytes maps UTF-8 multi-byte to shared atr" {
 
 test "applyLinearMarkInverse marks ASCII byte range" {
     var attrs = [_]Attribute{ .{ .bold = true }, .{ .bold = true }, .{ .bold = true }, .{ .bold = true }, .{ .bold = true } };
-    // Line starts at byte 10; mark [11, 14) → indices 1,2,3
     applyLinearMarkInverse(&attrs, 10, 11, 14);
     try std.testing.expect(!attrs[0].inverse);
     try std.testing.expect(attrs[1].inverse);
     try std.testing.expect(attrs[2].inverse);
     try std.testing.expect(attrs[3].inverse);
     try std.testing.expect(!attrs[4].inverse);
-    try std.testing.expect(attrs[1].bold); // preserves other styles
+    try std.testing.expect(attrs[1].bold);
 }
 
 test "applyLinearMarkInverse covers UTF-8 continuation bytes" {
-    // "aéb" = a, c3 a9, b — mark only the é lead absolute byte
     var attrs = [_]Attribute{.{}} ** 4;
-    const line_byte: i64 = 100;
-    // Mark bytes 101..103 (both bytes of é)
-    applyLinearMarkInverse(&attrs, line_byte, 101, 103);
+    applyLinearMarkInverse(&attrs, 100, 101, 103);
     try std.testing.expect(!attrs[0].inverse);
     try std.testing.expect(attrs[1].inverse);
     try std.testing.expect(attrs[2].inverse);
@@ -340,4 +452,9 @@ test "applyLinearMarkInverse no-op when from==to" {
     try std.testing.expect(!attrs[0].inverse);
     try std.testing.expect(!attrs[1].inverse);
     try std.testing.expect(!attrs[2].inverse);
+}
+
+test "emitOsc8Link no-op when unchanged" {
+    const u = "http://example.com";
+    try std.testing.expectEqual(@as(?[]const u8, u), emitOsc8Link(u, u));
 }

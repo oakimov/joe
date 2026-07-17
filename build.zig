@@ -110,7 +110,7 @@ pub fn build(b: *std.Build) void {
             // REMOVED: joe/builtin.c — replaced by src/builtin.zig
             "joe/builtins.c",
             "joe/vt.c",
-            "joe/mmenu.c",
+            // REMOVED: joe/mmenu.c — replaced by src/mmenu.zig
             "joe/state.c",
             // REMOVED: joe/options.c — replaced by src/options.zig
             "joe/cclass.c",

@@ -37,4 +37,5 @@ comptime {
     _ = @import("pw.zig");
     _ = @import("qw.zig");
     _ = @import("menu.zig");
+    _ = @import("mmenu.zig");
 }

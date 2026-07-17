@@ -24,6 +24,15 @@ pub const composeStatus = tw.composeStatus;
 pub const fmtLen = tw.fmtLen;
 pub const fmtPos = tw.fmtPos;
 
+pub const PromptFlags = pw.PromptFlags;
+pub const PromptWindow = pw.PromptWindow;
+pub const History = pw.History;
+
+pub const QueryMode = qw.QueryMode;
+pub const QueryWindow = qw.QueryWindow;
+pub const breakHeight = qw.breakHeight;
+pub const promptHeight = qw.promptHeight;
+
 test {
     _ = screen;
     _ = tw;

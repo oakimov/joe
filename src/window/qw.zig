@@ -133,6 +133,28 @@ pub fn promptHeight(prompt: []const u8, width: usize, width_of: WidthFn) usize {
     return breakHeight(prompt, width, null, width_of).height;
 }
 
+
+/// Window-relative cursor after paint (JOE `W.curx` / `W.cury`).
+pub const CursorPos = struct {
+    x: usize = 0,
+    y: usize = 0,
+};
+
+/// Tests-only paint rows for a query prompt (JOE `dispqw` shape).
+pub const Paint = struct {
+    allocator: Allocator,
+    /// One owned, space-padded row per visible line (`h` rows of width `w`).
+    rows: [][]u8,
+    w: usize,
+    cur: CursorPos = .{},
+
+    pub fn deinit(self: *Paint) void {
+        for (self.rows) |row| self.allocator.free(row);
+        self.allocator.free(self.rows);
+        self.* = undefined;
+    }
+};
+
 pub const QueryWindow = struct {
     parent: *screen.Window,
     /// Owned prompt bytes.
@@ -188,6 +210,38 @@ pub const QueryWindow = struct {
 
     pub fn heightForWidth(self: *const QueryWindow, width: usize) usize {
         return promptHeight(self.prompt, width, byteWidth);
+    }
+
+    /// Build wrapped prompt rows for the current geometry (JOE `dispqw`).
+    /// Uses `org_w` for wrapping (JOE `break_height(..., qw->org_w, y)`).
+    pub fn paint(self: *const QueryWindow, allocator: Allocator) !Paint {
+        const wi: usize = self.w;
+        const he: usize = self.h;
+        var rows = try allocator.alloc([]u8, he);
+        errdefer {
+            for (rows) |row| allocator.free(row);
+            allocator.free(rows);
+        }
+        var cur: CursorPos = .{};
+        var y: usize = 0;
+        while (y < he) : (y += 1) {
+            const br = breakHeight(self.prompt, self.org_w, y, byteWidth);
+            const row = try allocator.alloc(u8, wi);
+            errdefer allocator.free(row);
+            @memset(row, ' ');
+            const n = @min(wi, br.line.len);
+            if (n > 0) @memcpy(row[0..n], br.line[0..n]);
+            rows[y] = row;
+            // Capture-mode cursor tracks the last painted line end (relative).
+            cur.y = y;
+            cur.x = @min(wi, byteWidth(br.line));
+        }
+        return .{
+            .allocator = allocator,
+            .rows = rows,
+            .w = wi,
+            .cur = cur,
+        };
     }
 
     /// JOE `utypeqw` — invoke key callback (no window teardown).
@@ -326,3 +380,42 @@ test "QueryWindow vtable resize/move/abort hooks" {
     try testing.expectEqual(@as(i32, 9), vtable.on_abort.?(query));
     try testing.expect(aborted);
 }
+
+test "QueryWindow paint wraps prompt lines and sets cursor" {
+    var scr = try screen.Screen.init(testing.allocator, 10, 24);
+    defer scr.deinit();
+    const win = try scr.createText(null, null, 24);
+    win.w = 10;
+
+    const prompt = "Replace with (S to skip)";
+    var qw_win = try QueryWindow.init(testing.allocator, win, prompt, .capture);
+    defer qw_win.deinit(testing.allocator);
+    // Force a 3-line viewport at org_w=10.
+    qw_win.h = 3;
+    qw_win.w = 10;
+    qw_win.org_w = 10;
+
+    const line0 = breakHeight(prompt, 10, 0, byteWidth);
+    const line1 = breakHeight(prompt, 10, 1, byteWidth);
+    const line2 = breakHeight(prompt, 10, 2, byteWidth);
+
+    var painted = try qw_win.paint(testing.allocator);
+    defer painted.deinit();
+    try testing.expectEqual(@as(usize, 3), painted.rows.len);
+
+    var expect0: [10]u8 = undefined;
+    @memset(&expect0, ' ');
+    @memcpy(expect0[0..line0.line.len], line0.line);
+    try testing.expectEqualStrings(&expect0, painted.rows[0]);
+
+    var expect1: [10]u8 = undefined;
+    @memset(&expect1, ' ');
+    const n1 = @min(10, line1.line.len);
+    if (n1 > 0) @memcpy(expect1[0..n1], line1.line[0..n1]);
+    try testing.expectEqualStrings(&expect1, painted.rows[1]);
+
+    try testing.expectEqualStrings("Replace", line0.line);
+    try testing.expectEqual(@as(usize, 2), painted.cur.y);
+    try testing.expectEqual(@min(@as(usize, 10), byteWidth(line2.line)), painted.cur.x);
+}
+

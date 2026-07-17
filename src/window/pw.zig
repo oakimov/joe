@@ -100,6 +100,20 @@ pub const History = struct {
     }
 };
 
+
+/// Prompt scroll/cursor layout (JOE `disppw` positioning math).
+pub const Layout = struct {
+    prompt_ofst: usize = 0,
+    /// Edit-buffer horizontal offset (JOE `bw->offset`).
+    edit_offset: usize = 0,
+    curx: usize = 0,
+    cury: usize = 0,
+    /// Visible prompt columns: `promptLen - prompt_ofst`.
+    prompt_visible: usize = 0,
+    /// Columns left for the edit line: `w - prompt_visible`.
+    edit_width: usize = 0,
+};
+
 pub const PromptWindow = struct {
     parent: *screen.Window,
     /// Owned prompt bytes (may include JOE fmt escapes later).
@@ -148,6 +162,61 @@ pub const PromptWindow = struct {
     pub fn resize(self: *PromptWindow, wi: u16, he: u16) void {
         self.w = wi;
         self.h = he;
+    }
+
+    /// JOE `disppw` prompt/edit scroll math. Updates `prompt_ofst`.
+    /// `cursor_col` is the edit-line display column (JOE `piscol`).
+    pub fn computeLayout(self: *PromptWindow, cursor_col: usize) Layout {
+        const wi: usize = self.w;
+        const prompt_len = self.promptLen();
+        var prompt_ofst: usize = 0;
+        var edit_offset: usize = 0;
+
+        if (wi == 0) {
+            self.prompt_ofst = 0;
+            return .{};
+        }
+
+        if (prompt_len > wi -| 5) {
+            prompt_ofst = prompt_len -| (wi / 2);
+            const prompt_vis = prompt_len -| prompt_ofst;
+            if (cursor_col < wi -| prompt_vis) {
+                edit_offset = 0;
+            } else {
+                edit_offset = cursor_col -| (wi -| prompt_vis -| 1);
+            }
+        } else {
+            if (cursor_col < wi -| prompt_len) {
+                prompt_ofst = 0;
+                edit_offset = 0;
+            } else if (cursor_col >= wi) {
+                prompt_ofst = prompt_len;
+                edit_offset = cursor_col -| (wi -| 1);
+            } else {
+                prompt_ofst = prompt_len -| (wi -| cursor_col -| 1);
+                const prompt_vis = prompt_len -| prompt_ofst;
+                edit_offset = cursor_col -| (wi -| prompt_vis -| 1);
+            }
+        }
+
+        self.prompt_ofst = prompt_ofst;
+        const prompt_visible = prompt_len -| prompt_ofst;
+        const edit_width = wi -| prompt_visible;
+        const curx = cursor_col -| edit_offset + prompt_visible;
+        return .{
+            .prompt_ofst = prompt_ofst,
+            .edit_offset = edit_offset,
+            .curx = curx,
+            .cury = 0,
+            .prompt_visible = prompt_visible,
+            .edit_width = edit_width,
+        };
+    }
+
+    /// Prompt bytes starting at `prompt_ofst` (JOE `genfmt` ofst).
+    pub fn visiblePrompt(self: *const PromptWindow) []const u8 {
+        const ofst = @min(self.prompt_ofst, self.prompt.len);
+        return self.prompt[ofst..];
     }
 
     pub fn setLine(self: *PromptWindow, allocator: Allocator, text: []const u8) !void {
@@ -363,3 +432,41 @@ test "PromptWindow vtable resize/move/abort hooks" {
     try testing.expectEqual(@as(i32, 4), vtable.on_abort.?(prompt));
     try testing.expect(aborted);
 }
+
+test "PromptWindow computeLayout keeps short prompt fixed" {
+    var scr = try screen.Screen.init(testing.allocator, 40, 24);
+    defer scr.deinit();
+    const win = try scr.createText(null, null, 24);
+    win.w = 40;
+
+    var pw_win = try PromptWindow.init(testing.allocator, win, "File: ");
+    defer pw_win.deinit(testing.allocator);
+    try pw_win.setLine(testing.allocator, "hello.txt");
+
+    const lay = pw_win.computeLayout(5);
+    try testing.expectEqual(@as(usize, 0), lay.prompt_ofst);
+    try testing.expectEqual(@as(usize, 0), lay.edit_offset);
+    try testing.expectEqual(@as(usize, 0), lay.cury);
+    try testing.expectEqual(@as(usize, 6 + 5), lay.curx); // "File: " + col 5
+    try testing.expectEqualStrings("File: ", pw_win.visiblePrompt());
+}
+
+test "PromptWindow computeLayout scrolls long prompt" {
+    var scr = try screen.Screen.init(testing.allocator, 20, 24);
+    defer scr.deinit();
+    const win = try scr.createText(null, null, 24);
+    win.w = 20;
+
+    // prompt_len=30 > w-5=15 ⇒ first branch; ofst = 30 - 10 = 20
+    var pw_win = try PromptWindow.init(testing.allocator, win, "ABCDEFGHIJ0123456789PROMPT!!");
+    defer pw_win.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 28), pw_win.promptLen());
+
+    const lay = pw_win.computeLayout(0);
+    try testing.expectEqual(@as(usize, 28 - 10), lay.prompt_ofst);
+    try testing.expectEqual(@as(usize, 0), lay.edit_offset);
+    try testing.expectEqual(lay.prompt_ofst, pw_win.prompt_ofst);
+    try testing.expectEqualStrings("89PROMPT!!", pw_win.visiblePrompt());
+    try testing.expectEqual(lay.prompt_visible, lay.curx);
+}
+

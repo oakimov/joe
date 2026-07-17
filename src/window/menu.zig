@@ -118,6 +118,51 @@ pub fn completePrefix(items: []const []const u8) []const u8 {
     return commonPrefix(items);
 }
 
+
+/// Window-relative cursor after paint (JOE `W.curx` / `W.cury`).
+pub const CursorPos = struct {
+    x: usize = 0,
+    y: usize = 0,
+};
+
+/// Pad/truncate `text` into `dest` of length `field_w` (byte-width `genfield`).
+pub fn paintField(dest: []u8, text: []const u8) void {
+    const n = @min(dest.len, text.len);
+    @memcpy(dest[0..n], text[0..n]);
+    if (n < dest.len) @memset(dest[n..], ' ');
+}
+
+/// Tests-only cell grid for one menu viewport (JOE `menudisp` shape).
+pub const Paint = struct {
+    allocator: Allocator,
+    /// Flat `w * h` characters (space-filled).
+    chars: []u8,
+    /// Inverse attribute per cell (selected field when focused).
+    inverse: []bool,
+    w: usize,
+    h: usize,
+    cur: CursorPos = .{},
+
+    pub fn deinit(self: *Paint) void {
+        self.allocator.free(self.chars);
+        self.allocator.free(self.inverse);
+        self.* = undefined;
+    }
+
+    pub fn charAt(self: *const Paint, x: usize, y: usize) u8 {
+        return self.chars[y * self.w + x];
+    }
+
+    pub fn isInverse(self: *const Paint, x: usize, y: usize) bool {
+        return self.inverse[y * self.w + x];
+    }
+
+    pub fn rowSlice(self: *const Paint, y: usize) []const u8 {
+        const start = y * self.w;
+        return self.chars[start .. start + self.w];
+    }
+};
+
 pub const MenuWindow = struct {
     parent: *screen.Window,
     /// Borrowed item labels (caller owns; JOE `list`).
@@ -198,6 +243,114 @@ pub const MenuWindow = struct {
                 self.top = self.cursor - (self.cursor % per) - per * (self.h - 1);
             }
         }
+    }
+
+    /// JOE `menudisp` cursor placement (window-relative).
+    pub fn cursorPos(self: *const MenuWindow) CursorPos {
+        if (self.grid.nitems == 0 or self.h == 0 or self.w == 0) return .{};
+        const field_w = self.grid.width;
+        const label = self.items[self.cursor];
+        const label_w = self.width_of(label);
+        const col_w = if (label_w < field_w) label_w else field_w;
+        if (self.transpose) {
+            const lines = if (self.grid.lines == 0) 1 else self.grid.lines;
+            const y = (self.cursor % lines) -% self.top;
+            const x = (self.cursor / lines) * (field_w + 1) + col_w;
+            return .{ .x = x, .y = y };
+        } else {
+            const per = if (self.grid.perline == 0) 1 else self.grid.perline;
+            const rel = self.cursor -% self.top;
+            const y = rel / per;
+            const x = (rel % per) * (field_w + 1) + col_w;
+            return .{ .x = x, .y = y };
+        }
+    }
+
+    /// Build a tests-only paint buffer mirroring JOE `menudisp`.
+    /// `focused` matches `m->t->curwin == m->parent` (selection inverse).
+    pub fn paint(self: *const MenuWindow, allocator: Allocator, focused: bool) !Paint {
+        const wi: usize = self.w;
+        const he: usize = self.h;
+        var out: Paint = .{
+            .allocator = allocator,
+            .chars = try allocator.alloc(u8, wi * he),
+            .inverse = try allocator.alloc(bool, wi * he),
+            .w = wi,
+            .h = he,
+        };
+        errdefer out.deinit();
+        @memset(out.chars, ' ');
+        @memset(out.inverse, false);
+        if (wi == 0 or he == 0 or self.grid.nitems == 0) {
+            out.cur = self.cursorPos();
+            return out;
+        }
+
+        const field_w = self.grid.width;
+        const per = if (self.grid.perline == 0) 1 else self.grid.perline;
+        const lines = if (self.grid.lines == 0) 1 else self.grid.lines;
+        var cut = self.grid.nitems % lines;
+        if (cut == 0) cut = lines;
+
+        var y: usize = 0;
+        while (y < he) : (y += 1) {
+            var col: usize = 0;
+            if (self.transpose) {
+                if (y < lines) {
+                    const row = y + self.top;
+                    const x_limit = if (row >= cut) per -| 1 else per;
+                    var x: usize = 0;
+                    while (x < x_limit) : (x += 1) {
+                        const ndx = x * lines + row;
+                        if (ndx >= self.grid.nitems) break;
+                        if (col >= wi) break;
+                        const take = @min(field_w, wi - col);
+                        var tmp: [256]u8 = undefined;
+                        const use_tmp = take <= tmp.len;
+                        const dest = if (use_tmp) tmp[0..take] else try allocator.alloc(u8, take);
+                        defer if (!use_tmp) allocator.free(dest);
+                        paintField(dest, self.items[ndx]);
+                        const inv = focused and ndx == self.cursor;
+                        var i: usize = 0;
+                        while (i < take) : (i += 1) {
+                            out.chars[y * wi + col + i] = dest[i];
+                            out.inverse[y * wi + col + i] = inv;
+                        }
+                        col += take;
+                        if (col < wi) {
+                            out.chars[y * wi + col] = ' ';
+                            col += 1;
+                        }
+                    }
+                }
+            } else {
+                var x: usize = 0;
+                while (x < per and y * per + x + self.top < self.grid.nitems) : (x += 1) {
+                    const ndx = x + y * per + self.top;
+                    if (col >= wi) break;
+                    const take = @min(field_w, wi - col);
+                    var tmp: [256]u8 = undefined;
+                    const use_tmp = take <= tmp.len;
+                    const dest = if (use_tmp) tmp[0..take] else try allocator.alloc(u8, take);
+                    defer if (!use_tmp) allocator.free(dest);
+                    paintField(dest, self.items[ndx]);
+                    const inv = focused and ndx == self.cursor;
+                    var i: usize = 0;
+                    while (i < take) : (i += 1) {
+                        out.chars[y * wi + col + i] = dest[i];
+                        out.inverse[y * wi + col + i] = inv;
+                    }
+                    col += take;
+                    if (col < wi) {
+                        out.chars[y * wi + col] = ' ';
+                        col += 1;
+                    }
+                }
+            }
+            // Remainder of row stays spaces (eraeol shape).
+        }
+        out.cur = self.cursorPos();
+        return out;
     }
 
     pub fn selected(self: *const MenuWindow) ?[]const u8 {
@@ -933,3 +1086,69 @@ test "MenuRegistry create/find/labels" {
     opts.last_position = menu_win.cursor;
     try testing.expectEqual(@as(usize, 1), opts.last_position);
 }
+
+test "MenuWindow paintField pads and truncates" {
+    var buf: [5]u8 = undefined;
+    paintField(&buf, "ab");
+    try testing.expectEqualStrings("ab   ", &buf);
+    paintField(&buf, "abcdef");
+    try testing.expectEqualStrings("abcde", &buf);
+}
+
+test "MenuWindow paint rows and inverse selection" {
+    var scr = try screen.Screen.init(testing.allocator, 20, 24);
+    defer scr.deinit();
+    const win = try scr.createText(null, null, 24);
+    win.w = 11;
+    win.h = 2;
+
+    // width=1 ⇒ fitline=5 (11/(1+1)=5), items a..f ⇒ 2 rows visible.
+    const items = [_][]const u8{ "a", "b", "c", "d", "e", "f" };
+    var menu_win = MenuWindow.init(win, &items, 0);
+    try testing.expectEqual(@as(usize, 1), menu_win.grid.width);
+    try testing.expectEqual(@as(usize, 5), menu_win.grid.perline);
+
+    var painted = try menu_win.paint(testing.allocator, true);
+    defer painted.deinit();
+    try testing.expectEqualStrings("a b c d e  ", painted.rowSlice(0));
+    try testing.expectEqualStrings("f          ", painted.rowSlice(1));
+    try testing.expect(painted.isInverse(0, 0)); // 'a' selected
+    try testing.expect(!painted.isInverse(2, 0)); // 'b'
+    try testing.expectEqual(@as(usize, 1), painted.cur.x); // end of "a"
+    try testing.expectEqual(@as(usize, 0), painted.cur.y);
+
+    _ = menu_win.moveRight();
+    var painted2 = try menu_win.paint(testing.allocator, true);
+    defer painted2.deinit();
+    try testing.expect(!painted2.isInverse(0, 0));
+    try testing.expect(painted2.isInverse(2, 0)); // 'b'
+    try testing.expectEqual(@as(usize, 3), painted2.cur.x);
+    try testing.expectEqual(@as(usize, 0), painted2.cur.y);
+
+    // Unfocused ⇒ no inverse highlight.
+    var painted3 = try menu_win.paint(testing.allocator, false);
+    defer painted3.deinit();
+    try testing.expect(!painted3.isInverse(2, 0));
+}
+
+test "MenuWindow cursorPos transpose" {
+    var scr = try screen.Screen.init(testing.allocator, 20, 24);
+    defer scr.deinit();
+    const win = try scr.createText(null, null, 24);
+    win.w = 11;
+    win.h = 3;
+
+    const items = [_][]const u8{ "a", "b", "c", "d", "e", "f" };
+    var menu_win = MenuWindow.init(win, &items, 0);
+    menu_win.transpose = true;
+    menu_win.configure();
+    menu_win.follow();
+    // lines = ceil(6/5)=2, perline = ceil(6/2)=3
+    try testing.expectEqual(@as(usize, 2), menu_win.grid.lines);
+    menu_win.cursor = 2; // column 1, row 0 ⇒ ndx = 1*2+0 = 2 ('c')
+    menu_win.follow();
+    const cur = menu_win.cursorPos();
+    try testing.expectEqual(@as(usize, 0), cur.y);
+    try testing.expectEqual(@as(usize, (2 / 2) * (1 + 1) + 1), cur.x);
+}
+

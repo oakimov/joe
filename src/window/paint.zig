@@ -212,18 +212,19 @@ pub fn paintLinum(term: *TermScreen, x: u16, y: i16, lincols: u16, line_1based: 
     }
 }
 
-/// Text-body paint (bwgen-shaped): optional linums + `render.lgenLine`.
-/// No gapbuffer/syntax/viewmode yet — Phase 6 deepen. `offset` is a display
-/// column (JOE `bw->offset`), not a byte index.
+/// Text-body paint (bwgen-shaped): optional linums + `render.lgen*`.
+/// Prefers live `TextWindow.buffer` (`lgenPoint` walk); falls back to stub
+/// `body_lines` (`lgenLine`). No syntax/viewmode/mark yet. `offset` is a
+/// display column (JOE `bw->offset`), not a byte index.
 pub fn paintBody(term: *TermScreen, t: *const tw.TextWindow, attr: Attribute) void {
     if (t.h == 0) return;
     if (t.w == 0 and t.lincols == 0) return;
+    const line_count = t.bodyLineCount();
     var row: u16 = 0;
     while (row < t.h) : (row += 1) {
         const row_y: i16 = t.y + @as(i16, @intCast(row));
         const line_idx = t.lineAtRow(row);
-        // null body_lines → no stub buffer (treat as past EOF / blank).
-        const past_eof = if (t.body_lines) |lines| line_idx >= lines.len else true;
+        const past_eof = if (line_count) |n| line_idx >= n else true;
 
         if (t.linums and t.lincols > 0) {
             const num: ?u64 = if (past_eof) null else line_idx + 1;
@@ -239,16 +240,25 @@ pub fn paintBody(term: *TermScreen, t: *const tw.TextWindow, attr: Attribute) vo
             clearWinEol(term, t.x, row_y, t.w, attr);
             continue;
         }
-        const text = t.bodyLine(line_idx) orelse {
-            clearWinEol(term, t.x, row_y, t.w, attr);
-            continue;
-        };
-        _ = render.lgenLine(term, t.x, sy, t.w, text, .{
+
+        const opts: render.Options = .{
             .tab = t.tab,
             .offset = t.offset,
-        }, attr);
+        };
+        if (t.buffer) |buf| {
+            var p = render.Point.bof(buf);
+            p.gotoLine(line_idx);
+            _ = render.lgenPoint(term, t.x, sy, t.w, &p, opts, attr);
+        } else {
+            const text = t.bodyLine(line_idx) orelse {
+                clearWinEol(term, t.x, row_y, t.w, attr);
+                continue;
+            };
+            _ = render.lgenLine(term, t.x, sy, t.w, text, opts, attr);
+        }
     }
 }
+
 
 /// Minimum display width of a help line (JOE help_display first pass).
 /// Attribute escapes consume no columns; `\|` is a spring (not width);
@@ -715,6 +725,40 @@ test "paintBody writes stub lines, linums, offset, and content cursor" {
     // h content = 7 (status on). Row for line_idx 4 is row 3 → y=4.
     try testing.expect(cellAt(&term, 4, 4).cp == ' ' or cellAt(&term, 4, 4).cp == 0);
     try testing.expect(cellAt(&term, 0, 4).cp == ' ' or cellAt(&term, 0, 4).cp == 0);
+}
+
+
+test "paintBody walks live gap buffer with tabs and linums" {
+    var buf = try render.GapBuffer.init(testing.allocator);
+    defer buf.deinit();
+    try buf.append("a\tb\nxyz");
+
+    var scr = try screen.Screen.init(testing.allocator, 20, 6);
+    defer scr.deinit();
+    const win = try scr.createText(null, null, 5);
+    scr.layout();
+    const t = win.asText().?;
+    t.buffer = &buf;
+    t.tab = 4;
+    t.setLincols(3);
+    t.linums = true;
+    t.top_line = 0;
+    t.offset = 0;
+
+    var term = try TermScreen.init(testing.allocator, 20, 6);
+    defer term.deinit();
+    paintBody(&term, t, .none);
+
+    // Row 0: linum "  1", then "a" + 3 spaces + "b"
+    try testing.expectEqual(@as(u21, '1'), cellAt(&term, 1, @intCast(t.y)).cp);
+    try testing.expectEqual(@as(u21, 'a'), cellAt(&term, t.x, @intCast(t.y)).cp);
+    try testing.expectEqual(@as(u21, ' '), cellAt(&term, t.x + 1, @intCast(t.y)).cp);
+    try testing.expectEqual(@as(u21, 'b'), cellAt(&term, t.x + 4, @intCast(t.y)).cp);
+
+    // Row 1: "xyz"
+    try testing.expectEqual(@as(u21, '2'), cellAt(&term, 1, @intCast(t.y + 1)).cp);
+    try testing.expectEqual(@as(u21, 'x'), cellAt(&term, t.x, @intCast(t.y + 1)).cp);
+    try testing.expectEqual(@as(u21, 'y'), cellAt(&term, t.x + 1, @intCast(t.y + 1)).cp);
 }
 
 test "paintBody clears content when no stub lines" {

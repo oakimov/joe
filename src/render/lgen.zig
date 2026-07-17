@@ -9,10 +9,13 @@ const std = @import("std");
 const testing = std.testing;
 
 const terminal = @import("terminal");
+const gap = @import("gap.zig");
 
 pub const TermScreen = terminal.Screen;
 pub const Attribute = terminal.Attribute;
 pub const displayWidth = terminal.displayWidth;
+pub const GapBuffer = gap.GapBuffer;
+pub const Point = gap.Point;
 
 pub const Options = struct {
     /// Tab stop width — JOE `o.tab` (default 8).
@@ -66,6 +69,119 @@ fn emitGlyph(term: *TermScreen, sx: *u16, end_x: u16, y: u16, cp: u21, wid: u8, 
     sx.* +|= wid;
 }
 
+const Unit = union(enum) {
+    cp: u21,
+    invalid,
+    eol,
+};
+
+fn paintUnit(
+    term: *TermScreen,
+    sx: *u16,
+    end_x: u16,
+    y: u16,
+    x: u16,
+    logical: *u64,
+    offset: u64,
+    tab: u16,
+    unit: Unit,
+    base_attr: Attribute,
+) bool {
+    // Returns false when the line ends (eol).
+    switch (unit) {
+        .eol => return false,
+        .invalid => {
+            if (logical.* >= offset) {
+                var a = base_attr;
+                a.underline = true;
+                emitGlyph(term, sx, end_x, y, 'X', 1, a);
+            }
+            logical.* += 1;
+            return true;
+        },
+        .cp => |cp| {
+            if (cp == '\t') {
+                const twid = tabWidth(tab, logical.*);
+                var t: u16 = 0;
+                while (t < twid) : (t += 1) {
+                    if (logical.* < offset) {
+                        logical.* += 1;
+                        continue;
+                    }
+                    if (sx.* >= end_x) break;
+                    emitSpace(term, sx, end_x, y, base_attr);
+                    logical.* += 1;
+                }
+                return true;
+            }
+
+            const shown = controlDisplay(cp);
+            var attr = base_attr;
+            if (shown.underline) attr.underline = true;
+            const wid = shown.width;
+
+            if (wid == 0) {
+                if (logical.* >= offset and sx.* > x) {
+                    emitGlyph(term, sx, end_x, y, shown.cp, 0, attr);
+                }
+                return true;
+            }
+
+            if (logical.* + wid <= offset) {
+                logical.* += wid;
+                return true;
+            }
+
+            if (logical.* < offset) {
+                const skip = offset - logical.*;
+                emitGlyph(term, sx, end_x, y, '<', 1, attr);
+                logical.* = offset;
+                var rem = wid - @as(u8, @intCast(@min(skip, wid)));
+                while (rem > 0 and sx.* < end_x) : (rem -= 1) {
+                    emitSpace(term, sx, end_x, y, attr);
+                    logical.* += 1;
+                }
+                return true;
+            }
+
+            emitGlyph(term, sx, end_x, y, shown.cp, wid, attr);
+            logical.* += wid;
+            return true;
+        },
+    }
+}
+
+const SliceIter = struct {
+    text: []const u8,
+    i: usize = 0,
+
+    fn next(self: *SliceIter) ?Unit {
+        if (self.i >= self.text.len) return null;
+        const b = self.text[self.i];
+        if (b == '\n' or b == '\r') return .eol;
+
+        if (b == '\t') {
+            self.i += 1;
+            return .{ .cp = '\t' };
+        }
+
+        const seq_len = std.unicode.utf8ByteSequenceLength(b) catch {
+            self.i += 1;
+            return .{ .invalid = {} };
+        };
+        if (self.i + seq_len > self.text.len) {
+            self.i += 1;
+            return .{ .invalid = {} };
+        }
+        const cp = std.unicode.utf8Decode(self.text[self.i..][0..seq_len]) catch {
+            self.i += seq_len;
+            return .{ .invalid = {} };
+        };
+        self.i += seq_len;
+        return .{ .cp = cp };
+    }
+};
+
 /// Render one line into cells `[x, x+w)` on row `y`.
 /// Stops at `\n` / `\r`. Pads remaining window width with spaces.
 /// Returns screen columns written from `x` (not counting trailing pad).
@@ -78,6 +194,33 @@ pub fn lgenLine(
     opts: Options,
     base_attr: Attribute,
 ) u16 {
+    var it: SliceIter = .{ .text = text };
+    return lgenUnits(term, x, y, w, &it, opts, base_attr);
+}
+
+/// Render one line by walking a live `Point` (gap-buffer backed).
+/// Leaves `p` on the EOL byte (`\n`/`\r`) or at EOF — does not consume the newline.
+pub fn lgenPoint(
+    term: *TermScreen,
+    x: u16,
+    y: u16,
+    w: u16,
+    p: *Point,
+    opts: Options,
+    base_attr: Attribute,
+) u16 {
+    return lgenUnits(term, x, y, w, p, opts, base_attr);
+}
+
+fn lgenUnits(
+    term: *TermScreen,
+    x: u16,
+    y: u16,
+    w: u16,
+    iter: anytype,
+    opts: Options,
+    base_attr: Attribute,
+) u16 {
     if (w == 0 or y >= term.height or x >= term.width) return 0;
     const end_x: u16 = @min(term.width, x +% w);
     const offset = opts.offset;
@@ -85,103 +228,56 @@ pub fn lgenLine(
 
     var logical: u64 = 0;
     var sx: u16 = x;
-    var i: usize = 0;
 
-    while (i < text.len and sx < end_x) {
-        const b = text[i];
-        if (b == '\n' or b == '\r') break;
-
-        if (b == '\t') {
-            const twid = tabWidth(tab, logical);
-            var t: u16 = 0;
-            while (t < twid) : (t += 1) {
-                if (logical < offset) {
-                    logical += 1;
-                    continue;
-                }
-                if (sx >= end_x) break;
-                emitSpace(term, &sx, end_x, y, base_attr);
-                logical += 1;
-            }
-            i += 1;
-            continue;
-        }
-
-        const seq_len = std.unicode.utf8ByteSequenceLength(b) catch {
-            // Invalid lead byte — show as underlined 'X' (JOE UTF8_BAD scaffold).
-            if (logical >= offset) {
-                var a = base_attr;
-                a.underline = true;
-                emitGlyph(term, &sx, end_x, y, 'X', 1, a);
-            }
-            logical += 1;
-            i += 1;
-            continue;
+    while (sx < end_x) {
+        const unit = iter.next() orelse break;
+        // Point.nextUnit / SliceIter.next both yield Unit.
+        const u: Unit = switch (@TypeOf(unit)) {
+            gap.Unit => switch (unit) {
+                .cp => |cp| .{ .cp = cp },
+                .invalid => .invalid,
+                .eol => .eol,
+            },
+            Unit => unit,
+            else => @compileError("unsupported unit iterator"),
         };
-        if (i + seq_len > text.len) {
-            if (logical >= offset) {
-                var a = base_attr;
-                a.underline = true;
-                emitGlyph(term, &sx, end_x, y, 'X', 1, a);
-            }
-            logical += 1;
-            break;
-        }
-        const cp = std.unicode.utf8Decode(text[i..][0..seq_len]) catch {
-            if (logical >= offset) {
-                var a = base_attr;
-                a.underline = true;
-                emitGlyph(term, &sx, end_x, y, 'X', 1, a);
-            }
-            logical += 1;
-            i += seq_len;
-            continue;
-        };
-        i += seq_len;
-
-        const shown = controlDisplay(cp);
-        var attr = base_attr;
-        if (shown.underline) attr.underline = true;
-        const wid = shown.width;
-
-        if (wid == 0) {
-            // Combining / zero-width: only attach once past the scroll offset
-            // and once a base glyph has been emitted into the window.
-            if (logical >= offset and sx > x) {
-                emitGlyph(term, &sx, end_x, y, shown.cp, 0, attr);
-            }
-            continue;
-        }
-
-        // Scroll/skip whole glyph when it ends at or before `offset`.
-        if (logical + wid <= offset) {
-            logical += wid;
-            continue;
-        }
-
-        // Glyph straddles `offset`: JOE shows a leading '<' then the remnant.
-        if (logical < offset) {
-            const skip = offset - logical;
-            // Emit '<' once at window start for partial wide/control glyph.
-            emitGlyph(term, &sx, end_x, y, '<', 1, attr);
-            logical = offset;
-            // Remaining columns of the clipped glyph become spaces (simplified;
-            // full JOE keeps going with tach='<' only for the first cell).
-            var rem = wid - @as(u8, @intCast(@min(skip, wid)));
-            while (rem > 0 and sx < end_x) : (rem -= 1) {
-                emitSpace(term, &sx, end_x, y, attr);
-                logical += 1;
-            }
-            continue;
-        }
-
-        emitGlyph(term, &sx, end_x, y, shown.cp, wid, attr);
-        logical += wid;
+        if (!paintUnit(term, &sx, end_x, y, x, &logical, offset, tab, u, base_attr)) break;
+        if (sx >= end_x) break;
     }
 
     const written = sx -% x;
     if (sx < end_x) clearRange(term, sx, y, end_x, base_attr);
     return written;
+}
+
+/// bwgen-shaped: paint `h` rows from `top_line` of a live gap buffer.
+/// Returns number of content rows painted (always `h` when h>0 and w path runs).
+pub fn lgenBuffer(
+    term: *TermScreen,
+    x: u16,
+    y: u16,
+    w: u16,
+    h: u16,
+    buf: *GapBuffer,
+    top_line: u64,
+    opts: Options,
+    base_attr: Attribute,
+) u16 {
+    if (h == 0 or w == 0) return 0;
+    var row: u16 = 0;
+    while (row < h) : (row += 1) {
+        const line_idx = top_line +% row;
+        const sy = y +% row;
+        if (sy >= term.height) break;
+        if (line_idx >= buf.lineCount()) {
+            clearRange(term, x, sy, @min(term.width, x +% w), base_attr);
+            continue;
+        }
+        var p = Point.bof(buf);
+        p.gotoLine(line_idx);
+        _ = lgenPoint(term, x, sy, w, &p, opts, base_attr);
+    }
+    return row;
 }
 
 test "lgenLine writes plain ASCII and pads" {
@@ -252,4 +348,59 @@ test "lgenLine stops at newline" {
     try testing.expectEqual(@as(u21, 'a'), term.cells[0].cp);
     try testing.expectEqual(@as(u21, 'b'), term.cells[1].cp);
     try testing.expectEqual(@as(u21, ' '), term.cells[2].cp);
+}
+
+test "lgenPoint matches lgenLine over a gap buffer" {
+    var buf = try GapBuffer.init(testing.allocator);
+    defer buf.deinit();
+    try buf.append("a\tb\nZZ");
+
+    var term = try TermScreen.init(testing.allocator, 12, 1);
+    defer term.deinit();
+    var p = Point.bof(&buf);
+    _ = lgenPoint(&term, 0, 0, 10, &p, .{ .tab = 4 }, .none);
+    try testing.expectEqual(@as(u21, 'a'), term.cells[0].cp);
+    try testing.expectEqual(@as(u21, ' '), term.cells[1].cp);
+    try testing.expectEqual(@as(u21, ' '), term.cells[2].cp);
+    try testing.expectEqual(@as(u21, ' '), term.cells[3].cp);
+    try testing.expectEqual(@as(u21, 'b'), term.cells[4].cp);
+    // Point left at EOL, not past it.
+    try testing.expect(p.isEol());
+    try testing.expectEqual(@as(u8, '\n'), p.peekb().?);
+}
+
+test "lgenBuffer paints multiple lines with offset and past-EOF blanking" {
+    var buf = try GapBuffer.init(testing.allocator);
+    defer buf.deinit();
+    try buf.append("alpha\nbravo\ncharlie");
+
+    var term = try TermScreen.init(testing.allocator, 10, 4);
+    defer term.deinit();
+    // Dirty past-EOF row.
+    term.writeChar(0, 3, 'Z', .none);
+    _ = lgenBuffer(&term, 0, 0, 8, 4, &buf, 1, .{ .offset = 1 }, .none);
+    // top_line=1 → bravo, charlie, then past EOF blank.
+    try testing.expectEqual(@as(u21, 'r'), term.cells[0].cp); // "ravo"
+    try testing.expectEqual(@as(u21, 'h'), term.cells[10].cp); // row1 "harlie" — width 10, row stride
+    try testing.expectEqual(@as(u21, 'h'), term.cells[1 * 10 + 0].cp);
+    try testing.expect(term.cells[3 * 10 + 0].isBlankNone() or term.cells[3 * 10].cp == ' ');
+}
+
+test "lgenPoint sees edits across the gap" {
+    var buf = try GapBuffer.init(testing.allocator);
+    defer buf.deinit();
+    try buf.append("hello");
+    // Force gap into the middle, then insert.
+    buf.moveGap(2);
+    try buf.insert(2, "XY");
+
+    var term = try TermScreen.init(testing.allocator, 10, 1);
+    defer term.deinit();
+    var p = Point.bof(&buf);
+    _ = lgenPoint(&term, 0, 0, 8, &p, .{}, .none);
+    try testing.expectEqual(@as(u21, 'h'), term.cells[0].cp);
+    try testing.expectEqual(@as(u21, 'e'), term.cells[1].cp);
+    try testing.expectEqual(@as(u21, 'X'), term.cells[2].cp);
+    try testing.expectEqual(@as(u21, 'Y'), term.cells[3].cp);
+    try testing.expectEqual(@as(u21, 'l'), term.cells[4].cp);
 }

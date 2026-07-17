@@ -10,6 +10,7 @@ const testing = std.testing;
 
 const screen = @import("screen.zig");
 const fmt_esc = @import("fmt.zig");
+const render = @import("render");
 
 fn onResize(w: *screen.Window, wi: u16, he: u16) void {
     const t = w.asText() orelse return;
@@ -44,9 +45,13 @@ pub const TextWindow = struct {
     status_on: bool = false,
     /// Optional precomposed status row (borrowed) for paintAll / tests — no live BW yet.
     status_line: ?[]const u8 = null,
-    /// Optional borrowed body lines for tests-only paint — no live BW/gapbuffer yet.
+    /// Optional borrowed body lines for tests-only paint — no live BW yet.
     /// Index `i` is buffer line `i`; paint starts at `top_line`.
+    /// Ignored when `buffer` is set.
     body_lines: ?[]const []const u8 = null,
+    /// Optional live Zig-native gap buffer (Phase 6). When set, paint walks
+    /// `Point`s via `render.lgenPoint` instead of `body_lines`.
+    buffer: ?*render.GapBuffer = null,
     /// First visible buffer line — JOE `bw->top->line`.
     top_line: u64 = 0,
     /// Horizontal scroll in display columns — JOE `bw->offset`.
@@ -126,10 +131,19 @@ pub const TextWindow = struct {
     }
 
     /// Borrowed body text for buffer line `line`, if stubbed and in range.
+    /// Only for `body_lines` stubs — live `buffer` is walked via Point in paint.
     pub fn bodyLine(self: *const TextWindow, line: u64) ?[]const u8 {
         const lines = self.body_lines orelse return null;
         if (line >= lines.len) return null;
         return lines[@intCast(line)];
+    }
+
+    /// Total buffer lines available to paint (live gap buffer or stub lines).
+    /// `null` means no body source attached (paint blanks content).
+    pub fn bodyLineCount(self: *const TextWindow) ?u64 {
+        if (self.buffer) |buf| return buf.lineCount();
+        if (self.body_lines) |lines| return @as(u64, @intCast(lines.len));
+        return null;
     }
 };
 
@@ -709,6 +723,27 @@ test "TextWindow contentCursor and bodyLine respect top/offset" {
     try testing.expectEqual(@as(u16, t.x + 3), cur.x);
     try testing.expectEqual(@as(i16, t.y + 3), cur.y);
 }
+
+test "TextWindow bodyLineCount prefers live gap buffer" {
+    var buf = try render.GapBuffer.init(testing.allocator);
+    defer buf.deinit();
+    try buf.append("a\nb\nc");
+
+    var scr = try screen.Screen.init(testing.allocator, 20, 6);
+    defer scr.deinit();
+    const win = try scr.createText(null, null, 4);
+    scr.layout();
+    const t = win.asText().?;
+    try testing.expect(t.bodyLineCount() == null);
+
+    const lines = [_][]const u8{ "x", "y" };
+    t.body_lines = &lines;
+    try testing.expectEqual(@as(u64, 2), t.bodyLineCount().?);
+
+    t.buffer = &buf;
+    try testing.expectEqual(@as(u64, 3), t.bodyLineCount().?);
+}
+
 
 test "TextWindow move/resize reserve status and lincols" {
     const prev = status_enabled;

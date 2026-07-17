@@ -13,6 +13,8 @@ pub const table = @import("table.zig");
 pub const lattr = @import("lattr.zig");
 
 pub const Options = lgen.Options;
+pub const VisibleWs = lgen.VisibleWs;
+pub const mergeVisibleWsAttr = lgen.mergeVisibleWsAttr;
 pub const lgenLine = lgen.lgenLine;
 pub const lgenPoint = lgen.lgenPoint;
 pub const lgenBuffer = lgen.lgenBuffer;

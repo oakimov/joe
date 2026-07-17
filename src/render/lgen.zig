@@ -2,9 +2,9 @@
 //!
 //! Renders one UTF-8 buffer line into a `terminal.Screen` row window. Handles
 //! tab expansion, display-column scroll (`bw->offset`), C0/DEL control glyphs,
-//! and wide-char clipping (`>` filler). Optional per-byte `attrs` (JOE `attr_buf`)
-//! and viewmode side tables (`Options.view` — hide→space / substitute).
-//! Not wired into live `joe` — unit-tested only.
+//! and wide-char clipping (`>` filler). Optional per-byte `attrs` (JOE `attr_buf`),
+//! viewmode side tables (`Options.view` — hide→space / substitute), and
+//! visible-whitespace glyphs (`Options.visible_ws`).
 
 const std = @import("std");
 const testing = std.testing;
@@ -27,6 +27,18 @@ pub const ViewTables = view_mod.ViewTables;
 pub const analyzeLine = view_mod.analyzeLine;
 pub const resolveCp = view_mod.resolveCp;
 
+/// JOE `-visiblews` glyphs + style (default: dim, clear FG).
+/// Live bridge builds this from `vspace`/`vtab`/`vrtn` + `vwsatr`.
+pub const VisibleWs = struct {
+    space: u21, // JOE `vspace` (middle dot)
+    tab: u21, // JOE `vtab` (right arrow) — first cell of a tab run
+    rtn: u21, // JOE `vrtn` (return arrow) — painted at EOL before clear
+    /// Forced style bits (typically `{ .dim = true }`).
+    style: Attribute = .{ .dim = true },
+    /// When true, clear FG from the cell atr (JOE `vwsmask` drops `FG_MASK`).
+    clear_fg: bool = true,
+};
+
 pub const Options = struct {
     /// Tab stop width — JOE `o.tab` (default 8).
     tab: u16 = 8,
@@ -38,7 +50,22 @@ pub const Options = struct {
     /// Optional viewmode side tables (JOE `viewmode_hide` / `substitute`).
     /// When set, hide→space and substitute wins (like `lgen_core` + `viewmode_skip_parse`).
     view: ?*const ViewTables = null,
+    /// Optional visible-whitespace glyphs (JOE `-visiblews`).
+    visible_ws: ?*const VisibleWs = null,
 };
+
+/// Merge cell atr with visible-ws style (JOE `((atr & vwsmask) | (vwsatr & ~vwsmask))`
+/// for the default mask that keeps styles/BG, forces DIM, clears FG).
+pub fn mergeVisibleWsAttr(base: Attribute, vws: *const VisibleWs) Attribute {
+    var out = base;
+    out.dim = vws.style.dim;
+    if (vws.clear_fg) {
+        out.fg = if (!Color.eql(vws.style.fg, .default)) vws.style.fg else .default;
+    } else if (!Color.eql(vws.style.fg, .default)) {
+        out.fg = vws.style.fg;
+    }
+    return out;
+}
 
 fn tabWidth(tab: u16, col: u64) u16 {
     const t: u64 = if (tab == 0) 1 else tab;
@@ -107,10 +134,21 @@ fn paintUnit(
     unit: Unit,
     base_attr: Attribute,
     url: ?[]const u8,
+    vws: ?*const VisibleWs,
 ) bool {
     // Returns false when the line ends (eol).
     switch (unit) {
-        .eol => return false,
+        .eol => {
+            // JOE paints `vrtn` on `\n` (and `\r\n` when crlf) before eraeol.
+            // EOF without newline does not emit rtn (iterator ends without `.eol`).
+            if (vws) |v| {
+                if (logical.* >= offset and sx.* < end_x) {
+                    const a = mergeVisibleWsAttr(base_attr, v);
+                    emitGlyph(term, sx, end_x, y, v.rtn, 1, a, null);
+                }
+            }
+            return false;
+        },
         .invalid => {
             if (logical.* >= offset) {
                 var a = base_attr;
@@ -122,6 +160,7 @@ fn paintUnit(
         },
         .cp => |cp| {
             if (cp == '\t') {
+                // JOE: first cell of the tab run → `vtab` + vws atr; rest → spaces.
                 const twid = tabWidth(tab, logical.*);
                 var t: u16 = 0;
                 while (t < twid) : (t += 1) {
@@ -130,10 +169,33 @@ fn paintUnit(
                         continue;
                     }
                     if (sx.* >= end_x) break;
-                    emitSpace(term, sx, end_x, y, base_attr);
+                    if (vws) |v| {
+                        if (t == 0) {
+                            const a = mergeVisibleWsAttr(base_attr, v);
+                            emitGlyph(term, sx, end_x, y, v.tab, 1, a, null);
+                        } else {
+                            emitSpace(term, sx, end_x, y, base_attr);
+                        }
+                    } else {
+                        emitSpace(term, sx, end_x, y, base_attr);
+                    }
                     logical.* += 1;
                 }
                 return true;
+            }
+
+            // JOE `-visiblews`: space → `vspace` glyph with vws atr merge.
+            if (cp == ' ') {
+                if (vws) |v| {
+                    const a = mergeVisibleWsAttr(base_attr, v);
+                    if (logical.* < offset) {
+                        logical.* += 1;
+                        return true;
+                    }
+                    emitGlyph(term, sx, end_x, y, v.space, 1, a, url);
+                    logical.* += 1;
+                    return true;
+                }
             }
 
             const shown = controlDisplay(cp);
@@ -290,7 +352,7 @@ fn lgenUnits(
         }
         const cell_attr = attrAt(base_attr, opts.attrs, byte_idx);
         const cell_url: ?[]const u8 = if (opts.view) |vt| vt.linkAt(byte_idx) else null;
-        if (!paintUnit(term, &sx, end_x, y, x, &logical, offset, tab, u, cell_attr, cell_url)) break;
+        if (!paintUnit(term, &sx, end_x, y, x, &logical, offset, tab, u, cell_attr, cell_url, opts.visible_ws)) break;
         if (sx >= end_x) break;
     }
 
@@ -581,4 +643,56 @@ test "lgenLine applies viewmode link urls onto cells" {
     try term.flush();
     const out = term.takeOut();
     try testing.expect(std.mem.indexOf(u8, out, "\x1b]8;;http://example.com\x1b\\") != null);
+}
+
+test "mergeVisibleWsAttr forces dim and clears FG" {
+    const vws: VisibleWs = .{ .space = 0xb7, .tab = 0x2192, .rtn = 0x21b5 };
+    const base = Attribute{ .bold = true, .fg = .{ .indexed = 3 }, .bg = .{ .indexed = 4 } };
+    const m = mergeVisibleWsAttr(base, &vws);
+    try testing.expect(m.bold);
+    try testing.expect(m.dim);
+    try testing.expect(Color.eql(m.fg, .default));
+    try testing.expect(Color.eql(m.bg, .{ .indexed = 4 }));
+}
+
+test "lgenLine visiblews paints space tab rtn glyphs" {
+    const vws: VisibleWs = .{ .space = 0xb7, .tab = 0x2192, .rtn = 0x21b5 };
+    var term = try TermScreen.init(testing.allocator, 10, 1);
+    defer term.deinit();
+    // col0 space, col1-3 tab (width 3 at tab=4), 'a', then rtn on \n
+    _ = lgenLine(&term, 0, 0, 10, " \ta\n", .{ .tab = 4, .visible_ws = &vws }, .none);
+    try testing.expectEqual(@as(u21, 0xb7), term.cells[0].cp);
+    try testing.expect(term.cells[0].attr.dim);
+    try testing.expectEqual(@as(u21, 0x2192), term.cells[1].cp);
+    try testing.expect(term.cells[1].attr.dim);
+    try testing.expectEqual(@as(u21, ' '), term.cells[2].cp);
+    try testing.expect(!term.cells[2].attr.dim);
+    try testing.expectEqual(@as(u21, ' '), term.cells[3].cp);
+    try testing.expectEqual(@as(u21, 'a'), term.cells[4].cp);
+    try testing.expectEqual(@as(u21, 0x21b5), term.cells[5].cp);
+    try testing.expect(term.cells[5].attr.dim);
+}
+
+test "lgenLine visiblews omits rtn when line has no newline" {
+    const vws: VisibleWs = .{ .space = 0xb7, .tab = 0x2192, .rtn = 0x21b5 };
+    var term = try TermScreen.init(testing.allocator, 6, 1);
+    defer term.deinit();
+    _ = lgenLine(&term, 0, 0, 6, "a ", .{ .visible_ws = &vws }, .none);
+    try testing.expectEqual(@as(u21, 'a'), term.cells[0].cp);
+    try testing.expectEqual(@as(u21, 0xb7), term.cells[1].cp);
+    // Remaining pad is plain spaces (eraeol), not rtn.
+    try testing.expectEqual(@as(u21, ' '), term.cells[2].cp);
+    try testing.expect(!term.cells[2].attr.dim);
+}
+
+test "lgenLine visiblews skips vtab when offset cuts mid-tab" {
+    const vws: VisibleWs = .{ .space = 0xb7, .tab = 0x2192, .rtn = 0x21b5 };
+    var term = try TermScreen.init(testing.allocator, 8, 1);
+    defer term.deinit();
+    // tab width 4 at col 0; offset 2 → trailing two tab cells are plain spaces.
+    _ = lgenLine(&term, 0, 0, 8, "\tX", .{ .tab = 4, .offset = 2, .visible_ws = &vws }, .none);
+    try testing.expectEqual(@as(u21, ' '), term.cells[0].cp);
+    try testing.expect(!term.cells[0].attr.dim);
+    try testing.expectEqual(@as(u21, ' '), term.cells[1].cp);
+    try testing.expectEqual(@as(u21, 'X'), term.cells[2].cp);
 }

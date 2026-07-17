@@ -1,11 +1,11 @@
 //! Gated live bridge: JOE `lgen_core` → Zig-native `render.lgenLine`.
 //!
 //! When `JOE_ZIG_BW_LGEN` / `zig_bw_lgen_enabled` is on, plain UTF-8 lines
-//! (including linear mark inverse + viewmode hide/substitute/link tables)
-//! paint through the Phase 6 renderer and emit via hybrid `outatr` (works
-//! with screen-swap shadow + classic tty path). Default off until soak.
-//! Falls back to C `lgen_core` when the gate is off or the line is unsupported
-//! (square / ansi / visiblews / non-UTF-8). Table padded rows stay in C
+//! (including linear mark inverse + viewmode hide/substitute/link tables +
+//! `-visiblews` glyphs) paint through the Phase 6 renderer and emit via hybrid
+//! `outatr` (works with screen-swap shadow + classic tty path). Default off
+//! until soak. Falls back to C `lgen_core` when the gate is off or the line is
+//! unsupported (square / ansi / non-UTF-8). Table padded rows stay in C
 //! (`viewmode_table_rendered` skips `lgen_core`).
 //!
 //! Hybrid `syntax.parse` fills `attr_buf` **per character** (`pgetc`); native
@@ -13,7 +13,8 @@
 //! When `viewmode!=0`, C `lgen_view` already parsed+mutated `attr_buf` — do
 //! **not** re-parse. Linear marks (`from`/`to` byte range, non-square) force
 //! `inverse` on bytes in range, matching C `SELECT_IF` + default
-//! `selectatr=INVERSE`.
+//! `selectatr=INVERSE`. Visible whitespace uses C `vspace`/`vtab`/`vrtn` +
+//! `vwsatr` (JOE `((atr & vwsmask) | (vwsatr & ~vwsmask))` default).
 
 const std = @import("std");
 const terminal = @import("terminal");
@@ -22,6 +23,7 @@ const render = @import("render");
 const Attribute = terminal.Attribute;
 const TruecolorPalette = terminal.TruecolorPalette;
 const ViewTables = render.ViewTables;
+const VisibleWs = render.VisibleWs;
 
 const COMPOSE = 4;
 const NO_MORE_DATA: c_int = -256;
@@ -48,6 +50,10 @@ pub export var zig_bw_lgen_enabled: c_int = 0;
 
 extern var attr_buf: [*c]c_int;
 extern var attr_size: c_int;
+extern var vwsatr: c_int;
+extern var vspace: c_int;
+extern var vtab: c_int;
+extern var vrtn: c_int;
 
 extern fn parse(syntax: ?*HighSyntax, line: ?*P, h_state: HighlightState, charmap: ?*Charmap) HighlightState;
 extern fn pdup(p: ?*P, tr: [*:0]const u8) ?*P;
@@ -104,6 +110,7 @@ pub export fn zig_bw_lgen(
     vm_subst_len: c_int,
     vm_urls: ?[*]?[*:0]u8,
     vm_urls_len: c_int,
+    visiblews: c_int,
 ) c_int {
     if (zig_bw_lgen_enabled == 0) return -1;
     if (t == null or screen == null or attr_row == null or p == null) return -1;
@@ -143,13 +150,27 @@ pub export fn zig_bw_lgen(
 
     const copy_tmp = pdup(p, "zig_bw_lgen_copy") orelse return -1;
     defer prm(copy_tmp);
+    var saw_eol = false;
     while (true) {
         const ch = pgetb(copy_tmp);
-        if (ch == NO_MORE_DATA or ch == '\n') break;
+        if (ch == NO_MORE_DATA) break;
+        if (ch == '\n') {
+            saw_eol = true;
+            break;
+        }
         if (line_buf.items.len >= max_line_bytes) break;
         line_buf.append(alloc, @intCast(ch)) catch return -1;
     }
+    // Include trailing `\n` so native paint emits `vrtn` (EOF-without-NL omits it).
+    if (saw_eol and visiblews != 0) {
+        line_buf.append(alloc, '\n') catch return -1;
+    }
     const line = line_buf.items;
+    // Attr/mark/view tables are per content byte — exclude synthetic `\n`.
+    const content = if (saw_eol and visiblews != 0 and line.len > 0 and line[line.len - 1] == '\n')
+        line[0 .. line.len - 1]
+    else
+        line;
 
     const pal: ?[]const i32 = if (palette != null and palette_len > 0)
         palette.?[0..@intCast(palette_len)]
@@ -160,25 +181,25 @@ pub export fn zig_bw_lgen(
     defer if (attrs_owned) |a| alloc.free(a);
     var native_attrs: ?[]const Attribute = null;
 
-    const use_attr_buf = (highlight or preparsed) and attr_buf != null and attr_size > 0 and line.len > 0;
+    const use_attr_buf = (highlight or preparsed) and attr_buf != null and attr_size > 0 and content.len > 0;
     if (use_attr_buf) {
         // Hybrid `parse`/`pgetc` fills one atr per character, not per byte.
         // Viewmode ASCII-mostly lines: char index ≡ byte index after C mutations.
-        const nchar = @min(utf8CharCount(line), @as(usize, @intCast(attr_size)));
+        const nchar = @min(utf8CharCount(content), @as(usize, @intCast(attr_size)));
         const char_attrs = alloc.alloc(Attribute, nchar) catch return -1;
         defer alloc.free(char_attrs);
         render.fromHybridRow(char_attrs, attr_buf[0..nchar], pal);
 
-        const byte_attrs = alloc.alloc(Attribute, line.len) catch return -1;
-        expandCharAttrsToBytes(line, char_attrs, byte_attrs);
+        const byte_attrs = alloc.alloc(Attribute, content.len) catch return -1;
+        expandCharAttrsToBytes(content, char_attrs, byte_attrs);
         attrs_owned = byte_attrs;
         native_attrs = byte_attrs;
     }
 
     // Linear mark inverse (JOE non-square `SELECT_IF(byte >= from && byte < to)`).
-    if (from != to and line.len > 0) {
+    if (from != to and content.len > 0) {
         if (attrs_owned == null) {
-            const byte_attrs = alloc.alloc(Attribute, line.len) catch return -1;
+            const byte_attrs = alloc.alloc(Attribute, content.len) catch return -1;
             @memset(byte_attrs, .none);
             attrs_owned = byte_attrs;
         }
@@ -197,8 +218,8 @@ pub export fn zig_bw_lgen(
     var view_tables: ViewTables = undefined;
     var view_ptr: ?*const ViewTables = null;
 
-    if (preparsed and line.len > 0) {
-        const n = line.len;
+    if (preparsed and content.len > 0) {
+        const n = content.len;
 
         const hide_slice: []u8 = blk: {
             if (vm_hide != null and vm_hide_len > 0) {
@@ -253,6 +274,20 @@ pub export fn zig_bw_lgen(
 
     const base_attr = terminal.attributeFromHybrid(defatr, pal);
 
+    var vws_storage: VisibleWs = undefined;
+    var vws_ptr: ?*const VisibleWs = null;
+    if (visiblews != 0) {
+        const style = terminal.attributeFromHybrid(vwsatr, pal);
+        vws_storage = .{
+            .space = if (vspace > 0) @intCast(vspace) else 0xb7,
+            .tab = if (vtab > 0) @intCast(vtab) else 0x2192,
+            .rtn = if (vrtn > 0) @intCast(vrtn) else 0x21b5,
+            .style = .{ .dim = style.dim, .fg = style.fg },
+            .clear_fg = true,
+        };
+        vws_ptr = &vws_storage;
+    }
+
     var scratch = terminal.Screen.init(alloc, win_w, 1) catch return -1;
     defer scratch.deinit();
 
@@ -262,6 +297,7 @@ pub export fn zig_bw_lgen(
         .offset = if (scr_offset < 0) 0 else @intCast(scr_offset),
         .attrs = native_attrs,
         .view = view_ptr,
+        .visible_ws = vws_ptr,
     };
     _ = render.lgenLine(&scratch, 0, 0, win_w, line, opts, base_attr);
 

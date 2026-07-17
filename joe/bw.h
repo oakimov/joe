@@ -45,6 +45,9 @@ extern int bg_curlin;	/* Attribute value for the current line */
 extern int curlinmask;	/* Mask for the current line */
 extern int vwsatr;      /* Attribute value for visible whitespace */
 extern int vwsmask;     /* Attribute mask for visible whitespace */
+extern int vspace;      /* Glyph for visible space (Zig bw_lgen reads) */
+extern int vtab;        /* Glyph for visible tab */
+extern int vrtn;        /* Glyph for visible return */
 
 void bwfllw(W *w);
 void bwfllwt(W *w);

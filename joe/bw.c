@@ -16,7 +16,7 @@ extern int zig_bw_lgen(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
 	HIGHLIGHT_STATE st, struct charmap *charmap, int tab, int defatr,
 	int *palette, int palette_len, off_t from, off_t to, off_t line_byte,
 	int viewmode, char *vm_hide, int vm_hide_len, int *vm_subst, int vm_subst_len,
-	char **vm_urls, int vm_urls_len);
+	char **vm_urls, int vm_urls_len, int visiblews);
 
 /* Attributes for line numbers, and current line */
 int bg_linum = 0;
@@ -36,10 +36,10 @@ int selectmask = ~INVERSE;
 int vwsatr = DIM;
 int vwsmask = ~(DIM | FG_MASK);
 
-/* Characters used for visible whitespace */
-static int vspace = 0;
-static int vtab = 0;
-static int vrtn = 0;
+/* Characters used for visible whitespace (Zig bw_lgen reads these). */
+int vspace = 0;
+int vtab = 0;
+int vrtn = 0;
 
 static P *getto(P *p, P *cur, P *top, off_t line)
 {
@@ -666,13 +666,12 @@ static int lgen_core(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
          			/* Starting column to display */
               			/* Range for marked block */
 {
-	/* Path A: Zig-native paint for plain UTF-8 lines (+ linear marks + viewmode tables).
-	 * Keep C for square / ansi / visiblews. Table padded rows skip lgen_core entirely.
-	 * dspasis lives in outatr. */
+	/* Path A: Zig-native paint for plain UTF-8 lines (+ linear marks + viewmode
+	 * tables + visiblews). Keep C for square / ansi. Table padded rows skip
+	 * lgen_core entirely. dspasis lives in outatr. */
 	if (zig_bw_lgen_enabled
 	    && !bw->o.ansi
 	    && !square
-	    && !bw->o.visiblews
 	    && p && p->b && p->b->o.charmap && p->b->o.charmap->type) {
 		int defatr = (bw->o.hiline && bw->cursor->line == y - bw->y + bw->top->line)
 			? (bg_text & curlinmask) | bg_curlin
@@ -683,7 +682,8 @@ static int lgen_core(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 			viewmode_skip_parse,
 			viewmode_skip_parse ? viewmode_hide : NULL, viewmode_hide_size,
 			viewmode_skip_parse ? viewmode_substitute : NULL, viewmode_substitute_size,
-			viewmode_skip_parse ? viewmode_link_url : NULL, viewmode_link_url_size);
+			viewmode_skip_parse ? viewmode_link_url : NULL, viewmode_link_url_size,
+			bw->o.visiblews);
 		if (z >= 0)
 			return z;
 	}

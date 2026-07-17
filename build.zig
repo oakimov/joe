@@ -112,6 +112,26 @@ pub fn build(b: *std.Build) void {
     // ── Install ──────────────────────────────────────────────────────
     b.installArtifact(exe);
 
+    // ── Zig-native terminal redesign (Phase 3) ────────────────────
+    // Parallel module tree; not yet replacing hybrid src/{tty,termcap,scrn}.zig.
+    const terminal_mod = b.createModule(.{
+        .root_source_file = b.path("src/terminal/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    terminal_mod.linkSystemLibrary("ncurses", .{});
+    terminal_mod.addIncludePath(.{ .cwd_relative = "/opt/local/include" });
+    terminal_mod.addLibraryPath(.{ .cwd_relative = "/opt/local/lib" });
+
+    const terminal_tests = b.addTest(.{
+        .name = "terminal-tests",
+        .root_module = terminal_mod,
+    });
+    const run_terminal_tests = b.addRunArtifact(terminal_tests);
+    const terminal_test_step = b.step("terminal-test", "Run Zig-native terminal unit tests");
+    terminal_test_step.dependOn(&run_terminal_tests.step);
+
     // ── Run step ─────────────────────────────────────────────────────
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());

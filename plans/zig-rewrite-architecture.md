@@ -11,6 +11,7 @@
 - ✅ Phase 2 complete (`rc` landed)
 - ✅ Hybrid Phase 3: `colors` + `syntax` + `termcap` + `tty` + `scrn` landed (replaces `joe/colors.c` + `joe/syntax.c` + `joe/termcap.c` + `joe/tty.c` + `joe/scrn.c`, 196/196 green)
 - ✅ Hybrid Phase 4: `kbd` + `macro` + `cmd` landed (replaces `joe/kbd.c` + `joe/macro.c` + `joe/cmd.c`, 196/196 green)
+- 🚧 Phase 3 redesign started: Zig-native `src/terminal/{terminfo,tty,pty,screen}.zig` scaffolded + unit-tested (`zig build terminal-test`); not yet replacing hybrid tty/termcap/scrn in the live binary
 - **Integration tests:** full suite **196/196 OK** (including viewmode)
 - **Recent hybrid fixes:** `binsb` uses `hallocFresh()` so freelist corruption cannot reclaim a still-live gap header and zero its `hole` (was wiping history into NULs/`@` on Command: prompt after 2× `blkcpy`); `inschn` skips `hfree` when `p.hdr == a`; `brm` uses `vsrm(current_dir)`; plus prior `brvs`/`vstrunc`, `binsmq`, `charmap->type`, unicode/`p_goto_bol`/`binsm`/`iskey` fixes
 - **Binary size:** Debug hybrid build via `zig build`
@@ -721,10 +722,10 @@ The build is always working — start with a binary that compiles and runs, then
 - At this point: can load config, parse key bindings, but no rendering
 
 ### Phase 3: Terminal & Color (4-5 weeks) — IN PROGRESS
-- ⬜ `terminal/terminfo.zig` — terminfo binding
-- ⬜ `terminal/tty.zig` — raw mode, signal handling
-- ⬜ `terminal/pty.zig` — pseudo-terminal for shell windows
-- ⬜ `terminal/screen.zig` — escape sequence emitter + screen buffer
+- ✅ `terminal/terminfo.zig` — Zig-native terminfo binding (`setupterm`/`tiget*`; unit-tested; not wired into live joe yet)
+- ✅ `terminal/tty.zig` — Zig-native raw mode + size + SIGWINCH helper (unit-tested; parallel to hybrid `src/tty.zig`)
+- ✅ `terminal/pty.zig` — Zig-native `openpty`/`forkpty`/`login_tty` wrappers (unit-tested)
+- ✅ `terminal/screen.zig` — Zig-native cell grid + dirty-row flush via ANSI (obuf-style out buffer; cell-diff deferred to Phase 6; unit-tested)
 - ✅ `colors.zig` — hybrid C-ABI port of jcf parser + attribute resolution (replaces `joe/colors.c`, 196 tests pass)
 - ✅ `syntax.zig` — hybrid C-ABI port of jsf parser + DFA engine (replaces `joe/syntax.c`, 196 tests pass)
 - ✅ `termcap.zig` — hybrid C-ABI port of termcap loader + `texec`/`tcost`/`tcompile` (replaces `joe/termcap.c`, non-TERMINFO path, 196 tests pass)

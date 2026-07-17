@@ -10,13 +10,81 @@ const testing = std.testing;
 
 const screen = @import("screen.zig");
 
+fn onResize(w: *screen.Window, wi: u16, he: u16) void {
+    const t = w.asText() orelse return;
+    t.resize(wi, he);
+}
+
+fn onMove(w: *screen.Window, x: u16, y: i16) void {
+    const t = w.asText() orelse return;
+    t.move(x, y);
+}
+
 pub const vtable: screen.WindowVTable = .{
     .kind = .text,
     .context = "main",
+    .on_resize = onResize,
+    .on_move = onMove,
 };
+
+/// JOE `!staen` — when true, a top window (`y == 0`) still reserves a status row if `h > 1`.
+pub var status_enabled: bool = true;
 
 pub const TextWindow = struct {
     parent: *screen.Window,
+    /// Content-area geometry (JOE `BW` x/y/w/h), excluding status row + lincols gutter.
+    x: u16 = 0,
+    y: i16 = 0,
+    w: u16 = 0,
+    h: u16 = 0,
+    /// Line-number gutter columns — JOE `bw->lincols`.
+    lincols: u16 = 0,
+    /// Whether a status row is currently reserved — JOE `tw->staon`.
+    status_on: bool = false,
+
+    pub fn init(parent: *screen.Window) TextWindow {
+        var self: TextWindow = .{ .parent = parent };
+        self.syncFromParent();
+        return self;
+    }
+
+    /// JOE `movetw`/`resizetw` status predicate: `(y || !staen) && h > 1`.
+    pub fn shouldShowStatus(y: i16, he: u16) bool {
+        return he > 1 and (y != 0 or status_enabled);
+    }
+
+    pub fn syncFromParent(self: *TextWindow) void {
+        const he = if (self.parent.h != 0) self.parent.h else self.parent.req_h;
+        self.move(self.parent.x, self.parent.y);
+        self.resize(self.parent.w, he);
+    }
+
+    /// JOE `movetw` geometry only (no SCRN scroll side effects).
+    pub fn move(self: *TextWindow, x: u16, y: i16) void {
+        const he = if (self.parent.h != 0) self.parent.h else self.parent.req_h;
+        self.status_on = shouldShowStatus(y, he);
+        self.x = x + self.lincols;
+        self.y = if (self.status_on) y + 1 else y;
+    }
+
+    /// JOE `resizetw` geometry only (no VT/`nscrldn` side effects).
+    pub fn resize(self: *TextWindow, wi: u16, he: u16) void {
+        self.status_on = shouldShowStatus(self.parent.y, he);
+        self.w = wi -| self.lincols;
+        self.h = if (self.status_on) he -| 1 else he;
+    }
+
+    /// Update gutter width and recompute content geometry — JOE `disptw` lincols change.
+    pub fn setLincols(self: *TextWindow, cols: u16) void {
+        self.lincols = cols;
+        self.syncFromParent();
+    }
+
+    /// Screen row of the status line when reserved; otherwise `null`.
+    pub fn statusRow(self: *const TextWindow) ?i16 {
+        if (!self.status_on) return null;
+        return self.parent.y;
+    }
 };
 
 /// Snapshot of the values JOE's `stagen()` reads from `BW` / options / globals.
@@ -576,4 +644,72 @@ test "stagen keyseq and char codes" {
     defer testing.allocator.free(got);
     // "^Ax " (already 4 cols) + " 79" + "4f"
     try testing.expectEqualStrings("^Ax  794f", got);
+}
+
+test "TextWindow move/resize reserve status and lincols" {
+    const prev = status_enabled;
+    defer status_enabled = prev;
+    status_enabled = true;
+
+    var scr = try screen.Screen.init(testing.allocator, 80, 24);
+    defer scr.deinit();
+    const win = try scr.createText(null, null, 24);
+    scr.layout();
+
+    const obj = win.asText().?;
+    try testing.expect(obj.status_on);
+    try testing.expectEqual(@as(i16, 1), obj.y);
+    try testing.expectEqual(@as(u16, 23), obj.h);
+    try testing.expectEqual(@as(u16, 80), obj.w);
+    try testing.expectEqual(@as(?i16, 0), obj.statusRow());
+
+    obj.setLincols(4);
+    try testing.expectEqual(@as(u16, 4), obj.lincols);
+    try testing.expectEqual(@as(u16, 4), obj.x);
+    try testing.expectEqual(@as(u16, 76), obj.w);
+    try testing.expectEqual(@as(u16, 23), obj.h);
+
+    // h==1 never shows status.
+    vtable.on_resize.?(win, 80, 1);
+    try testing.expect(!obj.status_on);
+    try testing.expectEqual(@as(u16, 1), obj.h);
+    try testing.expectEqual(@as(u16, 76), obj.w); // lincols still applied
+    try testing.expectEqual(@as(?i16, null), obj.statusRow());
+}
+
+test "TextWindow vtable hooks honor status_enabled and off-top windows" {
+    const prev = status_enabled;
+    defer status_enabled = prev;
+
+    var scr = try screen.Screen.init(testing.allocator, 40, 24);
+    defer scr.deinit();
+    const a = try scr.createText(null, null, 12);
+    const b = try scr.createText(a.id, null, 12);
+    scr.layout();
+
+    const top = a.asText().?;
+    const bot = b.asText().?;
+
+    status_enabled = false;
+    vtable.on_move.?(a, a.x, a.y);
+    vtable.on_resize.?(a, a.w, a.h);
+    try testing.expect(!top.status_on); // y==0 and !status_enabled
+    try testing.expectEqual(a.y, top.y);
+    try testing.expectEqual(a.h, top.h);
+
+    // Non-top window still gets a status row.
+    vtable.on_move.?(b, b.x, b.y);
+    vtable.on_resize.?(b, b.w, b.h);
+    try testing.expect(bot.status_on);
+    try testing.expectEqual(@as(i16, b.y + 1), bot.y);
+    try testing.expectEqual(@as(u16, b.h - 1), bot.h);
+
+    status_enabled = true;
+    vtable.on_move.?(a, 2, 0);
+    vtable.on_resize.?(a, 30, 10);
+    try testing.expect(top.status_on);
+    try testing.expectEqual(@as(u16, 2), top.x);
+    try testing.expectEqual(@as(i16, 1), top.y);
+    try testing.expectEqual(@as(u16, 30), top.w);
+    try testing.expectEqual(@as(u16, 9), top.h);
 }

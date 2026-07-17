@@ -405,7 +405,7 @@ pub const Screen = struct {
         const w = try self.createWindow(&tw.vtable, after, null, org, height, null);
         errdefer self.abandonNewWindow(w);
         const obj = try self.allocator.create(tw.TextWindow);
-        obj.* = .{ .parent = w };
+        obj.* = tw.TextWindow.init(w);
         w.object = obj;
         return w;
     }
@@ -784,7 +784,7 @@ pub const Screen = struct {
         const other: u16 = w.h - half;
         self.setHeight(w, other);
         // create after w, new family, no org (force others — but we already resized w)
-        const neu = try self.createWindow(&tw.vtable, w.id, null, null, half, null);
+        const neu = try self.createText(w.id, null, half);
         self.layout();
         return neu;
     }
@@ -1053,6 +1053,16 @@ test "splitText halves a main window" {
     try testing.expectEqual(@as(u16, 24), a.h + b.h);
     try testing.expect(a.h >= fit_height);
     try testing.expect(b.h >= fit_height);
+
+    // Both sides must own TextWindow objects synced by layout watom hooks.
+    const a_tw = a.asText() orelse return error.TestUnexpectedResult;
+    const b_tw = b.asText() orelse return error.TestUnexpectedResult;
+    try testing.expect(a_tw.status_on);
+    try testing.expect(b_tw.status_on);
+    try testing.expectEqual(@as(u16, a.h - 1), a_tw.h);
+    try testing.expectEqual(@as(u16, b.h - 1), b_tw.h);
+    try testing.expectEqual(@as(i16, a.y + 1), a_tw.y);
+    try testing.expectEqual(@as(i16, b.y + 1), b_tw.y);
 }
 
 test "setHelpLines reserves wind rows" {
@@ -1266,6 +1276,10 @@ test "create helpers attach typed objects" {
     scr.layout();
     try testing.expect(twnd.asText() != null);
     try testing.expect(twnd.asText().?.parent == twnd);
+    const tw_obj = twnd.asText().?;
+    try testing.expect(tw_obj.status_on);
+    try testing.expectEqual(@as(u16, 23), tw_obj.h);
+    try testing.expectEqual(@as(i16, 1), tw_obj.y);
 
     const prompt = try scr.createPrompt(twnd.id, twnd.id, twnd.id, 1, "File: ");
     scr.layout();

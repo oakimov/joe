@@ -9,9 +9,28 @@ const testing = std.testing;
 
 const screen = @import("screen.zig");
 
+fn onResize(w: *screen.Window, wi: u16, he: u16) void {
+    const q = w.asQuery() orelse return;
+    q.resize(wi, he);
+}
+
+fn onMove(w: *screen.Window, x: u16, y: i16) void {
+    const q = w.asQuery() orelse return;
+    q.x = x;
+    q.y = y;
+}
+
+fn onAbort(w: *screen.Window) i32 {
+    const q = w.asQuery() orelse return -1;
+    return q.abort();
+}
+
 pub const vtable: screen.WindowVTable = .{
     .kind = .query,
     .context = "query",
+    .on_resize = onResize,
+    .on_move = onMove,
+    .on_abort = onAbort,
 };
 
 /// Creation / focus variants — JOE `mkqw` / `mkqwna` / `mkqwnsr`.
@@ -123,6 +142,11 @@ pub const QueryWindow = struct {
     org_w: u16 = 0,
     /// Height booked at create time (JOE `org_h`).
     org_h: u16 = 0,
+    /// Window geometry mirror for paint/layout hooks (JOE reads `W` directly).
+    w: u16 = 0,
+    h: u16 = 0,
+    x: u16 = 0,
+    y: i16 = 0,
     on_key: ?QueryFn = null,
     on_abort: ?AbortFn = null,
     object: ?*anyopaque = null,
@@ -132,12 +156,17 @@ pub const QueryWindow = struct {
         const prompt = try allocator.dupe(u8, prompt_text);
         errdefer allocator.free(prompt);
         const h = promptHeight(prompt_text, parent.w, byteWidth);
+        const booked: u16 = @intCast(@min(h, std.math.maxInt(u16)));
         return .{
             .parent = parent,
             .prompt = prompt,
             .mode = mode,
             .org_w = parent.w,
-            .org_h = @intCast(@min(h, std.math.maxInt(u16))),
+            .org_h = booked,
+            .w = parent.w,
+            .h = if (parent.h != 0) parent.h else booked,
+            .x = parent.x,
+            .y = parent.y,
             .target = parent.target orelse parent.main,
         };
     }
@@ -145,6 +174,12 @@ pub const QueryWindow = struct {
     pub fn deinit(self: *QueryWindow, allocator: Allocator) void {
         allocator.free(self.prompt);
         self.* = undefined;
+    }
+
+    /// Keep geometry in sync with the parent window after layout.
+    pub fn resize(self: *QueryWindow, wi: u16, he: u16) void {
+        self.w = wi;
+        self.h = he;
     }
 
     pub fn promptLen(self: *const QueryWindow) usize {
@@ -251,4 +286,43 @@ test "QueryWindow leave_cursor mode height for multi-line prompt" {
     try testing.expect(qw_win.org_h > 1);
     try testing.expectEqual(qw_win.org_h, @as(u16, @intCast(qw_win.heightForWidth(12))));
     try testing.expectEqualStrings("querya", qw_win.mode.contextName());
+}
+
+test "QueryWindow vtable resize/move/abort hooks" {
+    var scr = try screen.Screen.init(testing.allocator, 40, 24);
+    defer scr.deinit();
+    const twnd = try scr.createText(null, null, 24);
+    scr.layout();
+    const query = try scr.createQuery(twnd.id, twnd.id, twnd.id, "Kill (y,n,^C)?", .capture);
+    scr.layout();
+
+    const obj = query.asQuery().?;
+    try testing.expectEqual(query.w, obj.w);
+    try testing.expectEqual(query.h, obj.h);
+    try testing.expectEqual(query.x, obj.x);
+    try testing.expectEqual(query.y, obj.y);
+
+    vtable.on_resize.?(query, 20, 2);
+    try testing.expectEqual(@as(u16, 20), obj.w);
+    try testing.expectEqual(@as(u16, 2), obj.h);
+
+    vtable.on_move.?(query, 3, 5);
+    try testing.expectEqual(@as(u16, 3), obj.x);
+    try testing.expectEqual(@as(i16, 5), obj.y);
+
+    var aborted = false;
+    const Cbs = struct {
+        aborted: *bool,
+        fn onAbort(target: screen.WindowId, object: ?*anyopaque) i32 {
+            _ = target;
+            const ctx: *@This() = @ptrCast(@alignCast(object.?));
+            ctx.aborted.* = true;
+            return 9;
+        }
+    };
+    var ctx = Cbs{ .aborted = &aborted };
+    obj.object = &ctx;
+    obj.on_abort = Cbs.onAbort;
+    try testing.expectEqual(@as(i32, 9), vtable.on_abort.?(query));
+    try testing.expect(aborted);
 }

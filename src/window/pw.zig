@@ -9,9 +9,28 @@ const testing = std.testing;
 
 const screen = @import("screen.zig");
 
+fn onResize(w: *screen.Window, wi: u16, he: u16) void {
+    const p = w.asPrompt() orelse return;
+    p.resize(wi, he);
+}
+
+fn onMove(w: *screen.Window, x: u16, y: i16) void {
+    const p = w.asPrompt() orelse return;
+    p.x = x;
+    p.y = y;
+}
+
+fn onAbort(w: *screen.Window) i32 {
+    const p = w.asPrompt() orelse return -1;
+    return p.abort();
+}
+
 pub const vtable: screen.WindowVTable = .{
     .kind = .prompt,
     .context = "prompt",
+    .on_resize = onResize,
+    .on_move = onMove,
+    .on_abort = onAbort,
 };
 
 /// Mirrors JOE `PWFLAG_*`.
@@ -94,6 +113,11 @@ pub const PromptWindow = struct {
     changed: bool = false,
     history: ?*History = null,
     flags: PromptFlags = .{},
+    /// Window geometry mirror for paint/layout hooks (JOE `disppw` reads `W`).
+    w: u16 = 0,
+    h: u16 = 0,
+    x: u16 = 0,
+    y: i16 = 0,
     on_submit: ?PromptFn = null,
     on_abort: ?AbortFn = null,
     on_tab: ?TabFn = null,
@@ -106,6 +130,10 @@ pub const PromptWindow = struct {
         return .{
             .parent = parent,
             .prompt = try allocator.dupe(u8, prompt_text),
+            .w = parent.w,
+            .h = if (parent.h != 0) parent.h else 1,
+            .x = parent.x,
+            .y = parent.y,
             .target = parent.target orelse parent.main,
         };
     }
@@ -114,6 +142,12 @@ pub const PromptWindow = struct {
         allocator.free(self.prompt);
         self.line.deinit(allocator);
         self.* = undefined;
+    }
+
+    /// Keep geometry in sync with the parent window after layout.
+    pub fn resize(self: *PromptWindow, wi: u16, he: u16) void {
+        self.w = wi;
+        self.h = he;
     }
 
     pub fn setLine(self: *PromptWindow, allocator: Allocator, text: []const u8) !void {
@@ -289,4 +323,43 @@ test "PromptWindow abort and tab callbacks" {
     try testing.expect(aborted);
     try testing.expectEqual(@as(i32, 1), pw_win.complete('\t'));
     try testing.expectEqual(@as(u8, '\t'), tab_key);
+}
+
+test "PromptWindow vtable resize/move/abort hooks" {
+    var scr = try screen.Screen.init(testing.allocator, 80, 24);
+    defer scr.deinit();
+    const twnd = try scr.createText(null, null, 24);
+    scr.layout();
+    const prompt = try scr.createPrompt(twnd.id, twnd.id, twnd.id, 1, "File: ");
+    scr.layout();
+
+    const obj = prompt.asPrompt().?;
+    try testing.expectEqual(prompt.w, obj.w);
+    try testing.expectEqual(prompt.h, obj.h);
+    try testing.expectEqual(prompt.x, obj.x);
+    try testing.expectEqual(prompt.y, obj.y);
+
+    vtable.on_resize.?(prompt, 60, 1);
+    try testing.expectEqual(@as(u16, 60), obj.w);
+    try testing.expectEqual(@as(u16, 1), obj.h);
+
+    vtable.on_move.?(prompt, 4, 9);
+    try testing.expectEqual(@as(u16, 4), obj.x);
+    try testing.expectEqual(@as(i16, 9), obj.y);
+
+    var aborted = false;
+    const Cbs = struct {
+        aborted: *bool,
+        fn onAbort(target: screen.WindowId, object: ?*anyopaque) i32 {
+            _ = target;
+            const ctx: *@This() = @ptrCast(@alignCast(object.?));
+            ctx.aborted.* = true;
+            return 4;
+        }
+    };
+    var ctx = Cbs{ .aborted = &aborted };
+    obj.object = &ctx;
+    obj.on_abort = Cbs.onAbort;
+    try testing.expectEqual(@as(i32, 4), vtable.on_abort.?(prompt));
+    try testing.expect(aborted);
 }

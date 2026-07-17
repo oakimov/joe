@@ -424,6 +424,8 @@ pub const Screen = struct {
         const obj = try self.allocator.create(pw.PromptWindow);
         errdefer self.allocator.destroy(obj);
         obj.* = try pw.PromptWindow.init(self.allocator, w, prompt_text);
+        // Window.h is 0 until layout; seed prompt geometry with the booked height.
+        obj.resize(self.width, height);
         w.object = obj;
         return w;
     }
@@ -446,6 +448,8 @@ pub const Screen = struct {
         obj.* = try qw.QueryWindow.init(self.allocator, w, prompt_text, mode);
         obj.org_w = self.width;
         obj.org_h = height;
+        // Window.h is 0 until layout; seed query geometry with the booked height.
+        obj.resize(self.width, height);
         w.object = obj;
         return w;
     }

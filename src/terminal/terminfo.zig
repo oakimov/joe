@@ -72,6 +72,12 @@ pub const Caps = struct {
     /// Forward / back tab (`ta`/`bt`) for relative cursor costing.
     ta: ?[:0]const u8 = null,
     bt: ?[:0]const u8 = null,
+    /// Absolute column / row address (`hpa`/`vpa`) — JOE `ch`/`cv`.
+    hpa: ?[:0]const u8 = null,
+    vpa: ?[:0]const u8 = null,
+    /// Home / last-line (`home`/`ll`) — JOE `ho`/`ll`.
+    home: ?[:0]const u8 = null,
+    ll: ?[:0]const u8 = null,
 };
 
 pub const TermInfo = struct {
@@ -138,6 +144,10 @@ pub const TermInfo = struct {
             .rc = presentStr("rc"),
             .ta = presentStr("ta"),
             .bt = presentStr("bt"),
+            .hpa = presentStr("hpa"),
+            .vpa = presentStr("vpa"),
+            .home = presentStr("home"),
+            .ll = presentStr("ll"),
         };
     }
 
@@ -327,6 +337,24 @@ pub const TermInfo = struct {
     pub fn hasHardwareTabs(self: TermInfo) bool {
         return self.getFlag("pt");
     }
+
+    /// Format horizontal position absolute (`hpa`) for 0-based column `x`.
+    /// Returns null when the cap is missing or tiparm fails — caller should
+    /// fall back to ANSI `CSI col G` (CHA).
+    pub fn formatHpa(self: TermInfo, x: u16) ?[:0]const u8 {
+        const fmt = self.caps.hpa orelse return null;
+        const p = c.tiparm(fmt.ptr, @as(c_int, x)) orelse return null;
+        return std.mem.span(p);
+    }
+
+    /// Format vertical position absolute (`vpa`) for 0-based row `y`.
+    /// Returns null when the cap is missing or tiparm fails — caller should
+    /// fall back to ANSI `CSI row d` (VPA).
+    pub fn formatVpa(self: TermInfo, y: u16) ?[:0]const u8 {
+        const fmt = self.caps.vpa orelse return null;
+        const p = c.tiparm(fmt.ptr, @as(c_int, y)) orelse return null;
+        return std.mem.span(p);
+    }
 };
 
 test "StrCap cancelled sentinel" {
@@ -408,4 +436,11 @@ test "TermInfo.init against current TERM" {
     _ = ti.tabWidth();
     _ = ti.destructiveTabs();
     _ = ti.hasHardwareTabs();
+    // Soft-check absolute column/row + home/last-line caps when present.
+    _ = ti.caps.hpa;
+    _ = ti.caps.vpa;
+    _ = ti.caps.home;
+    _ = ti.caps.ll;
+    if (ti.caps.hpa != null) _ = ti.formatHpa(0);
+    if (ti.caps.vpa != null) _ = ti.formatVpa(0);
 }

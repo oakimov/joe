@@ -29,4 +29,5 @@ comptime {
     _ = @import("termcap.zig");
     _ = @import("tty.zig");
     _ = @import("scrn.zig");
+    _ = @import("kbd.zig");
 }

@@ -10,6 +10,7 @@
 - ✅ Phase 2 (complete core utilities): `hash`, `va`, `vs`, `queue`, `builtin`, `blocks`, `utils`, `frag`, `undo`, `lattr`, `charmap`, `regex`, `options`, `rc` (196/196 green)
 - ✅ Phase 2 complete (`rc` landed)
 - ✅ Hybrid Phase 3: `colors` + `syntax` + `termcap` + `tty` + `scrn` landed (replaces `joe/colors.c` + `joe/syntax.c` + `joe/termcap.c` + `joe/tty.c` + `joe/scrn.c`, 196/196 green)
+- ✅ Hybrid Phase 4 (start): `kbd` landed (replaces `joe/kbd.c`, 196/196 green)
 - **Integration tests:** full suite **196/196 OK** (including viewmode)
 - **Recent hybrid fixes:** `binsb` uses `hallocFresh()` so freelist corruption cannot reclaim a still-live gap header and zero its `hole` (was wiping history into NULs/`@` on Command: prompt after 2× `blkcpy`); `inschn` skips `hfree` when `p.hdr == a`; `brm` uses `vsrm(current_dir)`; plus prior `brvs`/`vstrunc`, `binsmq`, `charmap->type`, unicode/`p_goto_bol`/`binsm`/`iskey` fixes
 - **Binary size:** Debug hybrid build via `zig build`
@@ -732,10 +733,10 @@ The build is always working — start with a binary that compiles and runs, then
 - Unit tests per module
 - At this point: can display text with syntax highlighting
 
-### Phase 4: Keyboard & Macros (2-3 weeks) — NOT STARTED
-- ⬜ `keyboard.zig` — KBD, KMAP, radix tree
-- ⬜ `macro.zig` — macro recording/playback
-- ⬜ `cmd.zig` — command table (replaces cmd.h)
+### Phase 4: Keyboard & Macros (2-3 weeks) — IN PROGRESS
+- ✅ `kbd.zig` — hybrid C-ABI port replacing `joe/kbd.c` (KBD/KMAP/context, dokey/kadd/kcpy/kdel/ukeymap; 196 tests)
+- ⬜ `macro.zig` — macro recording/playback (hybrid: `joe/macro.c`)
+- ⬜ `cmd.zig` — command table (hybrid: `joe/cmd.c`)
 - Unit tests
 - At this point: can type, navigate, edit with keyboard
 

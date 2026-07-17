@@ -284,6 +284,16 @@ pub const Screen = struct {
     /// vertical shift (hardware scroll). Default true: ANSI IL/DL fallbacks
     /// are always available.
     use_scroll: bool = true,
+    /// When true, `flush` / line-magic positioning uses absolute CUP only.
+    /// Needed for hybrid swap under `am` terminals: painting the last column
+    /// can wrap the physical cursor while logical `cursor_*` stays put, so
+    /// relative `moveTo` then corrupts the screen. Default false keeps the
+    /// smarter `moveTo` matrix for unit tests / future native tty.
+    flush_cup_only: bool = false,
+    /// When false, logical `cursor_*` does not match the physical terminal
+    /// (e.g. hybrid swap preset the final cursor before `flush`). Forces the
+    /// next `flushMoveTo` to emit CUP even if coordinates match.
+    cursor_valid: bool = true,
     /// Fallback tab width when terminfo `it`/`tw` is absent (JOE default 8).
     tab_width: u16 = 8,
     /// Optional sequence overrides (unit tests / hosts without terminfo).
@@ -1186,6 +1196,22 @@ pub const Screen = struct {
         try self.out.appendSlice(self.allocator, "m");
     }
 
+    /// Position cursor for flush paths. Absolute CUP when `flush_cup_only`
+    /// or when `cursor_valid` is false (physical position unknown).
+    fn flushMoveTo(self: *Screen, x: u16, y: u16) !void {
+        if (self.flush_cup_only or !self.cursor_valid) {
+            const tx = @min(x, self.width -| 1);
+            const ty = @min(y, self.height -| 1);
+            if (self.cursor_valid and tx == self.cursor_x and ty == self.cursor_y) return;
+            try self.appendCup(tx, ty);
+            self.cursor_x = tx;
+            self.cursor_y = ty;
+            self.cursor_valid = true;
+            return;
+        }
+        try self.moveTo(x, y);
+    }
+
     fn appendCup(self: *Screen, x: u16, y: u16) !void {
         if (self.terminfo) |ti| {
             if (ti.formatCup(x, y)) |seq| {
@@ -1731,7 +1757,7 @@ pub const Screen = struct {
     }
 
     fn applyLineMagic(self: *Screen, y: u16, op: LineMagic) !void {
-        try self.moveTo(op.at, y);
+        try self.flushMoveTo(op.at, y);
         switch (op.kind) {
             .delete => {
                 try self.appendDch(op.n);
@@ -1790,7 +1816,7 @@ pub const Screen = struct {
 
                 // Blank-none tail → EL (cheaper than painting spaces).
                 if (self.rowTailIsBlankNone(y, x) and self.rowTailDiffers(y, x)) {
-                    try self.moveTo(x, y);
+                    try self.flushMoveTo(x, y);
                     if (emit_attr == null or !Attribute.eql(emit_attr.?, .none)) {
                         try self.appendAttr(.none);
                         emit_attr = .none;
@@ -1801,7 +1827,7 @@ pub const Screen = struct {
                 }
 
                 // Changed run: position once, then paint while cells differ.
-                try self.moveTo(x, y);
+                try self.flushMoveTo(x, y);
                 while (x < self.width) {
                     const run_idx = row_off + @as(usize, x);
                     const run_cell = self.cells[run_idx];
@@ -1842,7 +1868,7 @@ pub const Screen = struct {
             self.dirty_rows.unset(y);
         }
 
-        try self.moveTo(want_x, want_y);
+        try self.flushMoveTo(want_x, want_y);
         try self.appendAttr(want_attr);
         self.current_attr = want_attr;
     }
@@ -2560,6 +2586,39 @@ test "Cell.eql and isBlankNone" {
     try testing.expect(Cell.isBlankNone(.{ .cp = 0, .attr = .none }));
     try testing.expect(!Cell.isBlankNone(.{ .cp = 'A', .attr = .none }));
     try testing.expect(!Cell.isBlankNone(.{ .cp = ' ', .attr = .{ .bold = true } }));
+}
+
+test "Screen.flush with cursor_valid false always CUPs before paint" {
+    var screen = try Screen.init(testing.allocator, 8, 3);
+    defer screen.deinit();
+    screen.flush_cup_only = true;
+    // Pretend physical cursor is elsewhere but logical want is (0,1).
+    screen.cursor_x = 0;
+    screen.cursor_y = 1;
+    screen.cursor_valid = false;
+    screen.writeText(0, 1, "Hi", .none);
+    try screen.flush();
+    const out = screen.takeOut();
+    // Must CUP to row 2 col 1 before painting, not emit "Hi" at stale position.
+    const cup = std.mem.indexOf(u8, out, "\x1b[2;1H") orelse return error.TestUnexpectedResult;
+    const hi = std.mem.indexOf(u8, out, "Hi") orelse return error.TestUnexpectedResult;
+    try testing.expect(cup < hi);
+    try testing.expect(screen.cursor_valid);
+}
+
+test "Screen.flush_cup_only uses CUP not relative" {
+    var screen = try Screen.init(testing.allocator, 8, 3);
+    defer screen.deinit();
+    screen.flush_cup_only = true;
+    screen.writeText(0, 2, "Hi", .none);
+    screen.setCursor(2, 2);
+    // Logical cursor claims row 0 so relative would prefer CUD; CUP-only must CUP.
+    screen.cursor_x = 0;
+    screen.cursor_y = 0;
+    try screen.flush();
+    const out = screen.takeOut();
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[3;1H") != null);
+    try testing.expect(std.mem.indexOfScalar(u8, out, '\r') == null);
 }
 
 test "Screen.flush cell-diff skips unchanged prefix" {

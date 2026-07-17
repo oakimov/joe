@@ -3393,10 +3393,10 @@ pub export fn setextpal(arg_t: [*c]SCRN, arg_palette: [*c]c_int) void {
 // When `JOE_ZIG_SCREEN_SWAP` / `zig_screen_swap_enabled` is on, hybrid paint
 // paths update the `scrn`/`attr` shadow only; `zig_scrn_swap_flush` syncs into
 // the redesign `Screen`, runs cell-diff (+ ICH/DCH magic) flush, and drains
-// into hybrid `obuf`. Default off — live path unchanged.
+// into hybrid `obuf`. Default on after soak; set JOE_ZIG_SCREEN_SWAP=0 to opt out.
 
-/// C-visible gate (also set from `JOE_ZIG_SCREEN_SWAP` in `ttopnn`). Default 0.
-pub export var zig_screen_swap_enabled: c_int = 0;
+/// C-visible gate (also set from `JOE_ZIG_SCREEN_SWAP` in `ttopnn`). Default 1.
+pub export var zig_screen_swap_enabled: c_int = 1;
 
 var zig_scr_storage: ?terminal.Screen = null;
 
@@ -3413,6 +3413,9 @@ fn zigScrnSwapEnsure(t: [*c]SCRN) ?*terminal.Screen {
         return s;
     }
     zig_scr_storage = terminal.Screen.init(std.heap.c_allocator, w, h) catch return null;
+    // Absolute CUP during flush: hybrid swap paints under TERM am/xn where
+    // last-column wrap desyncs logical vs physical cursor for relative moves.
+    zig_scr_storage.?.flush_cup_only = true;
     return &zig_scr_storage.?;
 }
 
@@ -3460,8 +3463,13 @@ pub export fn zig_scrn_swap_flush(arg_t: [*c]SCRN, arg_x: ptrdiff_t, arg_y: ptrd
         zigPaletteSlice(t),
     );
 
+    // Final cursor want. Invalidate first: previous frame may have left the
+    // physical cursor elsewhere (prompt/message). Presetting cursor_* without
+    // CUP made flush skip positioning and paint at the stale place (e.g. Δύο
+    // landed on the message line while buffer kept xlat D}o).
     scr.cursor_x = @intCast(x);
     scr.cursor_y = @intCast(y);
+    scr.cursor_valid = false;
     scr.flush() catch {};
 
     // Drain requires the drain gate; force on for this call then restore.

@@ -24,4 +24,6 @@ comptime {
     _ = @import("regex.zig");
     _ = @import("options.zig");
     _ = @import("rc.zig");
+    _ = @import("colors.zig");
+    _ = @import("syntax.zig");
 }

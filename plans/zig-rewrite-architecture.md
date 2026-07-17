@@ -9,6 +9,7 @@
 - ✅ Phase 1: `utf8`, `unicode`, `vfile`, `gapbuffer` complete
 - ✅ Phase 2 (complete core utilities): `hash`, `va`, `vs`, `queue`, `builtin`, `blocks`, `utils`, `frag`, `undo`, `lattr`, `charmap`, `regex`, `options`, `rc` (196/196 green)
 - ✅ Phase 2 complete (`rc` landed)
+- ✅ Hybrid Phase 3: `colors` + `syntax` landed (replaces `joe/colors.c` + `joe/syntax.c`, 196/196 green)
 - **Integration tests:** full suite **196/196 OK** (including viewmode)
 - **Recent hybrid fixes:** `binsb` uses `hallocFresh()` so freelist corruption cannot reclaim a still-live gap header and zero its `hole` (was wiping history into NULs/`@` on Command: prompt after 2× `blkcpy`); `inschn` skips `hfree` when `p.hdr == a`; `brm` uses `vsrm(current_dir)`; plus prior `brvs`/`vstrunc`, `binsmq`, `charmap->type`, unicode/`p_goto_bol`/`binsm`/`iskey` fixes
 - **Binary size:** Debug hybrid build via `zig build`
@@ -718,13 +719,13 @@ The build is always working — start with a binary that compiles and runs, then
 - Unit tests for each
 - At this point: can load config, parse key bindings, but no rendering
 
-### Phase 3: Terminal & Color (4-5 weeks) — NOT STARTED
+### Phase 3: Terminal & Color (4-5 weeks) — IN PROGRESS
 - ⬜ `terminal/terminfo.zig` — terminfo binding
 - ⬜ `terminal/tty.zig` — raw mode, signal handling
 - ⬜ `terminal/pty.zig` — pseudo-terminal for shell windows
 - ⬜ `terminal/screen.zig` — escape sequence emitter + screen buffer
-- ⬜ `color.zig` — jcf parser + attribute resolution
-- ⬜ `syntax.zig` — jsf parser + DFA engine
+- ✅ `colors.zig` — hybrid C-ABI port of jcf parser + attribute resolution (replaces `joe/colors.c`, 196 tests pass)
+- ✅ `syntax.zig` — hybrid C-ABI port of jsf parser + DFA engine (replaces `joe/syntax.c`, 196 tests pass)
 - Unit tests per module
 - At this point: can display text with syntax highlighting
 

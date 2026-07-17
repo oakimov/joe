@@ -85,7 +85,7 @@ pub fn build(b: *std.Build) void {
             // REMOVED: joe/vs.c — replaced by src/vs.zig
             "joe/w.c",
             // REMOVED: joe/utils.c — replaced by src/utils.zig
-            "joe/syntax.c",
+            // REMOVED: joe/syntax.c — replaced by src/syntax.zig
             // REMOVED: joe/utf8.c — replaced by src/utf8.zig
             "joe/selinux.c",
             // REMOVED: joe/charmap.c — replaced by src/charmap.zig
@@ -100,7 +100,7 @@ pub fn build(b: *std.Build) void {
             // REMOVED: joe/options.c — replaced by src/options.zig
             "joe/cclass.c",
             // REMOVED: joe/frag.c — replaced by src/frag.zig
-            "joe/colors.c",
+            // REMOVED: joe/colors.c — replaced by src/colors.zig
             "joe/unicat-17.0.0.c",
         },
         .flags = &.{

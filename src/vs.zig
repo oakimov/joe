@@ -167,6 +167,19 @@ export fn _vsset(vary_in: [*c]u8, pos: isize, el: u8) [*c]u8 {
     return vary;
 }
 
+/// C header provides `vsadd` as a macro; Zig callers need a real symbol.
+export fn vsadd(vary_in: [*c]u8, el: u8) [*c]u8 {
+    var vary = vary_in;
+    if (@intFromPtr(vary) == 0 or sLen(vary) == sSize(vary)) {
+        return _vsset(vary, sLEN(vary), el);
+    }
+    const len = sLen(vary);
+    vary[@as(usize, @intCast(len + 1))] = 0;
+    vary[@as(usize, @intCast(len))] = el;
+    sSetLen(vary, len + 1);
+    return vary;
+}
+
 export fn vsbsearch(ary: [*c]const u8, len: isize, el: u8) isize {
     if (@intFromPtr(ary) == 0 or len == 0) return 0;
     var y = len;

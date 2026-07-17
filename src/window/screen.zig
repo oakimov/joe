@@ -17,6 +17,8 @@ const menu = @import("menu.zig");
 pub const fit_min: u16 = 2;
 /// Minimum free lines needed to place another text family — JOE `FITHEIGHT`.
 pub const fit_height: u16 = 4;
+/// Composition buffer size for temporary window messages — JOE `JOE_MSGBUFSIZE`.
+pub const msg_buf_size: usize = 300;
 
 pub const WindowId = u32;
 
@@ -59,10 +61,43 @@ pub const Window = struct {
     /// Space donor; closed height returns here (JOE `orgwin`).
     org: ?WindowId = null,
     vtable: *const WindowVTable,
+    /// Temporary top-of-window message (JOE `msgt`); borrowed, cleared by `clearMsgs`.
     msg_top: ?[]const u8 = null,
+    /// Temporary bottom-of-window message (JOE `msgb`); borrowed, cleared by `clearMsgs`.
     msg_bot: ?[]const u8 = null,
     huh: ?[]const u8 = null,
     object: ?*anyopaque = null,
+
+    /// Set bottom temporary message — JOE `msgnw`.
+    pub fn setMsgBot(self: *Window, s: ?[]const u8) void {
+        self.msg_bot = s;
+    }
+
+    /// Set top temporary message — JOE `msgnwt`.
+    pub fn setMsgTop(self: *Window, s: ?[]const u8) void {
+        self.msg_top = s;
+    }
+
+    /// Clear temporary messages — JOE `msgclr`.
+    pub fn clearMsgs(self: *Window) void {
+        self.msg_top = null;
+        self.msg_bot = null;
+    }
+
+    /// Screen row for bottom message when painted (JOE `msgout` / `msgb`).
+    /// `null` when no message, zero height, or off-screen.
+    pub fn msgBotRow(self: *const Window) ?i16 {
+        if (self.msg_bot == null or self.h == 0 or self.y < 0) return null;
+        return self.y + @as(i16, @intCast(self.h)) - 1;
+    }
+
+    /// Screen row for top message when painted (JOE `msgout` / `msgt`).
+    /// `status_enabled` mirrors JOE `!staen` (default true ⇒ skip status row when possible).
+    pub fn msgTopRow(self: *const Window, status_enabled: bool) ?i16 {
+        if (self.msg_top == null or self.h == 0 or self.y < 0) return null;
+        const skip_status = self.h > 1 and (self.y != 0 or status_enabled);
+        return self.y + @as(i16, if (skip_status) 1 else 0);
+    }
 };
 
 pub const Screen = struct {
@@ -78,6 +113,8 @@ pub const Screen = struct {
     /// First window considered by layout (JOE `topwin`).
     top_id: WindowId = 0,
     next_id: WindowId = 1,
+    /// Shared composition buffer for temporary messages — JOE `msgbuf`.
+    msg_buf: [msg_buf_size]u8 = undefined,
 
     pub fn init(allocator: Allocator, width: u16, height: u16) !Screen {
         return .{
@@ -87,6 +124,11 @@ pub const Screen = struct {
             .order = .empty,
             .by_id = .empty,
         };
+    }
+
+    /// Format into `msg_buf` and return the written slice (JOE `joe_snprintf(msgbuf, …)`).
+    pub fn composeMsg(self: *Screen, comptime fmt: []const u8, args: anytype) []const u8 {
+        return std.fmt.bufPrint(&self.msg_buf, fmt, args) catch self.msg_buf[0..0];
     }
 
     pub fn deinit(self: *Screen) void {
@@ -503,8 +545,14 @@ pub const Screen = struct {
     }
 
     /// Abort window and its dependents; return height to `org` when present.
+    /// Main-window messages transfer to the new current window when unset (JOE `wabort`).
     pub fn close(self: *Screen, id: WindowId) !void {
         const w = self.get(id) orelse return error.UnknownWindow;
+
+        // Capture main-window messages before destroy (JOE transfers only for `w == w->main`).
+        const transfer_msgs = w.target == null;
+        const xfer_top = if (transfer_msgs) w.msg_top else null;
+        const xfer_bot = if (transfer_msgs) w.msg_bot else null;
 
         var kill_ids: std.ArrayList(WindowId) = .empty;
         defer kill_ids.deinit(self.allocator);
@@ -578,6 +626,16 @@ pub const Screen = struct {
         }
         if (self.get(self.top_id) == null and self.order.items.len > 0) {
             self.top_id = self.order.items[0].id;
+        }
+
+        // Transfer orphaned main-window messages onto the new current window.
+        if (self.current()) |cur| {
+            if (xfer_top) |t| {
+                if (cur.msg_top == null) cur.msg_top = t;
+            }
+            if (xfer_bot) |b| {
+                if (cur.msg_bot == null) cur.msg_bot = b;
+            }
         }
 
         self.layout();
@@ -764,6 +822,99 @@ test "showAll equalizes main windows" {
     scr.showAll();
     try testing.expectEqual(a.h, b.h);
     try testing.expectEqual(@as(u16, 24), a.h + b.h);
+}
+
+test "set and clear temporary messages" {
+    var scr = try Screen.init(testing.allocator, 80, 24);
+    defer scr.deinit();
+
+    const w = try scr.createText(null, null, 24);
+    scr.layout();
+    try testing.expect(w.msgBotRow() == null);
+    try testing.expect(w.msgTopRow(true) == null);
+
+    w.setMsgBot("bottom");
+    w.setMsgTop("top");
+    try testing.expectEqualStrings("bottom", w.msg_bot.?);
+    try testing.expectEqualStrings("top", w.msg_top.?);
+    try testing.expectEqual(@as(i16, 23), w.msgBotRow().?);
+    // Top-most window with status enabled skips status row -> y+1.
+    try testing.expectEqual(@as(i16, 1), w.msgTopRow(true).?);
+    // With status disabled on y==0, top message paints at y.
+    try testing.expectEqual(@as(i16, 0), w.msgTopRow(false).?);
+
+    w.clearMsgs();
+    try testing.expect(w.msg_bot == null);
+    try testing.expect(w.msg_top == null);
+}
+
+test "composeMsg fills screen msg_buf" {
+    var scr = try Screen.init(testing.allocator, 80, 24);
+    defer scr.deinit();
+
+    const s = scr.composeMsg("file {s} saved", .{"foo.txt"});
+    try testing.expectEqualStrings("file foo.txt saved", s);
+    try testing.expect(s.ptr == &scr.msg_buf);
+}
+
+test "msgTopRow skips status on non-top window" {
+    var scr = try Screen.init(testing.allocator, 80, 24);
+    defer scr.deinit();
+
+    const a = try scr.createText(null, null, 12);
+    const b = try scr.createText(a.id, null, 12);
+    scr.layout();
+    b.setMsgTop("hi");
+    try testing.expectEqual(@as(i16, 12), b.y);
+    try testing.expectEqual(@as(i16, 13), b.msgTopRow(false).?);
+    try testing.expectEqual(@as(i16, 13), b.msgTopRow(true).?);
+}
+
+test "closing main transfers messages to current" {
+    var scr = try Screen.init(testing.allocator, 80, 24);
+    defer scr.deinit();
+
+    const a = try scr.createText(null, null, 12);
+    const b = try scr.createText(a.id, null, 12);
+    scr.layout();
+    a.setMsgBot("from-a");
+    a.setMsgTop("top-a");
+    scr.cur_id = a.id;
+    try scr.close(a.id);
+    const cur = scr.current().?;
+    try testing.expectEqual(b.id, cur.id);
+    try testing.expectEqualStrings("from-a", cur.msg_bot.?);
+    try testing.expectEqualStrings("top-a", cur.msg_top.?);
+}
+
+test "closing main does not overwrite existing messages" {
+    var scr = try Screen.init(testing.allocator, 80, 24);
+    defer scr.deinit();
+
+    const a = try scr.createText(null, null, 12);
+    const b = try scr.createText(a.id, null, 12);
+    scr.layout();
+    a.setMsgBot("from-a");
+    b.setMsgBot("keep-b");
+    scr.cur_id = a.id;
+    try scr.close(a.id);
+    const cur = scr.current().?;
+    try testing.expectEqual(b.id, cur.id);
+    try testing.expectEqualStrings("keep-b", cur.msg_bot.?);
+    try testing.expect(cur.msg_top == null);
+}
+
+test "closing child does not transfer messages" {
+    var scr = try Screen.init(testing.allocator, 80, 24);
+    defer scr.deinit();
+
+    const twnd = try scr.createText(null, null, 24);
+    scr.layout();
+    const prompt = try scr.createPrompt(twnd.id, twnd.id, twnd.id, 1);
+    scr.layout();
+    prompt.setMsgBot("child-msg");
+    try scr.close(prompt.id);
+    try testing.expect(twnd.msg_bot == null);
 }
 
 test "vtable kinds resolve" {

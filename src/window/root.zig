@@ -17,6 +17,7 @@ pub const WindowKind = screen.WindowKind;
 pub const WindowVTable = screen.WindowVTable;
 pub const fit_min = screen.fit_min;
 pub const fit_height = screen.fit_height;
+pub const msg_buf_size = screen.msg_buf_size;
 pub const StatusContext = tw.StatusContext;
 pub const stagen = tw.stagen;
 pub const composeStatus = tw.composeStatus;

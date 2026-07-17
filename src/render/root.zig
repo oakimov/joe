@@ -8,6 +8,7 @@ pub const lgen = @import("lgen.zig");
 pub const gap = @import("gap.zig");
 pub const attr = @import("attr.zig");
 pub const syntax = @import("syntax.zig");
+pub const view = @import("view.zig");
 
 pub const Options = lgen.Options;
 pub const lgenLine = lgen.lgenLine;
@@ -22,10 +23,13 @@ pub const allocFromHybridRow = attr.allocFromHybridRow;
 pub const Syntax = syntax.Syntax;
 pub const HighlightState = syntax.HighlightState;
 pub const loadSyntax = syntax.load;
+pub const ViewTables = view.ViewTables;
+pub const analyzeLine = view.analyzeLine;
 
 test {
     _ = lgen;
     _ = gap;
     _ = attr;
     _ = syntax;
+    _ = view;
 }

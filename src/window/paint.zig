@@ -239,8 +239,9 @@ fn syntaxStateAtLine(t: *const tw.TextWindow, syn: *const render.Syntax, line_id
 
 /// Text-body paint (bwgen-shaped): optional linums + `render.lgen*`.
 /// Prefers live `TextWindow.buffer` (`lgenPoint` walk); falls back to stub
-/// `body_lines` (`lgenLine`). No syntax/viewmode/mark yet. `offset` is a
-/// display column (JOE `bw->offset`), not a byte index.
+/// `body_lines` (`lgenLine`). Optional live `syntax` / `line_attrs` and
+/// markdown `viewmode` (stack `bindScratch` + `analyzeLine`). No mark yet.
+/// `offset` is a display column (JOE `bw->offset`), not a byte index.
 pub fn paintBody(term: *TermScreen, t: *const tw.TextWindow, attr: Attribute) void {
     if (t.h == 0) return;
     if (t.w == 0 and t.lincols == 0) return;
@@ -268,6 +269,12 @@ pub fn paintBody(term: *TermScreen, t: *const tw.TextWindow, attr: Attribute) vo
 
         var attr_row_buf: [4096]Attribute = undefined;
         var line_scratch: [4096]u8 = undefined;
+        var view_hide: [4096]u8 = undefined;
+        var view_sub: [4096]u21 = undefined;
+        var view_url: [4096]?[]const u8 = undefined;
+        var view_col: [4096]u64 = undefined;
+        var view_tables: render.ViewTables = .{ .allocator = undefined, .owns_memory = false };
+
         const line_text: ?[]const u8 = blk: {
             if (t.buffer) |buf| {
                 const n = buf.copyLine(line_idx, &line_scratch);
@@ -290,10 +297,42 @@ pub fn paintBody(term: *TermScreen, t: *const tw.TextWindow, attr: Attribute) vo
             }
         }
 
+        var view_opt: ?*const render.ViewTables = null;
+        if (t.viewmode) {
+            if (line_text) |lt| {
+                const need = if (lt.len == 0) @as(usize, 1) else lt.len;
+                if (need <= view_hide.len) {
+                    view_tables.bindScratch(
+                        view_hide[0..need],
+                        view_sub[0..need],
+                        view_url[0..need],
+                        view_col[0..need],
+                        lt.len,
+                    );
+                    // Mutable attrs so analyzeLine can style link text.
+                    var mut: ?[]Attribute = null;
+                    if (attrs) |a| {
+                        const n = @min(a.len, attr_row_buf.len);
+                        if (n > 0 and a.ptr != attr_row_buf[0..].ptr) {
+                            @memcpy(attr_row_buf[0..n], a[0..n]);
+                        }
+                        mut = attr_row_buf[0..n];
+                    } else if (lt.len <= attr_row_buf.len) {
+                        @memset(attr_row_buf[0..lt.len], .none);
+                        mut = attr_row_buf[0..lt.len];
+                    }
+                    render.analyzeLine(&view_tables, lt, mut) catch {};
+                    if (mut) |m| attrs = m;
+                    view_opt = &view_tables;
+                }
+            }
+        }
+
         const opts: render.Options = .{
             .tab = t.tab,
             .offset = t.offset,
             .attrs = attrs,
+            .view = view_opt,
         };
         if (t.buffer) |buf| {
             var pt = render.Point.bof(buf);
@@ -871,6 +910,36 @@ test "paintBody fills attrs from live Syntax JSF" {
     try testing.expect(c0.attr.dim or terminal.Color.eql(c0.attr.fg, .{ .indexed = 2 }));
     const c1 = cellAt(&term, t.x, @intCast(t.y + 1));
     try testing.expectEqual(@as(u21, 'x'), c1.cp);
+}
+
+test "paintBody applies viewmode hide and substitute" {
+    var scr = try screen.Screen.init(testing.allocator, 24, 5);
+    defer scr.deinit();
+    const win = try scr.createText(null, null, 4);
+    scr.layout();
+    const t = win.asText().?;
+    const lines = [_][]const u8{ "# Title", "> quote", "See [x](http://a)" };
+    t.body_lines = &lines;
+    t.viewmode = true;
+
+    var term = try TermScreen.init(testing.allocator, 24, 5);
+    defer term.deinit();
+    paintBody(&term, t, .none);
+
+    // Heading: '#' and following space → spaces
+    try testing.expectEqual(@as(u21, ' '), cellAt(&term, t.x, @intCast(t.y)).cp);
+    try testing.expectEqual(@as(u21, ' '), cellAt(&term, t.x + 1, @intCast(t.y)).cp);
+    try testing.expectEqual(@as(u21, 'T'), cellAt(&term, t.x + 2, @intCast(t.y)).cp);
+
+    // Blockquote: '>' → │
+    try testing.expectEqual(@as(u21, 0x2502), cellAt(&term, t.x, @intCast(t.y + 1)).cp);
+    try testing.expectEqual(@as(u21, 'q'), cellAt(&term, t.x + 2, @intCast(t.y + 1)).cp);
+
+    // Link text styled; '[' hidden as space
+    try testing.expectEqual(@as(u21, ' '), cellAt(&term, t.x + 4, @intCast(t.y + 2)).cp); // '['
+    try testing.expectEqual(@as(u21, 'x'), cellAt(&term, t.x + 5, @intCast(t.y + 2)).cp);
+    try testing.expect(cellAt(&term, t.x + 5, @intCast(t.y + 2)).attr.underline);
+    try testing.expect(terminal.Color.eql(cellAt(&term, t.x + 5, @intCast(t.y + 2)).attr.fg, render.view.link_fg));
 }
 
 test "paintBody clears content when no stub lines" {

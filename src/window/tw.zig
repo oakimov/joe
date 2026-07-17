@@ -60,6 +60,9 @@ pub const TextWindow = struct {
     /// Optional Zig-native JSF syntax (Phase 6). When set and `line_attrs` is
     /// null, `paintBody` runs `syntax.parseLine` to fill attrs.
     syntax: ?*render.Syntax = null,
+    /// Markdown viewmode (JOE `o.viewmode`). When true, `paintBody` builds
+    /// per-line hide/substitute tables via `render.analyzeLine`.
+    viewmode: bool = false,
     /// First visible buffer line — JOE `bw->top->line`.
     top_line: u64 = 0,
     /// Horizontal scroll in display columns — JOE `bw->offset`.

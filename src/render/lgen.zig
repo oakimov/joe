@@ -1,9 +1,9 @@
-//! Minimal JOE `lgen_core`-shaped line renderer (Phase 6 start).
+//! Minimal JOE `lgen_core`-shaped line renderer (Phase 6).
 //!
 //! Renders one UTF-8 buffer line into a `terminal.Screen` row window. Handles
 //! tab expansion, display-column scroll (`bw->offset`), C0/DEL control glyphs,
-//! and wide-char clipping (`>` filler). Optional per-byte `attrs` (JOE `attr_buf`).
-//! No full JSF DFA/viewmode/mark yet.
+//! and wide-char clipping (`>` filler). Optional per-byte `attrs` (JOE `attr_buf`)
+//! and viewmode side tables (`Options.view` — hide→space / substitute).
 //! Not wired into live `joe` — unit-tested only.
 
 const std = @import("std");
@@ -12,6 +12,7 @@ const testing = std.testing;
 const terminal = @import("terminal");
 const gap = @import("gap.zig");
 const attr_mod = @import("attr.zig");
+const view_mod = @import("view.zig");
 
 pub const TermScreen = terminal.Screen;
 pub const Attribute = terminal.Attribute;
@@ -22,6 +23,9 @@ pub const Point = gap.Point;
 pub const mergeHighlight = attr_mod.mergeHighlight;
 pub const attrAt = attr_mod.attrAt;
 pub const fromHybridRow = attr_mod.fromHybridRow;
+pub const ViewTables = view_mod.ViewTables;
+pub const analyzeLine = view_mod.analyzeLine;
+pub const resolveCp = view_mod.resolveCp;
 
 pub const Options = struct {
     /// Tab stop width — JOE `o.tab` (default 8).
@@ -31,6 +35,9 @@ pub const Options = struct {
     /// Per-byte syntax attributes from BOL (JOE `attr_buf`). Lead byte wins
     /// for multi-byte UTF-8. `null` ⇒ paint everything with `base_attr`.
     attrs: ?[]const Attribute = null,
+    /// Optional viewmode side tables (JOE `viewmode_hide` / `substitute`).
+    /// When set, hide→space and substitute wins (like `lgen_core` + `viewmode_skip_parse`).
+    view: ?*const ViewTables = null,
 };
 
 fn tabWidth(tab: u16, col: u64) u16 {
@@ -261,7 +268,7 @@ fn lgenUnits(
     while (sx < end_x) {
         const unit = iter.next() orelse break;
         const byte_idx: usize = iter.last_byte;
-        const u: Unit = switch (@TypeOf(unit)) {
+        var u: Unit = switch (@TypeOf(unit)) {
             gap.Unit => switch (unit) {
                 .cp => |cp| .{ .cp = cp },
                 .invalid => .invalid,
@@ -270,6 +277,12 @@ fn lgenUnits(
             Unit => unit,
             else => @compileError("unsupported unit iterator"),
         };
+        if (opts.view) |vt| {
+            switch (u) {
+                .cp => |cp| u = .{ .cp = resolveCp(vt, byte_idx, cp) },
+                else => {},
+            }
+        }
         const cell_attr = attrAt(base_attr, opts.attrs, byte_idx);
         if (!paintUnit(term, &sx, end_x, y, x, &logical, offset, tab, u, cell_attr)) break;
         if (sx >= end_x) break;
@@ -510,4 +523,26 @@ test "lgenLine hybrid attr_buf row via fromHybridRow" {
     try testing.expect(term.cells[0].attr.bold);
     try testing.expect(term.cells[1].attr.underline);
     try testing.expect(Color.eql(term.cells[1].attr.fg, .{ .indexed = 5 }));
+}
+
+test "lgenLine applies viewmode hide and substitute" {
+    var tables = ViewTables.init(testing.allocator);
+    defer tables.deinit();
+    try analyzeLine(&tables, "# Hi", null);
+
+    var term = try TermScreen.init(testing.allocator, 8, 1);
+    defer term.deinit();
+    _ = lgenLine(&term, 0, 0, 8, "# Hi", .{ .view = &tables }, .none);
+    try testing.expectEqual(@as(u21, ' '), term.cells[0].cp);
+    try testing.expectEqual(@as(u21, ' '), term.cells[1].cp);
+    try testing.expectEqual(@as(u21, 'H'), term.cells[2].cp);
+    try testing.expectEqual(@as(u21, 'i'), term.cells[3].cp);
+
+    try analyzeLine(&tables, "> quote", null);
+    var term2 = try TermScreen.init(testing.allocator, 10, 1);
+    defer term2.deinit();
+    _ = lgenLine(&term2, 0, 0, 10, "> quote", .{ .view = &tables }, .none);
+    try testing.expectEqual(@as(u21, 0x2502), term2.cells[0].cp);
+    try testing.expectEqual(@as(u21, ' '), term2.cells[1].cp);
+    try testing.expectEqual(@as(u21, 'q'), term2.cells[2].cp);
 }

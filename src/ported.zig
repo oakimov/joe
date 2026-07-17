@@ -30,4 +30,5 @@ comptime {
     _ = @import("tty.zig");
     _ = @import("scrn.zig");
     _ = @import("kbd.zig");
+    _ = @import("macro.zig");
 }

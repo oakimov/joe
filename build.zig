@@ -54,7 +54,7 @@ pub fn build(b: *std.Build) void {
             // REMOVED: joe/hash.c — replaced by src/hash.zig
             "joe/help.c",
             // REMOVED: joe/kbd.c — replaced by src/kbd.zig
-            "joe/macro.c",
+            // REMOVED: joe/macro.c — replaced by src/macro.zig
             "joe/main.c",
             "joe/menu.c",
             "joe/path.c",

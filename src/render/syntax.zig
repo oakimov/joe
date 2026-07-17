@@ -6,11 +6,11 @@
 //! `buffer` + `strings`/`istrings` keyword tables (including `"&"` delim),
 //! `save_c`/`save_s`/`push_c`/`push_s`/`pop_c`/`pop_s` delimiter match buffer+stack,
 //! local `.subr`/`.end` and external `call=file.subr()` / `call=file()` / `call=.name()`,
-//! `.ifdef` params, `return`, `reset`, `mark`/`markend`/`recolormark`, and `\i`/`\c`.
+//! `.ifdef` params, `return`, `reset`, `mark`/`markend`/`recolormark`, `hold`, and `\i`/`\c`.
 //!
 //! External calls resolve through in-memory `SyntaxLibrary` (`loadWithLibrary`).
 //! `.ifdef` / `.else` / `.endif` honor `call=…(params)` (including `-param`).
-//! Still missing: `hold`, lattr cache. Fills per-byte attrs for `lgen`.
+//! Pair with `render/lattr.zig` for per-line state cache. Fills per-byte attrs for `lgen`.
 //! Not wired into live `joe`.
 
 const std = @import("std");
@@ -115,6 +115,25 @@ pub const HighlightState = struct {
     pub fn isDisabled(self: HighlightState) bool {
         return self.state < 0;
     }
+
+    /// JOE `eq_state` shape: compare DFA/call/delim identity (not buffer contents beyond `saved`).
+    pub fn eql(self: HighlightState, other: HighlightState) bool {
+        if (self.state != other.state) return false;
+        if (self.syn_id != other.syn_id) return false;
+        if (self.stack_depth != other.stack_depth) return false;
+        if (self.delim_depth != other.delim_depth) return false;
+        if (!self.saved.eql(other.saved.slice())) return false;
+        var i: u8 = 0;
+        while (i < self.stack_depth) : (i += 1) {
+            if (self.frames[i].ret_state != other.frames[i].ret_state) return false;
+            if (self.frames[i].ret_syn != other.frames[i].ret_syn) return false;
+        }
+        i = 0;
+        while (i < self.delim_depth) : (i += 1) {
+            if (!self.delim_stack[i].eql(other.delim_stack[i].slice())) return false;
+        }
+        return true;
+    }
 };
 
 const CallFrame = struct {
@@ -134,6 +153,7 @@ const Command = struct {
     noeat: bool = false,
     recolor: i32 = 0,
     buffer: bool = false,
+    hold: bool = false, // stop_buffering
     rtn: bool = false,
     reset: bool = false,
     start_mark: bool = false, // mark
@@ -255,6 +275,8 @@ pub const Syntax = struct {
         var buf: [max_buf_chars + 1]u8 = undefined;
         var buf_len: usize = 0;
         var buffering = false;
+        // Codepoints eaten after `hold` (JOE `ofst`) — keyword recolor shifts by this.
+        var ofst: usize = 0;
         // JOE mark offsets (codepoints back from current); line-local only.
         var mark1: usize = 0;
         var mark2: usize = 0;
@@ -340,15 +362,17 @@ pub const Syntax = struct {
                 const new_color = active.states[@intCast(hs.state)].color;
 
                 if (recolor_keyword and buf_len > 0 and cp_count > 0) {
-                    // Recolor the buffered word (past buf_len codepoints before current).
-                    const n = buf_len;
-                    const end_cp = cp_count - 1; // current cp index
-                    const from_cp = if (n >= end_cp) 0 else end_cp - n;
-                    const byte_from = cp_byte_start[from_cp];
-                    const byte_to = i; // up to but not including current char
-                    var j = byte_from;
-                    while (j < byte_to and j < attrs.len) : (j += 1) {
-                        attrs[j] = new_color;
+                    // JOE: attr[x-ofst] for x in [-(buf_idx+1), -1) — skip held trailing cps.
+                    const cur = cp_count - 1;
+                    const end_excl = cur -| ofst; // first codepoint after keyword
+                    const from_cp = end_excl -| buf_len;
+                    if (from_cp < end_excl) {
+                        const byte_from = cp_byte_start[from_cp];
+                        const byte_to = if (end_excl < cp_count) cp_byte_start[end_excl] else i;
+                        var j = byte_from;
+                        while (j < byte_to and j < attrs.len) : (j += 1) {
+                            attrs[j] = new_color;
+                        }
                     }
                 }
 
@@ -377,6 +401,10 @@ pub const Syntax = struct {
                 if (cmd.buffer) {
                     buffering = true;
                     buf_len = 0;
+                    ofst = 0;
+                }
+                if (cmd.hold) {
+                    buffering = false;
                 }
 
                 if (cmd.start_mark) {
@@ -405,6 +433,8 @@ pub const Syntax = struct {
                     // Non-ASCII: stop buffering; .jsf keyword tables are ASCII.
                     buffering = false;
                 }
+            } else {
+                ofst += 1;
             }
 
             // Update mark pointers after eating this codepoint.
@@ -467,13 +497,14 @@ pub const Syntax = struct {
                 const new_color = active.states[@intCast(hs.state)].color;
 
                 if (recolor_keyword and buf_len > 0 and cp_count > 0) {
-                    const n = buf_len;
-                    const end_cp = cp_count; // no current painted cp for newline
-                    const from_cp = if (n >= end_cp) 0 else end_cp - n;
-                    const byte_from = cp_byte_start[from_cp];
-                    const byte_to = line.len;
-                    var j = byte_from;
-                    while (j < byte_to and j < attrs.len) : (j += 1) attrs[j] = new_color;
+                    const end_excl = cp_count -| ofst;
+                    const from_cp = end_excl -| buf_len;
+                    if (from_cp < end_excl) {
+                        const byte_from = cp_byte_start[from_cp];
+                        const byte_to = if (end_excl < cp_count) cp_byte_start[end_excl] else line.len;
+                        var j = byte_from;
+                        while (j < byte_to and j < attrs.len) : (j += 1) attrs[j] = new_color;
+                    }
                 }
 
                 if (cmd.recolor < 0 and cp_count > 0) {
@@ -500,6 +531,10 @@ pub const Syntax = struct {
                 if (cmd.buffer) {
                     buffering = true;
                     buf_len = 0;
+                    ofst = 0;
+                }
+                if (cmd.hold) {
+                    buffering = false;
                 }
 
                 if (cmd.start_mark) {
@@ -938,6 +973,11 @@ fn parseTransitionOptions(
             i += "buffer".len;
             continue;
         }
+        if (std.mem.startsWith(u8, s[i..], "hold")) {
+            cmd.hold = true;
+            i += "hold".len;
+            continue;
+        }
         if (std.mem.startsWith(u8, s[i..], "return")) {
             cmd.rtn = true;
             i += "return".len;
@@ -1032,7 +1072,7 @@ fn parseTransitionOptions(
             i += 5; // pop_c / pop_s
             continue;
         }
-        // Skip unknown option token (hold, …).
+        // Skip unknown option token.
         while (i < s.len and s[i] != ' ' and s[i] != '\t' and s[i] != '#' and s[i] != '\n' and s[i] != '\r') : (i += 1) {}
     }
     return i;
@@ -1781,6 +1821,74 @@ test "buffer+strings highlights C-like keywords" {
     try testing.expect(Color.eql(attrs[2].fg, .{ .indexed = 4 }));
     // space / ident fall back toward idle/ident
     try testing.expect(Attribute.eql(attrs[3], .none) or Color.eql(attrs[3].fg, .default));
+}
+
+test "hold stops buffering for delayed strings lookup" {
+    // Fortran/c.jsf shape: buffer ident, hold on space, strings on next char.
+    const src =
+        \\=Idle
+        \\=Ident
+        \\=Keyword
+        \\:idle Idle
+        \\  *    idle
+        \\  "\i"    ident    recolor=-1 buffer
+        \\:ident Ident
+        \\  *    ident
+        \\  "\c"    ident
+        \\  " \t"    ws_ident    hold
+        \\:ws_ident Idle
+        \\  *    idle    noeat strings
+        \\  "write"    keyword
+        \\done
+        \\  "("    idle
+        \\:keyword Keyword
+        \\  *    idle    noeat
+    ;
+    var syn = try load(testing.allocator, "hold", src);
+    defer syn.deinit();
+
+    var attrs: [32]Attribute = undefined;
+    const line = "write 7";
+    _ = syn.parseLine(line, .initial, attrs[0..line.len]);
+    // "write" recolored as Keyword despite the held space before '7'.
+    try testing.expect(attrs[0].bold);
+    try testing.expect(Color.eql(attrs[0].fg, .{ .indexed = 6 }));
+    try testing.expect(Color.eql(attrs[4].fg, .{ .indexed = 6 }));
+    // Space and '7' are not part of the keyword recolor.
+    try testing.expect(!attrs[5].bold);
+    try testing.expect(!attrs[6].bold);
+}
+
+test "hold+noeat strings on terminator matches go.jsf shape" {
+    // Same role as go.jsf `noeat hold strings` on a non-ident terminator.
+    // (Full hex-range char classes are a separate TODO.)
+    const src =
+        \\=Idle
+        \\=Ident
+        \\=Keyword
+        \\:idle Idle
+        \\  *    idle
+        \\  "\i"    ident    recolor=-1 buffer
+        \\:ident Ident
+        \\  *    ident
+        \\  "\c"    ident
+        \\  " \t()[]{}"    idle    noeat hold strings
+        \\  "func"    keyword
+        \\  "package"    keyword
+        \\done
+        \\:keyword Keyword
+        \\  *    idle    noeat
+    ;
+    var syn = try load(testing.allocator, "gohold", src);
+    defer syn.deinit();
+
+    var attrs: [32]Attribute = undefined;
+    const line = "func ";
+    _ = syn.parseLine(line, .initial, attrs[0..line.len]);
+    try testing.expect(attrs[0].bold);
+    try testing.expect(Color.eql(attrs[0].fg, .{ .indexed = 6 }));
+    try testing.expect(Color.eql(attrs[3].fg, .{ .indexed = 6 }));
+    try testing.expect(!attrs[4].bold);
 }
 
 test "local call=.slash() and return color line comments" {

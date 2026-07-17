@@ -2,7 +2,7 @@
 //!
 //! Parallel to hybrid/C `joe/bw.c` (`lgen` / `bwgen`). Grows behind unit tests;
 //! not wired into live `joe` yet. Window paint may call into this module for
-//! text-body cells.
+//! text-body cells. Includes Zig-native `lattr` highlight-state cache.
 
 pub const lgen = @import("lgen.zig");
 pub const gap = @import("gap.zig");
@@ -10,6 +10,7 @@ pub const attr = @import("attr.zig");
 pub const syntax = @import("syntax.zig");
 pub const view = @import("view.zig");
 pub const table = @import("table.zig");
+pub const lattr = @import("lattr.zig");
 
 pub const Options = lgen.Options;
 pub const lgenLine = lgen.lgenLine;
@@ -28,6 +29,7 @@ pub const ViewTables = view.ViewTables;
 pub const analyzeLine = view.analyzeLine;
 pub const tryPaintTable = table.tryPaintFromLines;
 pub const tableLayoutAt = table.layoutAt;
+pub const LineAttrCache = lattr.LineAttrCache;
 
 test {
     _ = lgen;
@@ -36,4 +38,5 @@ test {
     _ = syntax;
     _ = view;
     _ = table;
+    _ = lattr;
 }

@@ -212,8 +212,36 @@ pub fn paintLinum(term: *TermScreen, x: u16, y: i16, lincols: u16, line_1based: 
     }
 }
 
-/// Highlight state at the start of `line_idx` by parsing prior lines.
+const LineProvider = struct {
+    t: *const tw.TextWindow,
+    scratch: []u8,
+
+    fn get(ctx: *anyopaque, line: u64) ?[]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.t.buffer) |buf| {
+            const n = buf.copyLine(line, self.scratch);
+            return self.scratch[0..n];
+        }
+        return self.t.bodyLine(line);
+    }
+};
+
+/// Highlight state at the start of `line_idx`.
+/// Uses `TextWindow.lattr` when present; otherwise walks prior lines from BOF.
 fn syntaxStateAtLine(t: *const tw.TextWindow, syn: *const render.Syntax, line_idx: u64) render.HighlightState {
+    if (t.lattr) |cache| {
+        var scratch: [4096]u8 = undefined;
+        var provider = LineProvider{ .t = t, .scratch = scratch[0..] };
+        const count = t.bodyLineCount() orelse line_idx;
+        return cache.get(syn, &provider, LineProvider.get, line_idx, count) catch {
+            // Fall through to uncached walk on allocator failure.
+            return syntaxStateAtLineUncached(t, syn, line_idx);
+        };
+    }
+    return syntaxStateAtLineUncached(t, syn, line_idx);
+}
+
+fn syntaxStateAtLineUncached(t: *const tw.TextWindow, syn: *const render.Syntax, line_idx: u64) render.HighlightState {
     var st = syn.initialState();
     if (line_idx == 0) return st;
     var walk_attrs: [4096]Attribute = undefined;
@@ -293,6 +321,10 @@ pub fn paintBody(term: *TermScreen, t: *const tw.TextWindow, attr: Attribute) vo
     if (t.h == 0) return;
     if (t.w == 0 and t.lincols == 0) return;
     const line_count = t.bodyLineCount();
+    // Incremental highlight state across consecutive painted rows (avoids O(n²)
+    // when `lattr` is unset). `syn_next` is the line `syn_st` applies to.
+    var syn_st: ?render.HighlightState = null;
+    var syn_next: u64 = 0;
     var row: u16 = 0;
     while (row < t.h) : (row += 1) {
         const row_y: i16 = t.y + @as(i16, @intCast(row));
@@ -334,11 +366,20 @@ pub fn paintBody(term: *TermScreen, t: *const tw.TextWindow, attr: Attribute) vo
         if (attrs == null) {
             if (t.syntax) |syn| {
                 if (line_text) |lt| {
-                    const st = syntaxStateAtLine(t, syn, line_idx);
+                    const st = blk: {
+                        if (syn_st) |prev| {
+                            if (line_idx == syn_next) break :blk prev;
+                        }
+                        break :blk syntaxStateAtLine(t, syn, line_idx);
+                    };
                     if (!st.isDisabled()) {
                         const use_len = @min(lt.len, attr_row_buf.len);
-                        _ = syn.parseLine(lt[0..use_len], st, attr_row_buf[0..use_len]);
+                        const end = syn.parseLine(lt[0..use_len], st, attr_row_buf[0..use_len]);
                         attrs = attr_row_buf[0..use_len];
+                        syn_st = end;
+                        syn_next = line_idx +% 1;
+                    } else {
+                        syn_st = null;
                     }
                 }
             }
@@ -968,6 +1009,43 @@ test "paintBody fills attrs from live Syntax JSF" {
     try testing.expect(c0.attr.dim or terminal.Color.eql(c0.attr.fg, .{ .indexed = 2 }));
     const c1 = cellAt(&term, t.x, @intCast(t.y + 1));
     try testing.expectEqual(@as(u21, 'x'), c1.cp);
+}
+
+test "paintBody uses LineAttrCache for multi-line syntax state" {
+    const src =
+        \\=Idle
+        \\=Comment
+        \\:idle Idle
+        \\  *    idle
+        \\  "#"    comment    recolor=-1
+        \\:comment Comment comment
+        \\  *    comment
+        \\  "\n"    comment
+    ;
+    var syn = try render.loadSyntax(testing.allocator, "c", src);
+    defer syn.deinit();
+    var cache = try render.LineAttrCache.init(testing.allocator);
+    defer cache.deinit();
+
+    var scr = try screen.Screen.init(testing.allocator, 20, 6);
+    defer scr.deinit();
+    const win = try scr.createText(null, null, 5);
+    scr.layout();
+    const t = win.asText().?;
+    const lines = [_][]const u8{ "x", "#y", "z" };
+    t.body_lines = &lines;
+    t.syntax = &syn;
+    t.lattr = &cache;
+
+    var term = try TermScreen.init(testing.allocator, 20, 6);
+    defer term.deinit();
+    paintBody(&term, t, .none);
+
+    // Line 2 still inside block comment started on line 1.
+    const c = cellAt(&term, t.x, @intCast(t.y + 2));
+    try testing.expectEqual(@as(u21, 'z'), c.cp);
+    try testing.expect(c.attr.dim or terminal.Color.eql(c.attr.fg, .{ .indexed = 2 }));
+    try testing.expect(cache.invalid_window == -1 or cache.first_invalid > 2);
 }
 
 test "paintBody viewmode links carry OSC 8 urls through flush" {

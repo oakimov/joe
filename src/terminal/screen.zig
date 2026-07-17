@@ -5,6 +5,8 @@
 //! diffs `cells` against `display` and emits only changed runs (plus EL
 //! for blank tails). When a dirty row is a pure within-line insert/delete,
 //! `flush` may emit ICH/DCH ("magic") before painting remaining diffs.
+//! Pure vertical region shifts may emit IL/DL. Cells carry up to
+//! `COMPOSE_MARKS` combining marks (JOE `COMPOSE - 1`).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -73,18 +75,29 @@ pub const Attribute = struct {
     }
 };
 
+/// Combining marks stored per cell (JOE `COMPOSE - 1` = base + 3 marks).
+pub const COMPOSE_MARKS: usize = 3;
+
 pub const Cell = struct {
     /// Unicode scalar; 0 means blank / unused / wide-continuation.
     cp: u21 = ' ',
+    /// Combining marks attached to `cp` (0-terminated / zero-padded).
+    combine: [COMPOSE_MARKS]u21 = .{0} ** COMPOSE_MARKS,
     attr: Attribute = .none,
 
     pub fn eql(a: Cell, b: Cell) bool {
-        return a.cp == b.cp and Attribute.eql(a.attr, b.attr);
+        return a.cp == b.cp and Attribute.eql(a.attr, b.attr) and std.mem.eql(u21, &a.combine, &b.combine);
     }
 
     /// Visually blank with default attributes (space or zeroed cell).
     pub fn isBlankNone(self: Cell) bool {
-        return (self.cp == 0 or self.cp == ' ') and Attribute.eql(self.attr, .none);
+        if (!(self.cp == 0 or self.cp == ' ') or !Attribute.eql(self.attr, .none)) return false;
+        for (self.combine) |m| if (m != 0) return false;
+        return true;
+    }
+
+    pub fn hasCombining(self: Cell) bool {
+        return self.combine[0] != 0;
     }
 };
 
@@ -267,6 +280,10 @@ pub const Screen = struct {
     /// pure insert/delete shift (JOE `insdel` / disabled-C `magic`). Default
     /// true: ANSI ICH/DCH fallbacks are always available.
     use_insdel: bool = true,
+    /// When true, `flush` may use IL/DL when a dirty region is a pure
+    /// vertical shift (hardware scroll). Default true: ANSI IL/DL fallbacks
+    /// are always available.
+    use_scroll: bool = true,
     /// Fallback tab width when terminfo `it`/`tw` is absent (JOE default 8).
     tab_width: u16 = 8,
     /// Optional sequence overrides (unit tests / hosts without terminfo).
@@ -1061,12 +1078,36 @@ pub const Screen = struct {
     }
 
     pub fn writeChar(self: *Screen, x: u16, y: u16, cp: u21, attr: Attribute) void {
+        self.writeCell(x, y, .{ .cp = cp, .attr = attr });
+    }
+
+    /// Write a full cell (base + combining marks + attr). No-op when equal.
+    pub fn writeCell(self: *Screen, x: u16, y: u16, cell: Cell) void {
         if (x >= self.width or y >= self.height) return;
         const idx = @as(usize, y) * @as(usize, self.width) + @as(usize, x);
-        const cell = Cell{ .cp = cp, .attr = attr };
-        if (self.cells[idx].cp == cell.cp and Attribute.eql(self.cells[idx].attr, cell.attr)) return;
+        if (Cell.eql(self.cells[idx], cell)) return;
         self.cells[idx] = cell;
         self.dirty_rows.set(y);
+    }
+
+    /// Attach a combining mark to the cell at `(x, y)`. No-op when slots are
+    /// full or `mark` is not combining. Marks beyond `COMPOSE_MARKS` are dropped
+    /// (JOE still emits extras without storing them in the shadow cell).
+    pub fn addCombining(self: *Screen, x: u16, y: u16, mark: u21) void {
+        if (x >= self.width or y >= self.height) return;
+        if (!isCombining(mark)) return;
+        const idx = @as(usize, y) * @as(usize, self.width) + @as(usize, x);
+        var cell = self.cells[idx];
+        for (&cell.combine) |*slot| {
+            if (slot.* == 0) {
+                slot.* = mark;
+                if (!Cell.eql(self.cells[idx], cell)) {
+                    self.cells[idx] = cell;
+                    self.dirty_rows.set(y);
+                }
+                return;
+            }
+        }
     }
 
     pub fn writeText(self: *Screen, x: u16, y: u16, text: []const u8, attr: Attribute) void {
@@ -1087,7 +1128,13 @@ pub const Screen = struct {
             const w = displayWidth(cp);
             if (w == 0) {
                 // Combining/control: do not advance the cursor column.
-                // Cell model has no combining slot yet — skip emission.
+                if (isCombining(cp) and col > x) {
+                    var base_col = col - 1;
+                    const base_idx = @as(usize, y) * @as(usize, self.width) + @as(usize, base_col);
+                    // Wide continuation belongs to the previous base glyph.
+                    if (self.cells[base_idx].cp == 0 and base_col > 0) base_col -= 1;
+                    self.addCombining(base_col, y, cp);
+                }
                 i += len;
                 continue;
             }
@@ -1241,20 +1288,10 @@ pub const Screen = struct {
         }
         self.markDirtyRange(y, region_last);
 
+        self.cursor_x = 0;
+        self.cursor_y = y;
         try self.appendCup(0, y);
-        if (self.terminfo) |ti| {
-            if (ti.formatIl(n)) |seq| {
-                if (seq.len != 0) {
-                    try self.out.appendSlice(self.allocator, seq);
-                    return;
-                }
-            }
-        }
-        if (n == 1) {
-            try self.out.appendSlice(self.allocator, "\x1b[L");
-        } else {
-            try self.out.print(self.allocator, "\x1b[{d}L", .{n});
-        }
+        try self.appendIl(n);
     }
 
     /// Delete `count` lines at `y` within the current scroll region.
@@ -1274,7 +1311,31 @@ pub const Screen = struct {
         }
         self.markDirtyRange(y, region_last);
 
+        self.cursor_x = 0;
+        self.cursor_y = y;
         try self.appendCup(0, y);
+        try self.appendDl(n);
+    }
+
+    fn appendIl(self: *Screen, n: u16) !void {
+        if (n == 0) return;
+        if (self.terminfo) |ti| {
+            if (ti.formatIl(n)) |seq| {
+                if (seq.len != 0) {
+                    try self.out.appendSlice(self.allocator, seq);
+                    return;
+                }
+            }
+        }
+        if (n == 1) {
+            try self.out.appendSlice(self.allocator, "\x1b[L");
+        } else {
+            try self.out.print(self.allocator, "\x1b[{d}L", .{n});
+        }
+    }
+
+    fn appendDl(self: *Screen, n: u16) !void {
+        if (n == 0) return;
         if (self.terminfo) |ti| {
             if (ti.formatDl(n)) |seq| {
                 if (seq.len != 0) {
@@ -1303,6 +1364,14 @@ pub const Screen = struct {
             break :blk @as(usize, 1);
         };
         try self.out.appendSlice(self.allocator, utf8_buf[0..len]);
+    }
+
+    fn emitCell(self: *Screen, cell: Cell) !void {
+        try self.emitCodepoint(cell.cp);
+        for (cell.combine) |mark| {
+            if (mark == 0) break;
+            try self.emitCodepoint(mark);
+        }
     }
 
     /// Clear cells from column `x` through end of row `y`, then emit EL
@@ -1420,6 +1489,14 @@ pub const Screen = struct {
         try self.appendDch(n);
     }
 
+    const ScrollMagic = struct {
+        kind: enum { up, down },
+        top: u16,
+        last: u16,
+        n: u16,
+        keep: u16,
+    };
+
     const LineMagic = struct {
         kind: enum { insert, delete },
         at: u16,
@@ -1427,6 +1504,132 @@ pub const Screen = struct {
         /// Columns kept by the shift (width - at - n). Larger is better.
         keep: u16,
     };
+
+    fn rowCellsEqlDisplay(self: *const Screen, cells_y: u16, display_y: u16) bool {
+        return cellsEqualRange(self.rowSliceConst(cells_y), self.displayRowSliceConst(display_y));
+    }
+
+    fn rowSliceConst(self: *const Screen, y: u16) []const Cell {
+        const start = @as(usize, y) * @as(usize, self.width);
+        return self.cells[start .. start + self.width];
+    }
+
+    fn displayRowSliceConst(self: *const Screen, y: u16) []const Cell {
+        const start = @as(usize, y) * @as(usize, self.width);
+        return self.display[start .. start + self.width];
+    }
+
+    /// Detect a pure vertical region shift (hardware scroll candidate).
+    /// Requires keep >= 2 and that the shift is useful (not already synced).
+    fn findScrollMagic(self: *const Screen) ?ScrollMagic {
+        if (!self.use_scroll or self.height < 3) return null;
+        var best: ?ScrollMagic = null;
+
+        var n: u16 = 1;
+        while (n <= self.height / 2) : (n += 1) {
+            // Scroll up: cells[y] == display[y+n] for a run, new rows at bottom.
+            var y: u16 = 0;
+            while (y + n < self.height) {
+                if (!self.rowCellsEqlDisplay(y, y + n)) {
+                    y += 1;
+                    continue;
+                }
+                const run_top = y;
+                while (y + n < self.height and self.rowCellsEqlDisplay(y, y + n)) : (y += 1) {}
+                const keep = y - run_top;
+                if (keep < 2) continue;
+                const run_last = run_top + keep + n - 1;
+                if (run_last >= self.height) continue;
+                var useful = false;
+                var i: u16 = run_top;
+                while (i < run_top + keep) : (i += 1) {
+                    if (!self.rowCellsEqlDisplay(i, i)) {
+                        useful = true;
+                        break;
+                    }
+                }
+                if (!useful) continue;
+                const cand = ScrollMagic{ .kind = .up, .top = run_top, .last = run_last, .n = n, .keep = keep };
+                if (best == null or cand.keep > best.?.keep or (cand.keep == best.?.keep and cand.n < best.?.n)) {
+                    best = cand;
+                }
+            }
+
+            // Scroll down: cells[y+n] == display[y] for a run, new rows at top.
+            y = 0;
+            while (y + n < self.height) {
+                if (!self.rowCellsEqlDisplay(y + n, y)) {
+                    y += 1;
+                    continue;
+                }
+                const run_top = y;
+                while (y + n < self.height and self.rowCellsEqlDisplay(y + n, y)) : (y += 1) {}
+                const keep = y - run_top;
+                if (keep < 2) continue;
+                // Region = new rows [run_top, run_top+n) + kept [run_top+n, ...].
+                const run_last = run_top + keep + n - 1;
+                if (run_last >= self.height) continue;
+                var useful = false;
+                var i: u16 = run_top + n;
+                while (i <= run_last) : (i += 1) {
+                    if (!self.rowCellsEqlDisplay(i, i)) {
+                        useful = true;
+                        break;
+                    }
+                }
+                if (!useful) continue;
+                const cand = ScrollMagic{ .kind = .down, .top = run_top, .last = run_last, .n = n, .keep = keep };
+                if (best == null or cand.keep > best.?.keep or (cand.keep == best.?.keep and cand.n < best.?.n)) {
+                    best = cand;
+                }
+            }
+        }
+        return best;
+    }
+
+    fn applyDisplayScrollUp(self: *Screen, top: u16, last: u16, n: u16) void {
+        var y: u16 = top;
+        while (y + n <= last) : (y += 1) {
+            @memcpy(self.displayRowSlice(y), self.displayRowSlice(y + n));
+        }
+        var clear_y: u16 = last - n + 1;
+        while (clear_y <= last) : (clear_y += 1) {
+            @memset(self.displayRowSlice(clear_y), .{});
+        }
+    }
+
+    fn applyDisplayScrollDown(self: *Screen, top: u16, last: u16, n: u16) void {
+        var src: u16 = last - n + 1;
+        while (src > top) {
+            src -= 1;
+            @memcpy(self.displayRowSlice(src + n), self.displayRowSlice(src));
+        }
+        var clear_y: u16 = top;
+        while (clear_y < top + n) : (clear_y += 1) {
+            @memset(self.displayRowSlice(clear_y), .{});
+        }
+    }
+
+    fn applyScrollMagic(self: *Screen, op: ScrollMagic) !void {
+        const old_top = self.scroll_top;
+        const old_last = self.scroll_last;
+        const need_csr = op.top != old_top or op.last != old_last;
+        if (need_csr) try self.setScrollRegion(op.top, op.last);
+        try self.appendCup(0, op.top);
+        self.cursor_x = 0;
+        self.cursor_y = op.top;
+        switch (op.kind) {
+            .up => {
+                try self.appendDl(op.n);
+                self.applyDisplayScrollUp(op.top, op.last, op.n);
+            },
+            .down => {
+                try self.appendIl(op.n);
+                self.applyDisplayScrollDown(op.top, op.last, op.n);
+            },
+        }
+        if (need_csr) try self.setScrollRegion(old_top, old_last);
+    }
 
     fn rowHasWideGlyph(self: *const Screen, y: u16) bool {
         const row_off = @as(usize, y) * @as(usize, self.width);
@@ -1545,13 +1748,18 @@ pub const Screen = struct {
 
     /// Emit only cells that differ from `display`, then sync `display` and
     /// clear dirty bits. Blank tails use EL. Within-line insert/delete may
-    /// emit ICH/DCH first when `use_insdel`. Does not write to a TTY —
-    /// caller drains `out` / `takeOut()`.
+    /// emit ICH/DCH first when `use_insdel`. Pure vertical shifts may emit
+    /// IL/DL when `use_scroll`. Does not write to a TTY — caller drains
+    /// `out` / `takeOut()`.
     pub fn flush(self: *Screen) !void {
         const want_x = self.cursor_x;
         const want_y = self.cursor_y;
         const want_attr = self.current_attr;
         var emit_attr: ?Attribute = null;
+
+        if (self.findScrollMagic()) |sop| {
+            try self.applyScrollMagic(sop);
+        }
 
         var y: u16 = 0;
         while (y < self.height) : (y += 1) {
@@ -1615,7 +1823,7 @@ pub const Screen = struct {
                         try self.appendAttr(run_cell.attr);
                         emit_attr = run_cell.attr;
                     }
-                    try self.emitCodepoint(run_cell.cp);
+                    try self.emitCell(run_cell);
                     self.display[run_idx] = run_cell;
 
                     const w: u16 = blk: {
@@ -2511,4 +2719,107 @@ test "Screen.flush magic disabled skips ICH/DCH" {
     const out = screen.takeOut();
     try testing.expect(std.mem.indexOf(u8, out, "\x1b[P") == null);
     try testing.expect(std.mem.indexOf(u8, out, "\x1b[1P") == null);
+}
+
+test "Screen.writeText stores combining marks" {
+    var screen = try Screen.init(testing.allocator, 4, 1);
+    defer screen.deinit();
+    // "e" + combining acute U+0301
+    screen.writeText(0, 0, "e\u{0301}X", .none);
+    try testing.expectEqual(@as(u21, 'e'), screen.cells[0].cp);
+    try testing.expectEqual(@as(u21, 0x0301), screen.cells[0].combine[0]);
+    try testing.expectEqual(@as(u21, 'X'), screen.cells[1].cp);
+    try testing.expect(!screen.cells[1].hasCombining());
+
+    screen.setCursor(0, 0);
+    try screen.flush();
+    const out = screen.takeOut();
+    try testing.expect(std.mem.indexOf(u8, out, "e") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\u{0301}") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "X") != null);
+}
+
+test "Screen.flush scroll magic emits DL on region up-shift" {
+    var screen = try Screen.init(testing.allocator, 4, 4);
+    defer screen.deinit();
+    screen.writeText(0, 0, "AAAA", .none);
+    screen.writeText(0, 1, "BBBB", .none);
+    screen.writeText(0, 2, "CCCC", .none);
+    screen.writeText(0, 3, "DDDD", .none);
+    screen.setCursor(0, 0);
+    try screen.flush();
+    screen.clearOut();
+
+    // Scroll content up by 1: BBBB CCCC DDDD NEW.
+    @memcpy(screen.rowSlice(0), screen.rowSlice(1));
+    @memcpy(screen.rowSlice(1), screen.rowSlice(2));
+    @memcpy(screen.rowSlice(2), screen.rowSlice(3));
+    @memset(screen.rowSlice(3), .{});
+    screen.writeText(0, 3, "EEEE", .none);
+    screen.markDirtyRange(0, 3);
+    screen.setCursor(0, 0);
+    try screen.flush();
+    const out = screen.takeOut();
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[M") != null or std.mem.indexOf(u8, out, "\x1b[1M") != null);
+    // Kept rows should not be fully repainted.
+    try testing.expect(std.mem.indexOf(u8, out, "BBBB") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "CCCC") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "EEEE") != null);
+    try testing.expectEqual(@as(u21, 'B'), screen.display[0].cp);
+    try testing.expectEqual(@as(u21, 'E'), screen.display[12].cp);
+}
+
+test "Screen.flush scroll magic emits IL on region down-shift" {
+    var screen = try Screen.init(testing.allocator, 4, 4);
+    defer screen.deinit();
+    screen.writeText(0, 0, "AAAA", .none);
+    screen.writeText(0, 1, "BBBB", .none);
+    screen.writeText(0, 2, "CCCC", .none);
+    screen.writeText(0, 3, "DDDD", .none);
+    screen.setCursor(0, 0);
+    try screen.flush();
+    screen.clearOut();
+
+    // Scroll content down by 1: NEW AAAA BBBB CCCC.
+    @memcpy(screen.rowSlice(3), screen.rowSlice(2));
+    @memcpy(screen.rowSlice(2), screen.rowSlice(1));
+    @memcpy(screen.rowSlice(1), screen.rowSlice(0));
+    @memset(screen.rowSlice(0), .{});
+    screen.writeText(0, 0, "ZZZZ", .none);
+    screen.markDirtyRange(0, 3);
+    screen.setCursor(0, 0);
+    try screen.flush();
+    const out = screen.takeOut();
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[L") != null or std.mem.indexOf(u8, out, "\x1b[1L") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "AAAA") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "BBBB") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "ZZZZ") != null);
+    try testing.expectEqual(@as(u21, 'Z'), screen.display[0].cp);
+    try testing.expectEqual(@as(u21, 'A'), screen.display[4].cp);
+}
+
+test "Screen.flush scroll magic disabled skips IL/DL" {
+    var screen = try Screen.init(testing.allocator, 4, 4);
+    defer screen.deinit();
+    screen.use_scroll = false;
+    screen.writeText(0, 0, "AAAA", .none);
+    screen.writeText(0, 1, "BBBB", .none);
+    screen.writeText(0, 2, "CCCC", .none);
+    screen.writeText(0, 3, "DDDD", .none);
+    screen.setCursor(0, 0);
+    try screen.flush();
+    screen.clearOut();
+
+    @memcpy(screen.rowSlice(0), screen.rowSlice(1));
+    @memcpy(screen.rowSlice(1), screen.rowSlice(2));
+    @memcpy(screen.rowSlice(2), screen.rowSlice(3));
+    @memset(screen.rowSlice(3), .{});
+    screen.writeText(0, 3, "EEEE", .none);
+    screen.markDirtyRange(0, 3);
+    screen.setCursor(0, 0);
+    try screen.flush();
+    const out = screen.takeOut();
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[M") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[1M") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[L") == null);
 }

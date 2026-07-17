@@ -241,8 +241,7 @@ pub fn writeIntoObuf(
 
 /// Sync hybrid `SCRN.scrn`/`attr` shadow grid into a redesign `Screen`.
 ///
-/// `cells` is row-major `COMPOSE=4` int cells (only base codepoint slot 0 is
-/// used; combining marks are ignored — Zig `Cell` has no compose slots yet).
+/// `cells` is row-major `COMPOSE=4` int cells (base + up to 3 combining marks).
 /// Negative sentinels (JOE "unknown") become continuation/`cp=0`; the JOE
 /// erase-eol `'\n'` marker becomes a blank space. `width`/`height` are the
 /// hybrid grid dimensions (may exceed `scr` — excess is clipped).
@@ -270,7 +269,13 @@ pub fn syncHybridGridToScreen(
             else
                 @intCast(raw);
             const attr = attributeFromHybrid(atr, palette);
-            scr.writeChar(@intCast(x), @intCast(y), cp, attr);
+            var combine: [screen.COMPOSE_MARKS]u21 = .{0} ** screen.COMPOSE_MARKS;
+            var ci: usize = 0;
+            while (ci < screen.COMPOSE_MARKS) : (ci += 1) {
+                const mark = cells[idx][ci + 1];
+                if (mark > 0) combine[ci] = @intCast(mark);
+            }
+            scr.writeCell(@intCast(x), @intCast(y), .{ .cp = cp, .combine = combine, .attr = attr });
         }
     }
 }
@@ -481,5 +486,26 @@ test "syncHybridGridToScreen copies base cells and attrs" {
     try testing.expectEqual(@as(u21, ' '), scr.cells[5].cp);
     try testing.expect(scr.dirty_rows.isSet(0));
     try testing.expect(scr.dirty_rows.isSet(1));
+}
+
+test "syncHybridGridToScreen copies combining marks" {
+    var scr = try Screen.init(testing.allocator, 2, 1);
+    defer scr.deinit();
+
+    var cells: [2][4]i32 = .{.{0} ** 4} ** 2;
+    var attrs: [2]i32 = .{0} ** 2;
+    cells[0][0] = 'e';
+    cells[0][1] = 0x0301; // combining acute
+    cells[0][2] = 0x0302; // combining circumflex
+    cells[1][0] = 'Z';
+
+    syncHybridGridToScreen(&scr, &cells, &attrs, 2, 1, null);
+
+    try testing.expectEqual(@as(u21, 'e'), scr.cells[0].cp);
+    try testing.expectEqual(@as(u21, 0x0301), scr.cells[0].combine[0]);
+    try testing.expectEqual(@as(u21, 0x0302), scr.cells[0].combine[1]);
+    try testing.expectEqual(@as(u21, 0), scr.cells[0].combine[2]);
+    try testing.expectEqual(@as(u21, 'Z'), scr.cells[1].cp);
+    try testing.expect(!scr.cells[1].hasCombining());
 }
 

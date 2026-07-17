@@ -368,6 +368,139 @@ pub const MenuWindow = struct {
         return -1;
     }
 
+    /// JOE `mscrup` — scroll the menu view up by `amnt` rows (columns if transpose).
+    /// Returns 0 on movement, -1 when already at the top edge.
+    pub fn scrollUp(self: *MenuWindow, amnt: usize) i32 {
+        if (amnt == 0) return -1;
+        if (self.transpose) {
+            if (self.top >= amnt) {
+                self.top -= amnt;
+                self.cursor -= amnt;
+                return 0;
+            } else if (self.top != 0) {
+                self.cursor -= self.top;
+                self.top = 0;
+                return 0;
+            } else {
+                const lines = if (self.grid.lines == 0) 1 else self.grid.lines;
+                const row = self.cursor % lines;
+                if (row != 0) {
+                    self.cursor -= row;
+                    return 0;
+                }
+                return -1;
+            }
+        }
+
+        const per = if (self.grid.perline == 0) 1 else self.grid.perline;
+        if (self.top >= amnt * per) {
+            self.top -= amnt * per;
+            self.cursor -= amnt * per;
+            return 0;
+        } else if (self.top != 0) {
+            self.cursor -= self.top;
+            self.top = 0;
+            return 0;
+        } else if (self.cursor >= per) {
+            self.cursor = self.cursor % per;
+            return 0;
+        }
+        return -1;
+    }
+
+    /// JOE `mscrdn` — scroll the menu view down by `amnt` rows (columns if transpose).
+    pub fn scrollDown(self: *MenuWindow, amnt: usize) i32 {
+        if (amnt == 0) return -1;
+        if (self.h == 0) return -1;
+
+        if (self.transpose) {
+            const lines = if (self.grid.lines == 0) 1 else self.grid.lines;
+            const per = if (self.grid.perline == 0) 1 else self.grid.perline;
+            var col = self.cursor / lines;
+            const y = self.cursor % lines;
+            const h = lines;
+            const t = self.top;
+            var cut = if (self.grid.nitems == 0) lines else self.grid.nitems % lines;
+            if (cut == 0) cut = lines;
+            self.cursor = y;
+
+            if (t + self.h + amnt <= h) {
+                self.top += amnt;
+                self.cursor += amnt;
+                if (self.cursor >= cut and col == per - 1) col -= 1;
+                self.cursor += col * lines;
+                return 0;
+            } else if (t + self.h < h) {
+                const move = h - (t + self.h);
+                self.top += move;
+                self.cursor += move;
+                if (self.cursor >= cut and col == per - 1) col -= 1;
+                self.cursor += col * lines;
+                return 0;
+            } else if (y + 1 != h) {
+                self.cursor = h - 1;
+                if (self.cursor >= cut and col == per - 1) col -= 1;
+                self.cursor += col * lines;
+                return 0;
+            } else {
+                self.cursor += col * lines;
+                return -1;
+            }
+        }
+
+        const per = if (self.grid.perline == 0) 1 else self.grid.perline;
+        if (self.grid.nitems == 0) return -1;
+        const col = self.cursor % per;
+        const y = self.cursor / per;
+        const total_lines = (self.grid.nitems + per - 1) / per;
+        const t = self.top / per;
+        self.cursor -= col;
+
+        if (t + self.h + amnt <= total_lines) {
+            self.top += amnt * per;
+            self.cursor += amnt * per;
+            if (self.cursor + col >= self.grid.nitems) {
+                self.cursor = self.grid.nitems - 1;
+            } else {
+                self.cursor += col;
+            }
+            return 0;
+        } else if (t + self.h < total_lines) {
+            const move = total_lines - (t + self.h);
+            self.top += move * per;
+            self.cursor += move * per;
+            if (self.cursor + col >= self.grid.nitems) {
+                self.cursor = self.grid.nitems - 1;
+            } else {
+                self.cursor += col;
+            }
+            return 0;
+        } else if (y + 1 != total_lines) {
+            self.cursor = (total_lines - 1) * per;
+            if (self.cursor + col >= self.grid.nitems) {
+                self.cursor = self.grid.nitems - 1;
+            } else {
+                self.cursor += col;
+            }
+            return 0;
+        } else {
+            self.cursor += col;
+            return -1;
+        }
+    }
+
+    /// JOE `umpgup` — scroll up by about half the visible height.
+    pub fn pageUp(self: *MenuWindow) i32 {
+        const amnt = (@as(usize, self.h) + 1) / 2;
+        return self.scrollUp(if (amnt == 0) 1 else amnt);
+    }
+
+    /// JOE `umpgdn` — scroll down by about half the visible height.
+    pub fn pageDown(self: *MenuWindow) i32 {
+        const amnt = (@as(usize, self.h) + 1) / 2;
+        return self.scrollDown(if (amnt == 0) 1 else amnt);
+    }
+
     /// JOE `umtab` — wrap to start after last item.
     pub fn moveTab(self: *MenuWindow) void {
         if (self.grid.nitems == 0) return;
@@ -579,6 +712,65 @@ test "MenuWindow navigation and follow (row-major)" {
     menu_win.cursor = 0;
     menu_win.moveEol();
     try testing.expectEqual(@as(usize, 4), menu_win.cursor);
+}
+
+test "MenuWindow scrollUp/scrollDown row-major" {
+    var scr = try screen.Screen.init(testing.allocator, 20, 24);
+    defer scr.deinit();
+    const win = try scr.createText(null, null, 24);
+    win.h = 2;
+    win.w = 11; // perline=5 for width-1 labels
+
+    const items = [_][]const u8{ "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o" };
+    var menu_win = MenuWindow.init(win, &items, 0);
+    try testing.expectEqual(@as(usize, 5), menu_win.grid.perline);
+    try testing.expectEqual(@as(usize, 3), menu_win.grid.lines);
+
+    // Scroll down one row: top advances by perline, cursor follows.
+    try testing.expectEqual(@as(i32, 0), menu_win.scrollDown(1));
+    try testing.expectEqual(@as(usize, 5), menu_win.top);
+    try testing.expectEqual(@as(usize, 5), menu_win.cursor);
+
+    // Already showing the last windowful (rows 1..2 of 0..2); top stays,
+    // cursor jumps to the first cell of the final row (JOE mscrdn).
+    try testing.expectEqual(@as(i32, 0), menu_win.scrollDown(1));
+    try testing.expectEqual(@as(usize, 5), menu_win.top);
+    try testing.expectEqual(@as(usize, 10), menu_win.cursor);
+    try testing.expectEqual(@as(i32, -1), menu_win.scrollDown(1));
+
+    // Scroll back up to top.
+    try testing.expectEqual(@as(i32, 0), menu_win.scrollUp(1));
+    try testing.expectEqual(@as(usize, 0), menu_win.top);
+    try testing.expectEqual(@as(usize, 5), menu_win.cursor);
+    try testing.expectEqual(@as(i32, 0), menu_win.scrollUp(1)); // snap cursor into first row
+    try testing.expectEqual(@as(usize, 0), menu_win.top);
+    try testing.expectEqual(@as(usize, 0), menu_win.cursor);
+    try testing.expectEqual(@as(i32, -1), menu_win.scrollUp(1));
+}
+
+test "MenuWindow pageUp/pageDown use half height" {
+    var scr = try screen.Screen.init(testing.allocator, 20, 24);
+    defer scr.deinit();
+    const win = try scr.createText(null, null, 24);
+    win.h = 4;
+    win.w = 3; // perline=1 for width-1 labels ⇒ 1 column
+
+    var labels: [20][]const u8 = undefined;
+    var bufs: [20][4]u8 = undefined;
+    for (0..20) |i| {
+        labels[i] = std.fmt.bufPrint(&bufs[i], "{d}", .{i}) catch unreachable;
+    }
+    var menu_win = MenuWindow.init(win, labels[0..], 0);
+    try testing.expectEqual(@as(usize, 1), menu_win.grid.perline);
+
+    // pageDown amnt = (4+1)/2 = 2
+    try testing.expectEqual(@as(i32, 0), menu_win.pageDown());
+    try testing.expectEqual(@as(usize, 2), menu_win.top);
+    try testing.expectEqual(@as(usize, 2), menu_win.cursor);
+
+    try testing.expectEqual(@as(i32, 0), menu_win.pageUp());
+    try testing.expectEqual(@as(usize, 0), menu_win.top);
+    try testing.expectEqual(@as(usize, 0), menu_win.cursor);
 }
 
 test "MenuWindow jump and callbacks" {

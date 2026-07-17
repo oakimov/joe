@@ -29,10 +29,28 @@ pub const StrCap = union(enum) {
     cancelled,
 };
 
+/// Common rare/non-ANSI capabilities we may prefer over hard-coded sequences.
+/// Everyday SGR/CUP/ED stay ANSI-direct in `screen.zig`.
+pub const Caps = struct {
+    cup: ?[:0]const u8 = null,
+    clear: ?[:0]const u8 = null,
+    smcup: ?[:0]const u8 = null,
+    rmcup: ?[:0]const u8 = null,
+    smkx: ?[:0]const u8 = null,
+    rmkx: ?[:0]const u8 = null,
+    bel: ?[:0]const u8 = null,
+    flash: ?[:0]const u8 = null,
+    /// Set scroll region / insert/delete line — useful before Phase 6 cell-diff.
+    csr: ?[:0]const u8 = null,
+    il1: ?[:0]const u8 = null,
+    dl1: ?[:0]const u8 = null,
+};
+
 pub const TermInfo = struct {
     /// Terminal name used for setup (may be empty if `$TERM` was used).
     name: []const u8,
     ready: bool = false,
+    caps: Caps = .{},
 
     /// Load terminfo for `term_name` (null → `$TERM`) against `fd`
     /// (usually stdout). Does not enter curses screen mode.
@@ -51,10 +69,43 @@ pub const TermInfo = struct {
             if (std.c.getenv("TERM")) |t| break :blk std.mem.span(t);
             break :blk "";
         };
-        return .{
+        var self: TermInfo = .{
             .name = name,
             .ready = true,
         };
+        self.caps = cacheCommonCaps();
+        return self;
+    }
+
+    fn cacheCommonCaps() Caps {
+        return .{
+            .cup = presentStr("cup"),
+            .clear = presentStr("clear"),
+            .smcup = presentStr("smcup"),
+            .rmcup = presentStr("rmcup"),
+            .smkx = presentStr("smkx"),
+            .rmkx = presentStr("rmkx"),
+            .bel = presentStr("bel"),
+            .flash = presentStr("flash"),
+            .csr = presentStr("csr"),
+            .il1 = presentStr("il1"),
+            .dl1 = presentStr("dl1"),
+        };
+    }
+
+    fn presentStr(cap: [*:0]const u8) ?[:0]const u8 {
+        return switch (getStrRaw(cap)) {
+            .present => |p| std.mem.span(p),
+            else => null,
+        };
+    }
+
+    fn getStrRaw(cap: [*:0]const u8) StrCap {
+        const p = c.tigetstr(cap);
+        if (p == null) return .absent;
+        // Cancelled capabilities are returned as (char *)-1.
+        if (@intFromPtr(p) == std.math.maxInt(usize)) return .cancelled;
+        return .{ .present = p.? };
     }
 
     pub fn getFlag(self: TermInfo, cap: [*:0]const u8) bool {
@@ -73,11 +124,7 @@ pub const TermInfo = struct {
 
     pub fn getStr(self: TermInfo, cap: [*:0]const u8) StrCap {
         _ = self;
-        const p = c.tigetstr(cap);
-        if (p == null) return .absent;
-        // Cancelled capabilities are returned as (char *)-1.
-        if (@intFromPtr(p) == std.math.maxInt(usize)) return .cancelled;
-        return .{ .present = p.? };
+        return getStrRaw(cap);
     }
 
     pub fn columns(self: TermInfo) ?u16 {
@@ -122,4 +169,12 @@ test "TermInfo.init against current TERM" {
     _ = ti.lines();
     _ = ti.getFlag("am");
     _ = ti.getStr("cup");
+    // Cached rare caps should agree with live tigetstr for cup when present.
+    switch (ti.getStr("cup")) {
+        .present => |p| {
+            try testing.expect(ti.caps.cup != null);
+            try testing.expectEqualStrings(std.mem.span(p), ti.caps.cup.?);
+        },
+        else => {},
+    }
 }

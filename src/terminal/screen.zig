@@ -147,19 +147,21 @@ pub const Screen = struct {
         var col: u16 = x;
         var i: usize = 0;
         while (i < text.len and col < self.width) {
-            const cp: u21 = text[i];
-            // ASCII fast path; full UTF-8 decode can plug in later.
-            if (cp < 0x80) {
-                self.writeChar(col, y, cp, attr);
-                col += 1;
-                i += 1;
-            } else {
-                // Skip continuation for now — store replacement until utf8 module is wired.
+            const len = std.unicode.utf8ByteSequenceLength(text[i]) catch {
                 self.writeChar(col, y, 0xFFFD, attr);
                 col += 1;
                 i += 1;
-                while (i < text.len and (text[i] & 0xC0) == 0x80) : (i += 1) {}
+                continue;
+            };
+            if (i + len > text.len) {
+                self.writeChar(col, y, 0xFFFD, attr);
+                break;
             }
+            const cp = std.unicode.utf8Decode(text[i..][0..len]) catch 0xFFFD;
+            self.writeChar(col, y, cp, attr);
+            // Display-column advance: East Asian wide width lands in Phase 6/unicode.
+            col +|= 1;
+            i += len;
         }
     }
 
@@ -290,4 +292,28 @@ test "Screen.clear marks all dirty and queues ED" {
     try testing.expect(std.mem.indexOf(u8, screen.takeOut(), "\x1b[2J") != null);
     try testing.expect(screen.dirty_rows.isSet(0));
     try testing.expect(screen.dirty_rows.isSet(1));
+}
+
+test "Screen.writeText decodes UTF-8 codepoints" {
+    var screen = try Screen.init(testing.allocator, 8, 1);
+    defer screen.deinit();
+
+    // "A" + U+00E9 (é) + U+1F4A9 (💩, 4-byte) — each advances one cell for now.
+    screen.writeText(0, 0, "A\u{e9}\u{1f4a9}", .none);
+    try testing.expectEqual(@as(u21, 'A'), screen.cells[0].cp);
+    try testing.expectEqual(@as(u21, 0xE9), screen.cells[1].cp);
+    try testing.expectEqual(@as(u21, 0x1F4A9), screen.cells[2].cp);
+
+    try screen.flush();
+    const out = screen.takeOut();
+    try testing.expect(std.mem.indexOf(u8, out, "A") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\u{e9}") != null);
+}
+
+test "Screen.writeText replaces invalid UTF-8 with U+FFFD" {
+    var screen = try Screen.init(testing.allocator, 4, 1);
+    defer screen.deinit();
+    screen.writeText(0, 0, &[_]u8{ 0x80, 'x' }, .none);
+    try testing.expectEqual(@as(u21, 0xFFFD), screen.cells[0].cp);
+    try testing.expectEqual(@as(u21, 'x'), screen.cells[1].cp);
 }

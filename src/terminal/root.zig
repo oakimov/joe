@@ -10,7 +10,10 @@ pub const pty = @import("pty.zig");
 pub const screen = @import("screen.zig");
 
 pub const TermInfo = terminfo.TermInfo;
+pub const Caps = terminfo.Caps;
 pub const Tty = tty.Tty;
+pub const Key = tty.Key;
+pub const KeyParser = tty.KeyParser;
 pub const Pty = pty.Pty;
 pub const Screen = screen.Screen;
 pub const Attribute = screen.Attribute;

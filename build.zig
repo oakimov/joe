@@ -98,7 +98,7 @@ pub fn build(b: *std.Build) void {
             // REMOVED: joe/va.c — replaced by src/va.zig
             // REMOVED: joe/vfile.c — replaced by src/vfile.zig
             // REMOVED: joe/vs.c — replaced by src/vs.zig
-            "joe/w.c",
+            // REMOVED: joe/w.c — replaced by src/w.zig
             // REMOVED: joe/utils.c — replaced by src/utils.zig
             // REMOVED: joe/syntax.c — replaced by src/syntax.zig
             // REMOVED: joe/utf8.c — replaced by src/utf8.zig

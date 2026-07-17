@@ -32,4 +32,5 @@ comptime {
     _ = @import("kbd.zig");
     _ = @import("macro.zig");
     _ = @import("cmd.zig");
+    _ = @import("w.zig");
 }

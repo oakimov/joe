@@ -28,4 +28,5 @@ comptime {
     _ = @import("syntax.zig");
     _ = @import("termcap.zig");
     _ = @import("tty.zig");
+    _ = @import("scrn.zig");
 }

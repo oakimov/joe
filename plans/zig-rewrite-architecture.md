@@ -9,7 +9,7 @@
 - ✅ Phase 1: `utf8`, `unicode`, `vfile`, `gapbuffer` complete
 - ✅ Phase 2 (complete core utilities): `hash`, `va`, `vs`, `queue`, `builtin`, `blocks`, `utils`, `frag`, `undo`, `lattr`, `charmap`, `regex`, `options`, `rc` (196/196 green)
 - ✅ Phase 2 complete (`rc` landed)
-- ✅ Hybrid Phase 3: `colors` + `syntax` + `termcap` + `tty` landed (replaces `joe/colors.c` + `joe/syntax.c` + `joe/termcap.c` + `joe/tty.c`, 196/196 green)
+- ✅ Hybrid Phase 3: `colors` + `syntax` + `termcap` + `tty` + `scrn` landed (replaces `joe/colors.c` + `joe/syntax.c` + `joe/termcap.c` + `joe/tty.c` + `joe/scrn.c`, 196/196 green)
 - **Integration tests:** full suite **196/196 OK** (including viewmode)
 - **Recent hybrid fixes:** `binsb` uses `hallocFresh()` so freelist corruption cannot reclaim a still-live gap header and zero its `hole` (was wiping history into NULs/`@` on Command: prompt after 2× `blkcpy`); `inschn` skips `hfree` when `p.hdr == a`; `brm` uses `vsrm(current_dir)`; plus prior `brvs`/`vstrunc`, `binsmq`, `charmap->type`, unicode/`p_goto_bol`/`binsm`/`iskey` fixes
 - **Binary size:** Debug hybrid build via `zig build`
@@ -728,6 +728,7 @@ The build is always working — start with a binary that compiles and runs, then
 - ✅ `syntax.zig` — hybrid C-ABI port of jsf parser + DFA engine (replaces `joe/syntax.c`, 196 tests pass)
 - ✅ `termcap.zig` — hybrid C-ABI port of termcap loader + `texec`/`tcost`/`tcompile` (replaces `joe/termcap.c`, non-TERMINFO path, 196 tests pass)
 - ✅ `tty.zig` — hybrid C-ABI port replacing `joe/tty.c` (macOS POSIX termios+openpty+setitimer path: raw mode, signals, timers, mpx/pty; 196 tests)
+- ✅ `scrn.zig` — hybrid C-ABI port replacing `joe/scrn.c` (screen buffer, attributes, cursor/scroll, genfmt; non-TERMINFO path; 196 tests)
 - Unit tests per module
 - At this point: can display text with syntax highlighting
 

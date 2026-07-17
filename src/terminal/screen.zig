@@ -1,9 +1,9 @@
 //! Zig-native screen buffer + escape-sequence emitter.
 //!
 //! Stateful cell grid with dirty-row tracking. Common operations emit
-//! ANSI directly (no terminfo required for SGR/cursor/clear). Full
-//! cell-diff flush is Phase 6; this module still records intended cells
-//! and can emit a simple redraw of dirty rows.
+//! ANSI directly (no terminfo required for SGR/cursor/clear). `flush`
+//! diffs `cells` against `display` and emits only changed runs (plus EL
+//! for blank tails). Insert/delete-within-line "magic" stays Phase 6.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -76,6 +76,15 @@ pub const Cell = struct {
     /// Unicode scalar; 0 means blank / unused / wide-continuation.
     cp: u21 = ' ',
     attr: Attribute = .none,
+
+    pub fn eql(a: Cell, b: Cell) bool {
+        return a.cp == b.cp and Attribute.eql(a.attr, b.attr);
+    }
+
+    /// Visually blank with default attributes (space or zeroed cell).
+    pub fn isBlankNone(self: Cell) bool {
+        return (self.cp == 0 or self.cp == ' ') and Attribute.eql(self.attr, .none);
+    }
 };
 
 /// Terminal display columns for a Unicode scalar (East Asian Width lite).
@@ -324,10 +333,15 @@ pub const Screen = struct {
 
     pub fn clear(self: *Screen) void {
         @memset(self.cells, .{});
+        // ED wiped the physical screen — keep display in sync so the next
+        // cell-diff flush does not repaint every blank cell.
+        @memset(self.display, .{});
         self.dirty_rows.setRangeValue(.{ .start = 0, .end = self.height }, true);
         self.out.clearRetainingCapacity();
         // Emit clear-screen + home as a fast path.
         self.out.appendSlice(self.allocator, "\x1b[2J\x1b[H") catch {};
+        self.cursor_x = 0;
+        self.cursor_y = 0;
     }
 
     pub fn setAttr(self: *Screen, attr: Attribute) void {
@@ -1266,6 +1280,21 @@ pub const Screen = struct {
         }
     }
 
+    fn appendEl(self: *Screen) !void {
+        const seq: ?[]const u8 = if (self.terminfo) |ti| ti.caps.el else null;
+        try self.appendSeqOrAnsi(seq, "\x1b[K");
+    }
+
+    fn emitCodepoint(self: *Screen, cp: u21) !void {
+        var utf8_buf: [4]u8 = undefined;
+        const out_cp: u21 = if (cp == 0) ' ' else cp;
+        const len = std.unicode.utf8Encode(out_cp, &utf8_buf) catch blk: {
+            utf8_buf[0] = '?';
+            break :blk @as(usize, 1);
+        };
+        try self.out.appendSlice(self.allocator, utf8_buf[0..len]);
+    }
+
     /// Clear cells from column `x` through end of row `y`, then emit EL
     /// (terminfo `el` or ANSI `CSI K`). Moves the logical cursor to `(x, y)`.
     pub fn clearToEol(self: *Screen, x: u16, y: u16) !void {
@@ -1279,8 +1308,7 @@ pub const Screen = struct {
         self.cursor_x = start_x;
         self.cursor_y = y;
         try self.appendCup(start_x, y);
-        const seq: ?[]const u8 = if (self.terminfo) |ti| ti.caps.el else null;
-        try self.appendSeqOrAnsi(seq, "\x1b[K");
+        try self.appendEl();
     }
 
     /// Clear from `(x, y)` through end of screen: rest of row `y`, then all
@@ -1372,45 +1400,116 @@ pub const Screen = struct {
         }
     }
 
-    /// Emit dirty rows to `out`, then copy cells → display and clear dirty bits.
-    /// Does not write to a TTY — caller drains `out` / `takeOut()`.
+    /// Emit only cells that differ from `display`, then sync `display` and
+    /// clear dirty bits. Blank tails use EL. Does not write to a TTY —
+    /// caller drains `out` / `takeOut()`.
     pub fn flush(self: *Screen) !void {
-        var y: usize = 0;
+        const want_x = self.cursor_x;
+        const want_y = self.cursor_y;
+        const want_attr = self.current_attr;
+        var emit_attr: ?Attribute = null;
+
+        var y: u16 = 0;
         while (y < self.height) : (y += 1) {
             if (!self.dirty_rows.isSet(y)) continue;
-            try self.appendCup(0, @intCast(y));
-            var prev: ?Attribute = null;
+            const row_off = @as(usize, y) * @as(usize, self.width);
             var x: u16 = 0;
             while (x < self.width) {
-                const idx = y * @as(usize, self.width) + @as(usize, x);
+                const idx = row_off + @as(usize, x);
                 const cell = self.cells[idx];
-                // Skip wide-continuation cells (cp==0 after a width-2 glyph).
+
+                // Wide-continuation cells are owned by the previous glyph.
                 if (cell.cp == 0 and x > 0) {
-                    const prev_idx = idx - 1;
-                    if (self.cells[prev_idx].cp != 0 and displayWidth(self.cells[prev_idx].cp) >= 2) {
+                    const prev = self.cells[idx - 1];
+                    if (prev.cp != 0 and displayWidth(prev.cp) >= 2) {
                         self.display[idx] = cell;
                         x += 1;
                         continue;
                     }
                 }
-                if (prev == null or !Attribute.eql(prev.?, cell.attr)) {
-                    try self.appendAttr(cell.attr);
-                    prev = cell.attr;
+
+                if (Cell.eql(cell, self.display[idx])) {
+                    x += 1;
+                    continue;
                 }
-                var utf8_buf: [4]u8 = undefined;
-                const cp: u21 = if (cell.cp == 0) ' ' else cell.cp;
-                const len = std.unicode.utf8Encode(cp, &utf8_buf) catch blk: {
-                    utf8_buf[0] = '?';
-                    break :blk @as(usize, 1);
-                };
-                try self.out.appendSlice(self.allocator, utf8_buf[0..len]);
-                self.display[idx] = cell;
-                x += 1;
+
+                // Blank-none tail → EL (cheaper than painting spaces).
+                if (self.rowTailIsBlankNone(y, x) and self.rowTailDiffers(y, x)) {
+                    try self.moveTo(x, y);
+                    if (emit_attr == null or !Attribute.eql(emit_attr.?, .none)) {
+                        try self.appendAttr(.none);
+                        emit_attr = .none;
+                    }
+                    try self.appendEl();
+                    @memset(self.display[idx .. row_off + self.width], .{});
+                    break;
+                }
+
+                // Changed run: position once, then paint while cells differ.
+                try self.moveTo(x, y);
+                while (x < self.width) {
+                    const run_idx = row_off + @as(usize, x);
+                    const run_cell = self.cells[run_idx];
+
+                    if (run_cell.cp == 0 and x > 0) {
+                        const prev = self.cells[run_idx - 1];
+                        if (prev.cp != 0 and displayWidth(prev.cp) >= 2) {
+                            self.display[run_idx] = run_cell;
+                            x += 1;
+                            self.cursor_x = x;
+                            continue;
+                        }
+                    }
+
+                    if (Cell.eql(run_cell, self.display[run_idx])) break;
+                    if (self.rowTailIsBlankNone(y, x) and self.rowTailDiffers(y, x)) break;
+
+                    if (emit_attr == null or !Attribute.eql(emit_attr.?, run_cell.attr)) {
+                        try self.appendAttr(run_cell.attr);
+                        emit_attr = run_cell.attr;
+                    }
+                    try self.emitCodepoint(run_cell.cp);
+                    self.display[run_idx] = run_cell;
+
+                    const w: u16 = blk: {
+                        if (run_cell.cp == 0) break :blk 1;
+                        const dw = displayWidth(run_cell.cp);
+                        break :blk if (dw == 0) 1 else dw;
+                    };
+                    if (w >= 2 and x + 1 < self.width) {
+                        self.display[run_idx + 1] = self.cells[run_idx + 1];
+                    }
+                    x +|= w;
+                    self.cursor_x = @min(x, self.width -| 1);
+                    self.cursor_y = y;
+                }
             }
             self.dirty_rows.unset(y);
         }
-        try self.appendCup(self.cursor_x, self.cursor_y);
-        try self.appendAttr(self.current_attr);
+
+        try self.moveTo(want_x, want_y);
+        try self.appendAttr(want_attr);
+        self.current_attr = want_attr;
+    }
+
+    fn rowTailIsBlankNone(self: *Screen, y: u16, from_x: u16) bool {
+        if (from_x >= self.width) return true;
+        const row = self.rowSlice(y);
+        var x: u16 = from_x;
+        while (x < self.width) : (x += 1) {
+            if (!row[x].isBlankNone()) return false;
+        }
+        return true;
+    }
+
+    fn rowTailDiffers(self: *Screen, y: u16, from_x: u16) bool {
+        if (from_x >= self.width) return false;
+        const row_off = @as(usize, y) * @as(usize, self.width);
+        var x: u16 = from_x;
+        while (x < self.width) : (x += 1) {
+            if (!Cell.eql(self.cells[row_off + x], self.display[row_off + x])) return true;
+        }
+        return false;
     }
 
     pub fn takeOut(self: *Screen) []u8 {
@@ -1447,15 +1546,15 @@ test "Screen write + flush emits CUP and text" {
 
     const out = screen.takeOut();
     try testing.expect(std.mem.indexOf(u8, out, "Hi") != null);
-    // Row 2 (1-based) CUP somewhere in the stream.
-    try testing.expect(std.mem.indexOf(u8, out, "\x1b[2;") != null);
+    // Cursor already on row 1 via setCursor; cell-diff moveTo(0,1) prefers CR.
+    try testing.expect(std.mem.indexOfScalar(u8, out, '\r') != null or std.mem.indexOf(u8, out, "\x1b[2;") != null or std.mem.indexOf(u8, out, "\x1b[B") != null);
     // Bold SGR.
     try testing.expect(std.mem.indexOf(u8, out, "\x1b[0;1") != null);
 
     // Second flush with no changes should emit only cursor/attr restore.
     screen.clearOut();
     try screen.flush();
-    try testing.expect(std.mem.indexOf(u8, out, "Hi") == null or screen.takeOut().len < 32);
+    try testing.expect(screen.takeOut().len < 32);
 }
 
 test "Screen.clear marks all dirty and queues ED" {
@@ -1517,9 +1616,14 @@ test "Screen.appendCup uses ANSI without terminfo" {
     var screen = try Screen.init(testing.allocator, 4, 2);
     defer screen.deinit();
     try testing.expect(screen.terminfo == null);
+    try screen.appendCup(0, 0);
+    try testing.expectEqualStrings("\x1b[1;1H", screen.takeOut());
+
+    // Cell-diff flush at (0,0) needs no CUP when already home; still emits text.
+    screen.clearOut();
     screen.writeText(0, 0, "x", .none);
     try screen.flush();
-    try testing.expect(std.mem.indexOf(u8, screen.takeOut(), "\x1b[1;1H") != null);
+    try testing.expect(std.mem.indexOf(u8, screen.takeOut(), "x") != null);
 }
 
 test "Screen flush emits truecolor SGR" {
@@ -2092,4 +2196,85 @@ test "Screen.moveTo region_relative vpa is offset by scroll_top" {
     try testing.expectEqual(@as(u16, 7), screen.cursor_x);
     try testing.expectEqual(@as(u16, 8), screen.cursor_y);
     try testing.expectEqualStrings("\x1b[4d", screen.takeOut());
+}
+
+test "Cell.eql and isBlankNone" {
+    try testing.expect(Cell.eql(.{ .cp = 'A', .attr = .none }, .{ .cp = 'A', .attr = .none }));
+    try testing.expect(!Cell.eql(.{ .cp = 'A', .attr = .none }, .{ .cp = 'B', .attr = .none }));
+    try testing.expect(Cell.isBlankNone(.{}));
+    try testing.expect(Cell.isBlankNone(.{ .cp = 0, .attr = .none }));
+    try testing.expect(!Cell.isBlankNone(.{ .cp = 'A', .attr = .none }));
+    try testing.expect(!Cell.isBlankNone(.{ .cp = ' ', .attr = .{ .bold = true } }));
+}
+
+test "Screen.flush cell-diff skips unchanged prefix" {
+    var screen = try Screen.init(testing.allocator, 8, 1);
+    defer screen.deinit();
+
+    screen.writeText(0, 0, "Hello", .none);
+    screen.setCursor(5, 0);
+    try screen.flush();
+    screen.clearOut();
+
+    // Change only column 1 ('e' -> 'a'); prefix 'H' and suffix 'llo' unchanged.
+    screen.writeChar(1, 0, 'a', .none);
+    screen.setCursor(5, 0);
+    try screen.flush();
+    const out = screen.takeOut();
+    try testing.expect(std.mem.indexOf(u8, out, "a") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Hello") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "ello") == null);
+    // Should not CUP to column 0 of the row for a full redraw.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[1;1H") == null);
+}
+
+test "Screen.flush unchanged dirty row emits no cell payload" {
+    var screen = try Screen.init(testing.allocator, 6, 1);
+    defer screen.deinit();
+    screen.writeText(0, 0, "abc", .none);
+    screen.setCursor(0, 0);
+    try screen.flush();
+    screen.clearOut();
+
+    // Force dirty without changing cells.
+    screen.dirty_rows.set(0);
+    try screen.flush();
+    const out = screen.takeOut();
+    try testing.expect(std.mem.indexOf(u8, out, "abc") == null);
+    try testing.expect(out.len < 24);
+}
+
+test "Screen.flush blank tail uses EL" {
+    var screen = try Screen.init(testing.allocator, 6, 1);
+    defer screen.deinit();
+    screen.writeText(0, 0, "abcdef", .none);
+    screen.setCursor(0, 0);
+    try screen.flush();
+    screen.clearOut();
+
+    // Clear cells 2..end in the model without emitting (simulate editor erase).
+    @memset(screen.rowSlice(0)[2..], .{});
+    screen.dirty_rows.set(0);
+    screen.setCursor(2, 0);
+    try screen.flush();
+    const out = screen.takeOut();
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[K") != null);
+    // Should not paint spaces for the cleared tail.
+    try testing.expect(std.mem.indexOf(u8, out, "    ") == null);
+}
+
+test "Screen.flush after clear does not repaint blanks" {
+    var screen = try Screen.init(testing.allocator, 4, 2);
+    defer screen.deinit();
+    screen.writeText(0, 0, "xy", .none);
+    try screen.flush();
+    screen.clearOut();
+    screen.clear();
+    const cleared = screen.takeOut();
+    try testing.expect(std.mem.indexOf(u8, cleared, "\x1b[2J") != null);
+    screen.clearOut();
+    try screen.flush();
+    const out = screen.takeOut();
+    try testing.expect(std.mem.indexOf(u8, out, "xy") == null);
+    try testing.expect(out.len < 24);
 }

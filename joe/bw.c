@@ -44,6 +44,12 @@ extern int zig_bw_bwgenh(SCRN *t, int (*scrn)[COMPOSE], int *attr_base,
 extern int zig_bw_table_detect(P *anchor, off_t buf_line,
 	off_t *out_start, off_t *out_end, off_t *out_sep, int *out_ncols,
 	int *out_widths, int *out_aligns, int out_cap);
+/* Path A: gated Zig cursor follow (text + hex). */
+extern int zig_bw_bwfllwt(P *top, P *cursor, SCRN *t, int *updtab,
+	ptrdiff_t y, ptrdiff_t h, ptrdiff_t w,
+	off_t *offset, off_t *curlin, int hiline);
+extern int zig_bw_bwfllwh(P *top, P *cursor, SCRN *t, int *updtab,
+	ptrdiff_t y, ptrdiff_t h, ptrdiff_t w, off_t *offset);
 /* Path A Feature 2.1: gated Zig simple pipe substitute into vm_subst[]. */
 extern int zig_bw_table_simple(const unsigned char *line, int line_len, int row_type,
 	int *vm_subst, int vm_subst_len);
@@ -116,6 +122,12 @@ int opt_right = 8;
 void bwfllwh(W *thew)
 {
 	BW *w = (BW *)thew->object;
+	/* Path A: Zig-native hex follow (JOE_ZIG_BW_LGEN). */
+	if (zig_bw_lgen_enabled) {
+		if (zig_bw_bwfllwh(w->top, w->cursor, w->t->t, w->t->t->updtab,
+			w->y, w->h, w->w, &w->offset) >= 0)
+			return;
+	}
 	/* Top must be a multiple of 16 bytes */
 	if (w->top->byte%16) {
 		pbkwd(w->top,w->top->byte%16);
@@ -169,6 +181,13 @@ void bwfllwt(W *thew)
 {
 	BW *w = (BW *)thew->object;
 	P *newtop;
+
+	/* Path A: Zig-native text follow (JOE_ZIG_BW_LGEN). */
+	if (zig_bw_lgen_enabled) {
+		if (zig_bw_bwfllwt(w->top, w->cursor, w->t->t, w->t->t->updtab,
+			w->y, w->h, w->w, &w->offset, &w->curlin, w->o.hiline) >= 0)
+			return;
+	}
 
 	if (!pisbol(w->top)) {
 		p_goto_bol(w->top);
@@ -2698,10 +2717,75 @@ void bwgenh(BW *w)
 	prm(q);
 }
 
-/* C helpers for Zig Path A `zig_bw_bwgen` / `zig_bw_bwgenh`. */
+/* C helpers for Zig Path A `zig_bw_bwgen` / `zig_bw_bwgenh` / follow. */
 off_t zig_c_bw_pbyte(P *p)
 {
 	return p ? p->byte : 0;
+}
+
+off_t zig_c_bw_pline_no(P *p)
+{
+	return p ? p->line : -1;
+}
+
+off_t zig_c_bw_pxcol(P *p)
+{
+	return p ? p->xcol : 0;
+}
+
+P *zig_c_bw_bof(P *p)
+{
+	return (p && p->b) ? p->b->bof : NULL;
+}
+
+int zig_c_bw_pisbol(P *p)
+{
+	return p ? pisbol(p) : 1;
+}
+
+void zig_c_bw_p_goto_bol(P *p)
+{
+	if (p)
+		p_goto_bol(p);
+}
+
+void zig_c_bw_pset(P *d, P *s)
+{
+	if (d && s)
+		pset(d, s);
+}
+
+void zig_c_bw_pline(P *p, off_t line)
+{
+	if (p)
+		pline(p, line);
+}
+
+void zig_c_bw_pgoto(P *p, off_t loc)
+{
+	if (p)
+		pgoto(p, loc);
+}
+
+void zig_c_bw_pbkwd(P *p, off_t n)
+{
+	if (p)
+		pbkwd(p, n);
+}
+
+void zig_c_bw_nscrldn(SCRN *t, ptrdiff_t top, ptrdiff_t bot, ptrdiff_t amnt)
+{
+	nscrldn(t, top, bot, amnt);
+}
+
+void zig_c_bw_nscrlup(SCRN *t, ptrdiff_t top, ptrdiff_t bot, ptrdiff_t amnt)
+{
+	nscrlup(t, top, bot, amnt);
+}
+
+void zig_c_bw_msetI(int *dest, int c, ptrdiff_t sz)
+{
+	msetI(dest, c, sz);
 }
 
 off_t zig_c_bw_eof_line(P *p)

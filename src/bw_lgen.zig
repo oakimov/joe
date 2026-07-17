@@ -5,12 +5,13 @@
 //! `-visiblews` glyphs + `-ansi` ESC hiding) paint through the Phase 6 renderer
 //! and emit via hybrid `outatr` (works with screen-swap shadow + classic tty
 //! path). Feature 2.2 padded table rows use `zig_bw_table_row` → `render.table.paintRow`
-//! with C-computed widths/aligns (region detect stays in C `lgen_view`). Line-number
-//! gutters use `zig_bw_gennum` (JOE `" %21lld "` trailing `lincols`; past-EOF blanks).
+//! with widths/aligns from Path A detect or C. Line-number gutters use
+//! `zig_bw_gennum` (JOE `" %21lld "` trailing `lincols`; past-EOF blanks).
 //! Window paint loops use `zig_bw_bwgen` (mark/lattr/viewmode setup stays in C;
 //! loops call C `getto`/`lgen`/`gennum` so Path A body/gutter bridges still apply).
 //! Hex dump paint uses `zig_bw_bwgenh` (mark setup stays in C; loop calls C `genfield`).
 //! Table region detect uses `zig_bw_table_detect` → `table.layoutAt` (fills C widths/aligns).
+//! Cursor follow/scroll uses `zig_bw_bwfllwt` / `zig_bw_bwfllwh` (C scroll helpers).
 //! Feature 2.1 residual simple pipe substitute uses `zig_bw_table_simple`.
 //! Non-UTF-8 (byte) charmaps paint via `lgenLine` byte-mode.
 //! Default off until soak. Falls back to C when the gate is off.
@@ -104,6 +105,22 @@ extern fn zig_c_bw_pbyte(p: ?*P) i64;
 extern fn zig_c_bw_eof_line(p: ?*P) i64;
 /// Read buffer line into `buf` (no newline). Returns len, -2 if too long, -1 on error/EOF-past.
 extern fn zig_c_bw_read_line(anchor: ?*P, line: i64, buf: ?[*]u8, buf_cap: c_int) c_int;
+extern fn zig_c_bw_pline_no(p: ?*P) i64;
+extern fn zig_c_bw_pxcol(p: ?*P) i64;
+extern fn zig_c_bw_bof(p: ?*P) ?*P;
+extern fn zig_c_bw_pisbol(p: ?*P) c_int;
+extern fn zig_c_bw_p_goto_bol(p: ?*P) void;
+extern fn zig_c_bw_pset(d: ?*P, s: ?*P) void;
+extern fn zig_c_bw_pline(p: ?*P, line: i64) void;
+extern fn zig_c_bw_pgoto(p: ?*P, loc: i64) void;
+extern fn zig_c_bw_pbkwd(p: ?*P, n: i64) void;
+extern fn zig_c_bw_getto(p: ?*P, cur: ?*P, top: ?*P, line: i64) ?*P;
+extern fn zig_c_bw_nscrldn(t: ?*SCRN, top: isize, bot: isize, amnt: isize) void;
+extern fn zig_c_bw_nscrlup(t: ?*SCRN, top: isize, bot: isize, amnt: isize) void;
+extern fn zig_c_bw_msetI(dest: ?[*]c_int, c: c_int, sz: isize) void;
+extern var opt_mid: c_int;
+extern var opt_left: c_int;
+extern var opt_right: c_int;
 
 /// Apply env gate (called from `ttopnn` alongside screen-swap).
 pub export fn zig_bw_lgen_apply_env() void {
@@ -285,6 +302,194 @@ pub export fn zig_bw_table_detect(
     return 0;
 }
 
+/// Path A cursor follow for text windows (`bwfllwt`).
+/// Returns `0` on success, `-1` to fall back to C.
+pub export fn zig_bw_bwfllwt(
+    top: ?*P,
+    cursor: ?*P,
+    t: ?*SCRN,
+    updtab: ?[*]c_int,
+    win_y: isize,
+    win_h: isize,
+    win_w: isize,
+    offset: ?*i64,
+    curlin: ?*i64,
+    hiline: c_int,
+) c_int {
+    if (zig_bw_lgen_enabled == 0) return -1;
+    if (top == null or cursor == null or t == null or updtab == null) return -1;
+    if (offset == null or curlin == null) return -1;
+    if (win_h <= 0 or win_w <= 0) return -1;
+
+    if (zig_c_bw_pisbol(top) == 0) {
+        zig_c_bw_p_goto_bol(top);
+    }
+
+    const cur_line = zig_c_bw_pline_no(cursor);
+    const top_line = zig_c_bw_pline_no(top);
+    if (cur_line < 0 or top_line < 0) return -1;
+
+    if (cur_line < top_line) {
+        const newtop = pdup(cursor, "zig_bw_bwfllwt") orelse return -1;
+        zig_c_bw_p_goto_bol(newtop);
+        if (opt_mid != 0) {
+            const nl = zig_c_bw_pline_no(newtop);
+            if (nl >= @divTrunc(win_h, 2)) {
+                zig_c_bw_pline(newtop, nl - @divTrunc(win_h, 2));
+            } else {
+                const bof = zig_c_bw_bof(newtop);
+                if (bof == null) {
+                    prm(newtop);
+                    return -1;
+                }
+                zig_c_bw_pset(newtop, bof);
+            }
+        }
+        const new_line = zig_c_bw_pline_no(newtop);
+        const delta = top_line - new_line;
+        if (delta < win_h) {
+            zig_c_bw_nscrldn(t, win_y, win_y + win_h, @intCast(delta));
+        } else {
+            zig_c_bw_msetI(updtab.? + @as(usize, @intCast(win_y)), 1, win_h);
+        }
+        zig_c_bw_pset(top, newtop);
+        prm(newtop);
+    } else if (cur_line >= top_line + win_h) {
+        const target: i64 = if (opt_mid != 0)
+            cur_line - @divTrunc(win_h, 2)
+        else
+            cur_line - (win_h - 1);
+        const newtop = zig_c_bw_getto(null, cursor, top, target) orelse return -1;
+        const new_line = zig_c_bw_pline_no(newtop);
+        const delta = new_line - top_line;
+        if (delta < win_h) {
+            zig_c_bw_nscrlup(t, win_y, win_y + win_h, @intCast(delta));
+        } else {
+            zig_c_bw_msetI(updtab.? + @as(usize, @intCast(win_y)), 1, win_h);
+        }
+        zig_c_bw_pset(top, newtop);
+        prm(newtop);
+    }
+
+    const xcol = zig_c_bw_pxcol(cursor);
+    var off = offset.?.*;
+    if (xcol < off) {
+        var target = xcol;
+        var amnt: isize = if (opt_left < 0)
+            @divTrunc(win_w, -opt_left)
+        else
+            opt_left - 1;
+        if (amnt >= win_w) amnt = win_w - 1;
+        if (amnt < 0) amnt = 0;
+        if (target < amnt) {
+            target = 0;
+        } else {
+            target -= amnt;
+        }
+        off = target;
+        offset.?.* = off;
+        zig_c_bw_msetI(updtab.? + @as(usize, @intCast(win_y)), 1, win_h);
+    }
+    if (xcol >= off + win_w) {
+        var amnt: isize = if (opt_right < 0)
+            win_w - @divTrunc(win_w, -opt_right)
+        else
+            win_w - opt_right;
+        if (amnt >= win_w) amnt = win_w - 1;
+        if (amnt < 0) amnt = 0;
+        off = xcol - amnt;
+        offset.?.* = off;
+        zig_c_bw_msetI(updtab.? + @as(usize, @intCast(win_y)), 1, win_h);
+    }
+
+    // Match C: hiline dirty checks use top AFTER any vertical move.
+    const top_now = zig_c_bw_pline_no(top);
+    if (hiline != 0) {
+        const old = curlin.?.*;
+        if (old != cur_line) {
+            if (old >= top_now and old < top_now + win_h) {
+                updtab.?[@intCast(win_y + (old - top_now))] = 1;
+            }
+            curlin.?.* = cur_line;
+            updtab.?[@intCast(win_y + (cur_line - top_now))] = 1;
+        }
+    } else {
+        curlin.?.* = cur_line;
+    }
+    return 0;
+}
+
+/// Path A cursor follow for hex windows (`bwfllwh`).
+/// Returns `0` on success, `-1` to fall back to C.
+pub export fn zig_bw_bwfllwh(
+    top: ?*P,
+    cursor: ?*P,
+    t: ?*SCRN,
+    updtab: ?[*]c_int,
+    win_y: isize,
+    win_h: isize,
+    win_w: isize,
+    offset: ?*i64,
+) c_int {
+    if (zig_bw_lgen_enabled == 0) return -1;
+    if (top == null or cursor == null or t == null or updtab == null or offset == null) return -1;
+    if (win_h <= 0 or win_w <= 0) return -1;
+
+    var top_byte = zig_c_bw_pbyte(top);
+    const cur_byte = zig_c_bw_pbyte(cursor);
+    if (@mod(top_byte, 16) != 0) {
+        zig_c_bw_pbkwd(top, @mod(top_byte, 16));
+        top_byte = zig_c_bw_pbyte(top);
+    }
+
+    if (cur_byte < top_byte) {
+        var new_top = @divTrunc(cur_byte, 16);
+        if (opt_mid != 0) {
+            if (new_top >= @divTrunc(win_h, 2)) {
+                new_top -= @divTrunc(win_h, 2);
+            } else {
+                new_top = 0;
+            }
+        }
+        const delta = @divTrunc(top_byte, 16) - new_top;
+        if (delta < win_h) {
+            zig_c_bw_nscrldn(t, win_y, win_y + win_h, @intCast(delta));
+        } else {
+            zig_c_bw_msetI(updtab.? + @as(usize, @intCast(win_y)), 1, win_h);
+        }
+        zig_c_bw_pgoto(top, new_top * 16);
+        top_byte = zig_c_bw_pbyte(top);
+    }
+
+    if (cur_byte >= top_byte + (win_h * 16)) {
+        const new_top: i64 = if (opt_mid != 0)
+            @divTrunc(cur_byte, 16) - @divTrunc(win_h, 2)
+        else
+            @divTrunc(cur_byte, 16) - (win_h - 1);
+        const delta = new_top - @divTrunc(top_byte, 16);
+        if (delta < win_h) {
+            zig_c_bw_nscrlup(t, win_y, win_y + win_h, @intCast(delta));
+        } else {
+            zig_c_bw_msetI(updtab.? + @as(usize, @intCast(win_y)), 1, win_h);
+        }
+        zig_c_bw_pgoto(top, new_top * 16);
+        top_byte = zig_c_bw_pbyte(top);
+    }
+
+    const col = @mod(cur_byte, 16) + 60;
+    var off = offset.?.*;
+    if (col < off) {
+        off = col;
+        offset.?.* = off;
+        zig_c_bw_msetI(updtab.? + @as(usize, @intCast(win_y)), 1, win_h);
+    } else if (col >= off + win_w) {
+        off = col - (win_w - 1);
+        offset.?.* = off;
+        zig_c_bw_msetI(updtab.? + @as(usize, @intCast(win_y)), 1, win_h);
+    }
+    return 0;
+}
+
 /// Feature 2.1 residual: fill `vm_subst` via `table.applySimpleBorders`.
 /// Live C only mutates separator rows when `table_col_count==0`; header/body/last
 /// are no-ops — this matches that. Returns `0` on success, `-1` to fall back.
@@ -320,7 +525,6 @@ pub export fn zig_bw_table_simple(
 const BW = opaque {};
 
 extern var have: c_int;
-extern fn zig_c_bw_getto(p: ?*P, cur: ?*P, top: ?*P, line: i64) ?*P;
 extern fn zig_c_bw_lgen(
     t: ?*SCRN,
     y: isize,

@@ -1,7 +1,8 @@
 //! Zig-native markdown viewmode side tables (JOE `lgen_view` shaped).
 //!
 //! Builds per-line hide / substitute / link-url / column-map tables from raw
-//! buffer bytes, matching JOE `joe/bw.c` Feature 1.x (no table box-drawing yet).
+//! buffer bytes, matching JOE `joe/bw.c` Feature 1.x. Table box-drawing lives
+//! in `table.zig` (Feature 2.1/2.2) and paints padded rows directly.
 //! `lgen` applies hide→space and substitute→codepoint when `Options.view` is set.
 //! Not wired into live `joe` — unit-tested only.
 

@@ -237,10 +237,57 @@ fn syntaxStateAtLine(t: *const tw.TextWindow, syn: *const render.Syntax, line_id
     return st;
 }
 
+
+/// Snapshot nearby GapBuffer pipe-lines and paint a Feature 2.2 table row if any.
+fn paintTableFromBuffer(
+    term: *TermScreen,
+    x: u16,
+    y: u16,
+    w: u16,
+    buf: *render.GapBuffer,
+    line_idx: u64,
+    attr: Attribute,
+) bool {
+    const count = buf.lineCount();
+    if (line_idx >= count) return false;
+
+    var probe: [512]u8 = undefined;
+    const cur_len = buf.copyLine(line_idx, &probe);
+    if (!render.table.isPipeLine(probe[0..cur_len])) return false;
+
+    const max_n = render.table.max_scan_lines;
+    var start: u64 = line_idx;
+    while (start > 0 and (line_idx - (start - 1)) < max_n) {
+        const len = buf.copyLine(start - 1, &probe);
+        if (!render.table.isPipeLine(probe[0..len])) break;
+        start -= 1;
+    }
+    var end: u64 = line_idx + 1;
+    while (end < count and (end - start) < max_n) {
+        const len = buf.copyLine(end, &probe);
+        if (!render.table.isPipeLine(probe[0..len])) break;
+        end += 1;
+    }
+    if (end - start < 2) return false;
+
+    var storage: [max_n][512]u8 = undefined;
+    var slices: [max_n][]const u8 = undefined;
+    var n: usize = 0;
+    var i = start;
+    while (i < end and n < max_n) : (i += 1) {
+        const len = buf.copyLine(i, storage[n][0..]);
+        slices[n] = storage[n][0..len];
+        n += 1;
+    }
+    const local: usize = @intCast(line_idx - start);
+    return render.tryPaintTable(term, x, y, w, slices[0..n], local, attr);
+}
+
 /// Text-body paint (bwgen-shaped): optional linums + `render.lgen*`.
 /// Prefers live `TextWindow.buffer` (`lgenPoint` walk); falls back to stub
 /// `body_lines` (`lgenLine`). Optional live `syntax` / `line_attrs` and
-/// markdown `viewmode` (stack `bindScratch` + `analyzeLine`). No mark yet.
+/// markdown `viewmode` (table padded box-drawing first; else stack
+/// `bindScratch` + `analyzeLine`). No mark yet.
 /// `offset` is a display column (JOE `bw->offset`), not a byte index.
 pub fn paintBody(term: *TermScreen, t: *const tw.TextWindow, attr: Attribute) void {
     if (t.h == 0) return;
@@ -294,6 +341,17 @@ pub fn paintBody(term: *TermScreen, t: *const tw.TextWindow, attr: Attribute) vo
                         attrs = attr_row_buf[0..use_len];
                     }
                 }
+            }
+        }
+
+        // Feature 2.1/2.2: padded table rows paint directly (skip lgen/view hide).
+        if (t.viewmode) {
+            if (t.body_lines) |all| {
+                if (render.tryPaintTable(term, t.x, sy, t.w, all, @intCast(line_idx), attr))
+                    continue;
+            } else if (t.buffer) |buf| {
+                if (paintTableFromBuffer(term, t.x, sy, t.w, buf, line_idx, attr))
+                    continue;
             }
         }
 
@@ -910,6 +968,34 @@ test "paintBody fills attrs from live Syntax JSF" {
     try testing.expect(c0.attr.dim or terminal.Color.eql(c0.attr.fg, .{ .indexed = 2 }));
     const c1 = cellAt(&term, t.x, @intCast(t.y + 1));
     try testing.expectEqual(@as(u21, 'x'), c1.cp);
+}
+
+test "paintBody paints padded table box-drawing in viewmode" {
+    var scr = try screen.Screen.init(testing.allocator, 40, 8);
+    defer scr.deinit();
+    const win = try scr.createText(null, null, 6);
+    scr.layout();
+    const t = win.asText().?;
+    const lines = [_][]const u8{
+        "| Header1 | Header2 |",
+        "|---|---|",
+        "| cell1 | cell2 |",
+    };
+    t.body_lines = &lines;
+    t.viewmode = true;
+
+    var term = try TermScreen.init(testing.allocator, 40, 8);
+    defer term.deinit();
+    paintBody(&term, t, .none);
+
+    // Separator row
+    try testing.expectEqual(@as(u21, 0x251c), cellAt(&term, t.x, @intCast(t.y + 1)).cp);
+    try testing.expectEqual(@as(u21, 0x2500), cellAt(&term, t.x + 1, @intCast(t.y + 1)).cp);
+    // Body padded
+    try testing.expectEqual(@as(u21, 0x2502), cellAt(&term, t.x, @intCast(t.y + 2)).cp);
+    try testing.expectEqual(@as(u21, 'c'), cellAt(&term, t.x + 2, @intCast(t.y + 2)).cp);
+    // Header bold border
+    try testing.expect(cellAt(&term, t.x, @intCast(t.y)).attr.bold);
 }
 
 test "paintBody applies viewmode hide and substitute" {

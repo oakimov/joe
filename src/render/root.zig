@@ -9,6 +9,7 @@ pub const gap = @import("gap.zig");
 pub const attr = @import("attr.zig");
 pub const syntax = @import("syntax.zig");
 pub const view = @import("view.zig");
+pub const table = @import("table.zig");
 
 pub const Options = lgen.Options;
 pub const lgenLine = lgen.lgenLine;
@@ -25,6 +26,8 @@ pub const HighlightState = syntax.HighlightState;
 pub const loadSyntax = syntax.load;
 pub const ViewTables = view.ViewTables;
 pub const analyzeLine = view.analyzeLine;
+pub const tryPaintTable = table.tryPaintFromLines;
+pub const tableLayoutAt = table.layoutAt;
 
 test {
     _ = lgen;
@@ -32,4 +35,5 @@ test {
     _ = attr;
     _ = syntax;
     _ = view;
+    _ = table;
 }

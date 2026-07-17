@@ -1,7 +1,7 @@
 //! Bridge tests-only window paint shapes onto Zig-native `terminal.Screen` cells.
 //!
-//! Parallel to JOE `genfmt` / `menudisp` / `dispqw` / `disppw` / `mdisp` writing
-//! into SCRN. Not wired into live `joe` — unit-tested only.
+//! Parallel to JOE `genfmt` / `menudisp` / `dispqw` / `disppw` / `mdisp` /
+//! `edupd` writing into SCRN. Not wired into live `joe` — unit-tested only.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -205,6 +205,73 @@ pub fn paintMsgs(term: *TermScreen, w: *const screen.Window, status_enabled: boo
     }
 }
 
+pub const PaintError = error{NoTerminal} || Allocator.Error;
+
+/// Paint text-window chrome (status row). Body cells wait for Phase 6/`render`.
+/// Returns content-area cursor origin (JOE `bw->cursor` abs pos scaffold).
+pub fn paintText(term: *TermScreen, t: *const tw.TextWindow, status_line: ?[]const u8, attr: Attribute) CursorPos {
+    if (t.statusRow()) |row| {
+        const line = status_line orelse t.status_line;
+        if (line) |s| {
+            paintStatus(term, t.parent.x, row, t.parent.w, s, attr);
+        } else {
+            clearWinEol(term, t.parent.x, row, t.parent.w, attr);
+        }
+    }
+    const cy: u16 = if (t.y >= 0 and t.y < @as(i16, @intCast(term.height)))
+        @intCast(t.y)
+    else
+        0;
+    return .{ .x = @min(t.x, term.width -| 1), .y = cy };
+}
+
+/// Dispatch one window's paint shape into `term` (JOE `watom->disp`).
+pub fn paintWindow(term: *TermScreen, allocator: Allocator, w: *screen.Window, focused: bool, attr: Attribute) PaintError!CursorPos {
+    const fallback_y: u16 = if (w.y >= 0 and w.y < @as(i16, @intCast(term.height))) @intCast(w.y) else 0;
+    const fallback: CursorPos = .{ .x = @min(w.x, term.width -| 1), .y = fallback_y };
+    return switch (w.vtable.kind) {
+        .text => blk: {
+            const t = w.asText() orelse break :blk fallback;
+            break :blk paintText(term, t, null, attr);
+        },
+        .prompt => blk: {
+            const p = w.asPrompt() orelse break :blk fallback;
+            // No live BW cursor yet — paint with caret at end of edit line.
+            break :blk paintPrompt(term, p, p.line.items.len, attr);
+        },
+        .query => blk: {
+            const q = w.asQuery() orelse break :blk fallback;
+            break :blk try paintQuery(term, allocator, q, attr);
+        },
+        .menu => blk: {
+            const m = w.asMenu() orelse break :blk fallback;
+            break :blk try paintMenu(term, allocator, m, focused, attr);
+        },
+        .base => fallback,
+    };
+}
+
+/// Edupd-shaped pass: paint every on-screen window into `scr.term`, then msgs.
+/// Updates `scr.cursor_x` / `scr.cursor_y` from the current window's paint cursor.
+pub fn paintAll(scr: *screen.Screen, allocator: Allocator, attr: Attribute) PaintError!CursorPos {
+    const term = scr.term orelse return error.NoTerminal;
+    var cursor: CursorPos = .{
+        .x = scr.cursor_x,
+        .y = scr.cursor_y,
+    };
+    const cur_id = scr.cur_id;
+    for (scr.order.items) |w| {
+        if (w.y < 0 or w.h == 0) continue;
+        const focused = w.id == cur_id;
+        const c = try paintWindow(term, allocator, w, focused, attr);
+        if (focused) cursor = c;
+        paintMsgs(term, w, tw.status_enabled, attr);
+    }
+    scr.cursor_x = cursor.x;
+    scr.cursor_y = cursor.y;
+    return cursor;
+}
+
 test "writeFmt toggles inverse and skips ofst" {
     var term = try TermScreen.init(testing.allocator, 20, 4);
     defer term.deinit();
@@ -356,4 +423,110 @@ test "paintStatus composes stagen left/right into a status row" {
     try testing.expect(cellAt(&term, 0, 0).attr.inverse);
     // Right side ends with "10,  3" (1-based row/col).
     try testing.expectEqual(@as(u21, '3'), cellAt(&term, 39, 0).cp);
+}
+
+test "attachTerm + paintAll paints text status, prompt, menu, msgs" {
+    const prev = tw.status_enabled;
+    defer tw.status_enabled = prev;
+    tw.status_enabled = true;
+
+    var scr = try screen.Screen.init(testing.allocator, 40, 12);
+    defer scr.deinit();
+    var term = try TermScreen.init(testing.allocator, 40, 12);
+    defer term.deinit();
+    try scr.attachTerm(&term);
+
+    const main_w = try scr.createText(null, null, 12);
+    scr.layout();
+    try testing.expect(main_w.h >= 2);
+    const tw_obj = main_w.asText().?;
+    try testing.expect(tw_obj.status_on);
+    tw_obj.status_line = "\\iMAIN\\i";
+
+    const prompt = try scr.createPrompt(main_w.id, main_w.id, main_w.id, 1, "File: ");
+    const pw_obj = prompt.asPrompt().?;
+    try pw_obj.setLine(testing.allocator, "x.txt");
+
+    const items = [_][]const u8{ "aa", "bb", "cc" };
+    const menu_w = try scr.createMenu(prompt.id, main_w.id, main_w.id, &items, 1);
+    scr.cur_id = menu_w.id;
+    scr.layout();
+
+    main_w.setMsgBot("saved");
+
+    const cur = try paintAll(&scr, testing.allocator, .none);
+    // Menu focused → cursor recorded on Screen and inside the menu rect.
+    try testing.expectEqual(menu_w.id, scr.cur_id);
+    try testing.expectEqual(cur.x, scr.cursor_x);
+    try testing.expectEqual(cur.y, scr.cursor_y);
+    try testing.expect(menu_w.y >= 0);
+    try testing.expect(cur.y >= @as(u16, @intCast(menu_w.y)));
+    try testing.expect(cur.y < @as(u16, @intCast(menu_w.y + @as(i16, @intCast(menu_w.h)))));
+    try testing.expect(cur.x >= menu_w.x);
+    try testing.expect(cur.x < menu_w.x + menu_w.w);
+    // First item starts at origin; selected "bb" is inverse elsewhere on the row.
+    try testing.expectEqual(@as(u21, 'a'), cellAt(&term, menu_w.x, @intCast(menu_w.y)).cp);
+    try testing.expect(!cellAt(&term, menu_w.x, @intCast(menu_w.y)).attr.inverse);
+    var found_sel = false;
+    var mx: u16 = menu_w.x;
+    while (mx < menu_w.x + menu_w.w) : (mx += 1) {
+        const c = cellAt(&term, mx, @intCast(menu_w.y));
+        if (c.cp == 'b' and c.attr.inverse) {
+            found_sel = true;
+            break;
+        }
+    }
+    try testing.expect(found_sel);
+
+    // Text status on row 0.
+    try testing.expectEqual(@as(u21, 'M'), cellAt(&term, 0, 0).cp);
+    try testing.expect(cellAt(&term, 0, 0).attr.inverse);
+
+    // Prompt label somewhere in the family stack.
+    try testing.expect(prompt.y >= 0);
+    try testing.expectEqual(@as(u21, 'F'), cellAt(&term, prompt.x, @intCast(prompt.y)).cp);
+
+    // Bottom message on main text window.
+    const bot = main_w.msgBotRow().?;
+    try testing.expectEqual(@as(u21, 's'), cellAt(&term, 0, @intCast(bot)).cp);
+
+    // Screen.update wrapper matches paintAll.
+    term.clear();
+    try scr.update();
+    try testing.expectEqual(@as(u21, 'M'), cellAt(&term, 0, 0).cp);
+}
+
+test "paintAll requires attached terminal" {
+    var scr = try screen.Screen.init(testing.allocator, 20, 8);
+    defer scr.deinit();
+    _ = try scr.createText(null, null, 8);
+    scr.layout();
+    try testing.expectError(error.NoTerminal, paintAll(&scr, testing.allocator, .none));
+}
+
+test "paintText writes status_line and reports content cursor" {
+    var scr = try screen.Screen.init(testing.allocator, 20, 6);
+    defer scr.deinit();
+    const win = try scr.createText(null, null, 6);
+    scr.layout();
+    const t = win.asText().?;
+    try testing.expect(t.status_on);
+
+    var term = try TermScreen.init(testing.allocator, 20, 6);
+    defer term.deinit();
+    const cur = paintText(&term, t, "STAT", .none);
+    try testing.expectEqual(@as(u21, 'S'), cellAt(&term, 0, 0).cp);
+    try testing.expectEqual(@as(u16, t.x), cur.x);
+    try testing.expectEqual(@as(u16, @intCast(t.y)), cur.y);
+}
+
+test "resize syncs attached terminal dimensions" {
+    var scr = try screen.Screen.init(testing.allocator, 20, 8);
+    defer scr.deinit();
+    var term = try TermScreen.init(testing.allocator, 20, 8);
+    defer term.deinit();
+    try scr.attachTerm(&term);
+    scr.resize(30, 10);
+    try testing.expectEqual(@as(u16, 30), term.width);
+    try testing.expectEqual(@as(u16, 10), term.height);
 }

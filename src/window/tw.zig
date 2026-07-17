@@ -41,6 +41,8 @@ pub const TextWindow = struct {
     lincols: u16 = 0,
     /// Whether a status row is currently reserved — JOE `tw->staon`.
     status_on: bool = false,
+    /// Optional precomposed status row (borrowed) for paintAll / tests — no live BW yet.
+    status_line: ?[]const u8 = null,
 
     pub fn init(parent: *screen.Window) TextWindow {
         var self: TextWindow = .{ .parent = parent };

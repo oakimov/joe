@@ -46,12 +46,16 @@ pub const commonPrefix = menu.commonPrefix;
 pub const completePrefix = menu.completePrefix;
 
 pub const TermScreen = paint.TermScreen;
+pub const CursorPos = paint.CursorPos;
 pub const writeFmt = paint.writeFmt;
 pub const paintMenu = paint.paintMenu;
 pub const paintQuery = paint.paintQuery;
 pub const paintPrompt = paint.paintPrompt;
 pub const paintStatus = paint.paintStatus;
 pub const paintMsgs = paint.paintMsgs;
+pub const paintText = paint.paintText;
+pub const paintWindow = paint.paintWindow;
+pub const paintAll = paint.paintAll;
 
 test {
     _ = screen;

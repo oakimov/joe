@@ -8,6 +8,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
+const terminal = @import("terminal");
 const tw = @import("tw.zig");
 const pw = @import("pw.zig");
 const qw = @import("qw.zig");
@@ -135,6 +136,11 @@ pub const Screen = struct {
     next_id: WindowId = 1,
     /// Shared composition buffer for temporary messages — JOE `msgbuf`.
     msg_buf: [msg_buf_size]u8 = undefined,
+    /// Borrowed Zig-native cell grid (JOE `SCRN*` / plan `terminal`). Optional until paint.
+    term: ?*terminal.Screen = null,
+    /// Last `paintAll` / `update` cursor (JOE `curx`/`cury` absolute screen pos).
+    cursor_x: u16 = 0,
+    cursor_y: u16 = 0,
 
     pub fn init(allocator: Allocator, width: u16, height: u16) !Screen {
         return .{
@@ -144,6 +150,24 @@ pub const Screen = struct {
             .order = .empty,
             .by_id = .empty,
         };
+    }
+
+    /// Attach a borrowed `terminal.Screen`, resizing it to match when needed.
+    pub fn attachTerm(self: *Screen, term: *terminal.Screen) !void {
+        if (term.width != self.width or term.height != self.height) {
+            try term.resize(self.width, self.height);
+        }
+        self.term = term;
+    }
+
+    pub fn detachTerm(self: *Screen) void {
+        self.term = null;
+    }
+
+    /// Tests-only edupd-shaped paint into `term` — see `paint.paintAll`.
+    pub fn update(self: *Screen) !void {
+        const paint_mod = @import("paint.zig");
+        _ = try paint_mod.paintAll(self, self.allocator, .none);
     }
 
     /// Format into `msg_buf` and return the written slice (JOE `joe_snprintf(msgbuf, …)`).
@@ -904,6 +928,9 @@ pub const Screen = struct {
         }
         for (self.order.items) |win| {
             win.w = width;
+        }
+        if (self.term) |term| {
+            term.resize(width, height) catch {};
         }
         self.layout();
     }

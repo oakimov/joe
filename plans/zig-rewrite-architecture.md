@@ -793,13 +793,14 @@ The build is always working — start with a binary that compiles and runs, then
 - ✅ `lgen_view` Feature 2.1/2.2 table box-drawing (`table.zig`: region detect, widths/align, padded borders; `paintBody` wired; unit-tested)
 - ✅ OSC 8 hyperlink emit (`Cell.url` / `Screen.writeCharLink` + flush `ESC]8;;urlST`; viewmode `link_url` → lgen; unit-tested)
 - ✅ Screen buffer diff + dirty-cell-only flush — redesign `Screen.flush` cell-diff + EL + within-line ICH/DCH magic + IL/DL scroll magic + combining slots + gated hybrid `scrn` swap landed (**default on**)
-- ✅ Path A gated live bridge: `src/bw_lgen.zig` (`JOE_ZIG_BW_LGEN` / `zig_bw_lgen_enabled`, default off; applied from `ttopnn`) — plain UTF-8 `lgen_core` body paint via hybrid `syntax.parse` → per-byte `attr_buf` expand → `render.lgenLine` → hybrid `outatr`; linear mark inverse (`from`/`to` byte range); square mark inverse (display-column `xcol`); viewmode hide/substitute/link tables (+ OSC 8 via `ttputs`); `-visiblews` via C `vspace`/`vtab`/`vrtn` + `vwsatr` merge; C fallback for non-UTF-8 / `ansi` (table padded rows stay in C `lgen_view`)
+- ✅ Path A gated live bridge: `src/bw_lgen.zig` (`JOE_ZIG_BW_LGEN` / `zig_bw_lgen_enabled`, default off; applied from `ttopnn`) — plain UTF-8 `lgen_core` body paint via hybrid `syntax.parse` → per-byte `attr_buf` expand → `render.lgenLine` → hybrid `outatr`; linear mark inverse (`from`/`to` byte range); square mark inverse (display-column `xcol`); viewmode hide/substitute/link tables (+ OSC 8 via `ttputs`); `-visiblews` via C `vspace`/`vtab`/`vrtn` + `vwsatr` merge; `-ansi` ESC hide via `stripAnsiEscapes` (aligned with `ansi_parse` attrs); C fallback for non-UTF-8 (table padded rows stay in C `lgen_view`)
 - ✅ Path A soak: `./runtests` **196/196** with and without `JOE_ZIG_BW_LGEN=1`; critical EOF semantics — do **not** `p_goto_bol` before paint (past-EOF `getto` leaves `p` at EOF so C paints blank; bol rewind broke `test_bos_short` / `test_isearch_resume`); advance with `pnextl` only after successful paint
 - ✅ Path A linear marks: byte-range `SELECT_IF` inverse via `applyLinearMarkInverse` (square still C)
 - ✅ Path A viewmode tables: reuse C `lgen_view` hide/substitute/link_url; skip re-parse; OSC 8 emit around `outatr`
 - ✅ Path A visiblews: `VisibleWs` + `mergeVisibleWsAttr` in `render/lgen.zig`; bridge appends trailing `\n` only when enabled (EOF-without-NL omits `vrtn`); C gate dropped
 - ✅ Path A square marks: `applySquareMarkInverse` (tab end-col `(from,to]`, char start-col `[from,to)`); `bwgen` still scopes by line; C gate dropped
-- 🚧 Path A widen: cover remaining C `lgen_core` paths (ansi) until `joe/bw.c` can be deleted
+- ✅ Path A ansi: `stripAnsiEscapes` removes ESC…letter spans after attr/linear-mark apply; square marks use post-strip columns; C gate dropped
+- ✅ Path A UTF-8 `lgen_core` widen complete (marks / viewmode tables / visiblews / square / ansi); still C: non-UTF-8 charmaps + table padded rows (`viewmode_table_rendered`) + rest of `bwgen`/window chrome in `joe/bw.c`
 - At this point: fully functional editor with markdown viewmode
 
 ### Phase 7: File I/O & Commands (3-4 weeks) — NOT STARTED

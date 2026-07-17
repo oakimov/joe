@@ -2,20 +2,21 @@
 //!
 //! When `JOE_ZIG_BW_LGEN` / `zig_bw_lgen_enabled` is on, plain UTF-8 lines
 //! (including linear/square mark inverse + viewmode hide/substitute/link tables +
-//! `-visiblews` glyphs) paint through the Phase 6 renderer and emit via hybrid
-//! `outatr` (works with screen-swap shadow + classic tty path). Default off
-//! until soak. Falls back to C `lgen_core` when the gate is off or the line is
-//! unsupported (ansi / non-UTF-8). Table padded rows stay in C
+//! `-visiblews` glyphs + `-ansi` ESC hiding) paint through the Phase 6 renderer
+//! and emit via hybrid `outatr` (works with screen-swap shadow + classic tty
+//! path). Default off until soak. Falls back to C `lgen_core` when the gate is
+//! off or the line is unsupported (non-UTF-8). Table padded rows stay in C
 //! (`viewmode_table_rendered` skips `lgen_core`).
 //!
 //! Hybrid `syntax.parse` fills `attr_buf` **per character** (`pgetc`); native
 //! `lgenLine` expects **per-byte** attrs — this bridge expands before paint.
-//! When `viewmode!=0`, C `lgen_view` already parsed+mutated `attr_buf` — do
-//! **not** re-parse. Linear marks (`from`/`to` byte range) force `inverse` on
-//! bytes in range; square marks use display-column `xcol` range (`SELECT_IF`
-//! tab end-col `(from, to]` / char start-col `[from, to)`). Default
-//! `selectatr=INVERSE`. Visible whitespace uses C `vspace`/`vtab`/`vrtn` +
-//! `vwsatr` (JOE `((atr & vwsmask) | (vwsatr & ~vwsmask))` default).
+//! `ansi_parse` temporarily clears `o.ansi`, so ESC bytes stay as normal chars
+//! in `attr_buf`; Path A strips JOE `ansi_decode` spans (ESC…letter) after
+//! attr/mark apply so colors stay aligned. When `viewmode!=0`, C `lgen_view`
+//! already parsed+mutated `attr_buf` — do **not** re-parse. Linear marks use
+//! raw byte offsets (before strip); square marks use post-strip display
+//! columns. Default `selectatr=INVERSE`. Visible whitespace uses C
+//! `vspace`/`vtab`/`vrtn` + `vwsatr`.
 
 const std = @import("std");
 const terminal = @import("terminal");
@@ -113,6 +114,7 @@ pub export fn zig_bw_lgen(
     vm_urls_len: c_int,
     visiblews: c_int,
     square: c_int,
+    ansi: c_int,
 ) c_int {
     if (zig_bw_lgen_enabled == 0) return -1;
     if (t == null or screen == null or attr_row == null or p == null) return -1;
@@ -198,20 +200,16 @@ pub export fn zig_bw_lgen(
         native_attrs = byte_attrs;
     }
 
-    // Mark inverse: linear byte range, or square display-column range.
+    // Linear mark inverse on raw bytes (ESC bytes count in buffer offsets).
+    // Square marks wait until after ansi strip (display columns skip ESC).
     // `bwgen` already scopes square to mark lines (passes from=to=0 off-line).
-    if (from != to and content.len > 0) {
+    if (from != to and content.len > 0 and square == 0) {
         if (attrs_owned == null) {
             const byte_attrs = alloc.alloc(Attribute, content.len) catch return -1;
             @memset(byte_attrs, .none);
             attrs_owned = byte_attrs;
         }
-        if (square != 0) {
-            const tab_u16: u16 = if (tab <= 0) 1 else @intCast(tab);
-            applySquareMarkInverse(attrs_owned.?, content, tab_u16, from, to);
-        } else {
-            applyLinearMarkInverse(attrs_owned.?, line_byte, from, to);
-        }
+        applyLinearMarkInverse(attrs_owned.?, line_byte, from, to);
         native_attrs = attrs_owned;
     }
 
@@ -280,6 +278,82 @@ pub export fn zig_bw_lgen(
         view_ptr = &view_tables;
     }
 
+    // `-ansi`: strip JOE `ansi_decode` spans (ESC…letter) for paint. Attrs from
+    // `ansi_parse` stay aligned because parse walked the same raw characters.
+    var ansi_text_owned: ?[]u8 = null;
+    defer if (ansi_text_owned) |bytes| alloc.free(bytes);
+    var ansi_attrs_owned: ?[]Attribute = null;
+    defer if (ansi_attrs_owned) |a| alloc.free(a);
+    var ansi_hide_owned: ?[]u8 = null;
+    defer if (ansi_hide_owned) |h| alloc.free(h);
+    var ansi_subst_owned: ?[]u21 = null;
+    defer if (ansi_subst_owned) |s| alloc.free(s);
+    var ansi_links_owned: ?[]?[]const u8 = null;
+    defer if (ansi_links_owned) |l| alloc.free(l);
+
+    var paint_content: []const u8 = content;
+    if (ansi != 0 and content.len > 0) {
+        const stripped = stripAnsiEscapes(
+            alloc,
+            content,
+            if (attrs_owned) |a| a else null,
+            if (view_ptr) |vt| vt.hide else null,
+            if (view_ptr) |vt| vt.substitute else null,
+            if (view_ptr) |vt| vt.link_url else null,
+        ) catch return -1;
+        ansi_text_owned = stripped.text;
+        paint_content = stripped.text;
+        if (stripped.attrs) |a| {
+            ansi_attrs_owned = a;
+            native_attrs = a;
+        }
+        if (view_ptr != null) {
+            if (stripped.hide) |h| ansi_hide_owned = h;
+            if (stripped.subst) |s| ansi_subst_owned = s;
+            if (stripped.links) |l| ansi_links_owned = l;
+            view_tables = .{
+                .allocator = alloc,
+                .owns_memory = false,
+                .hide = ansi_hide_owned orelse &.{},
+                .substitute = ansi_subst_owned orelse &.{},
+                .link_url = ansi_links_owned orelse &.{},
+                .col_map = &.{},
+                .len = paint_content.len,
+            };
+            view_ptr = &view_tables;
+        }
+    }
+
+    // Square mark inverse on display columns (post-ansi-strip).
+    if (from != to and paint_content.len > 0 and square != 0) {
+        const mutable: []Attribute = blk: {
+            if (ansi_attrs_owned) |a| break :blk a;
+            if (attrs_owned) |a| break :blk a;
+            const byte_attrs = alloc.alloc(Attribute, paint_content.len) catch return -1;
+            @memset(byte_attrs, .none);
+            attrs_owned = byte_attrs;
+            break :blk byte_attrs;
+        };
+        if (mutable.len != paint_content.len) return -1;
+        const tab_u16: u16 = if (tab <= 0) 1 else @intCast(tab);
+        applySquareMarkInverse(mutable, paint_content, tab_u16, from, to);
+        native_attrs = mutable;
+    }
+
+    // Paint text: content (+ trailing \n for visiblews rtn).
+    var paint_line_buf: std.ArrayList(u8) = .empty;
+    defer paint_line_buf.deinit(alloc);
+    var paint_line: []const u8 = paint_content;
+    if (saw_eol and visiblews != 0) {
+        paint_line_buf.appendSlice(alloc, paint_content) catch return -1;
+        paint_line_buf.append(alloc, '\n') catch return -1;
+        paint_line = paint_line_buf.items;
+    } else if (ansi != 0) {
+        paint_line = paint_content;
+    } else {
+        paint_line = line;
+    }
+
     const base_attr = terminal.attributeFromHybrid(defatr, pal);
 
     var vws_storage: VisibleWs = undefined;
@@ -307,7 +381,7 @@ pub export fn zig_bw_lgen(
         .view = view_ptr,
         .visible_ws = vws_ptr,
     };
-    _ = render.lgenLine(&scratch, 0, 0, win_w, line, opts, base_attr);
+    _ = render.lgenLine(&scratch, 0, 0, win_w, paint_line, opts, base_attr);
 
     var tc_pal: TruecolorPalette = .{};
     if (palette != null and palette_len > 0) {
@@ -402,6 +476,102 @@ fn emitOsc8Link(old: ?[]const u8, new_url: ?[]const u8) ?[]const u8 {
         ttputs("\x1b\\");
     }
     return new_url;
+}
+
+const AnsiStripResult = struct {
+    text: []u8,
+    attrs: ?[]Attribute,
+    hide: ?[]u8,
+    subst: ?[]u21,
+    links: ?[]?[]const u8,
+};
+
+/// Remove JOE `ansi_decode` hidden spans (from ESC through terminating ASCII letter).
+/// Compacts optional parallel slices in lockstep (must be null or `src.len`).
+fn stripAnsiEscapes(
+    alloc: std.mem.Allocator,
+    src: []const u8,
+    attrs: ?[]const Attribute,
+    hide: ?[]const u8,
+    subst: ?[]const u21,
+    links: ?[]const ?[]const u8,
+) !AnsiStripResult {
+    if (attrs) |a| std.debug.assert(a.len == src.len);
+    if (hide) |h| std.debug.assert(h.len == src.len);
+    if (subst) |s| std.debug.assert(s.len == src.len);
+    if (links) |l| std.debug.assert(l.len == src.len);
+
+    var text: std.ArrayList(u8) = .empty;
+    errdefer text.deinit(alloc);
+    var out_attrs: std.ArrayList(Attribute) = .empty;
+    errdefer out_attrs.deinit(alloc);
+    var out_hide: std.ArrayList(u8) = .empty;
+    errdefer out_hide.deinit(alloc);
+    var out_subst: std.ArrayList(u21) = .empty;
+    errdefer out_subst.deinit(alloc);
+    var out_links: std.ArrayList(?[]const u8) = .empty;
+    errdefer out_links.deinit(alloc);
+
+    var in_esc = false;
+    var i: usize = 0;
+    while (i < src.len) {
+        const b = src[i];
+        var nbytes: usize = 1;
+        var cp: u21 = b;
+        if (b >= 0x80) {
+            nbytes = utf8SeqLen(b);
+            if (i + nbytes <= src.len) {
+                if (std.unicode.utf8Decode(src[i..][0..nbytes])) |decoded| {
+                    cp = decoded;
+                } else |_| {
+                    nbytes = 1;
+                    cp = b;
+                }
+            } else {
+                nbytes = 1;
+                cp = b;
+            }
+        }
+        const end = i + nbytes;
+
+        var hidden = false;
+        if (in_esc) {
+            hidden = true;
+            if ((cp >= 'a' and cp <= 'z') or (cp >= 'A' and cp <= 'Z')) in_esc = false;
+        } else if (cp == 0x1b) {
+            hidden = true;
+            in_esc = true;
+        }
+
+        if (!hidden) {
+            try text.appendSlice(alloc, src[i..end]);
+            if (attrs) |aa| {
+                var k = i;
+                while (k < end) : (k += 1) try out_attrs.append(alloc, aa[k]);
+            }
+            if (hide) |hh| {
+                var k = i;
+                while (k < end) : (k += 1) try out_hide.append(alloc, hh[k]);
+            }
+            if (subst) |ss| {
+                var k = i;
+                while (k < end) : (k += 1) try out_subst.append(alloc, ss[k]);
+            }
+            if (links) |ll| {
+                var k = i;
+                while (k < end) : (k += 1) try out_links.append(alloc, ll[k]);
+            }
+        }
+        i = end;
+    }
+
+    return .{
+        .text = try text.toOwnedSlice(alloc),
+        .attrs = if (attrs != null) try out_attrs.toOwnedSlice(alloc) else null,
+        .hide = if (hide != null) try out_hide.toOwnedSlice(alloc) else null,
+        .subst = if (subst != null) try out_subst.toOwnedSlice(alloc) else null,
+        .links = if (links != null) try out_links.toOwnedSlice(alloc) else null,
+    };
 }
 
 /// Force inverse on bytes whose absolute buffer offset is in `[from, to)`.
@@ -567,6 +737,25 @@ test "applySquareMarkInverse covers UTF-8 start column" {
     try std.testing.expect(attrs[1].inverse);
     try std.testing.expect(attrs[2].inverse);
     try std.testing.expect(!attrs[3].inverse);
+}
+
+test "stripAnsiEscapes removes CSI color sequences" {
+    const src = "a\x1b[31mB\x1b[0mC";
+    const stripped = try stripAnsiEscapes(std.testing.allocator, src, null, null, null, null);
+    defer std.testing.allocator.free(stripped.text);
+    try std.testing.expectEqualStrings("aBC", stripped.text);
+}
+
+test "stripAnsiEscapes compacts attrs with escapes" {
+    const src = "a\x1b[1mB";
+    var attrs = [_]Attribute{ .{ .bold = true }, .{}, .{}, .{}, .{ .underline = true }, .{ .italic = true } };
+    try std.testing.expectEqual(src.len, attrs.len);
+    const stripped = try stripAnsiEscapes(std.testing.allocator, src, &attrs, null, null, null);
+    defer std.testing.allocator.free(stripped.text);
+    defer std.testing.allocator.free(stripped.attrs.?);
+    try std.testing.expectEqualStrings("aB", stripped.text);
+    try std.testing.expect(stripped.attrs.?[0].bold);
+    try std.testing.expect(stripped.attrs.?[1].italic);
 }
 
 test "emitOsc8Link no-op when unchanged" {

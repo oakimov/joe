@@ -38,4 +38,6 @@ comptime {
     _ = @import("qw.zig");
     _ = @import("menu.zig");
     _ = @import("mmenu.zig");
+    // Path A: gated live bw lgen → Zig-native render.lgenLine (default off).
+    _ = @import("bw_lgen.zig");
 }

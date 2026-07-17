@@ -8,6 +8,14 @@
 #include "types.h"
 #include <limits.h>
 
+/* Path A: gated Zig-native lgen_core body paint (default off).
+ * Env: JOE_ZIG_BW_LGEN=1. Falls back to C when unsupported. */
+extern int zig_bw_lgen_enabled;
+extern int zig_bw_lgen(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
+	ptrdiff_t x0, ptrdiff_t x1, P *p, off_t scr, struct high_syntax *syntax,
+	HIGHLIGHT_STATE st, struct charmap *charmap, int tab, int defatr,
+	int *palette, int palette_len);
+
 /* Attributes for line numbers, and current line */
 int bg_linum = 0;
 int bg_curlinum = 0;
@@ -656,6 +664,26 @@ static int lgen_core(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
          			/* Starting column to display */
               			/* Range for marked block */
 {
+	/* Path A spike: try Zig-native paint for plain UTF-8 lines.
+	 * Keep C for viewmode / marks / ansi / square / visiblews / dspasis. */
+	if (zig_bw_lgen_enabled
+	    && !viewmode_skip_parse
+	    && from == to
+	    && !bw->o.ansi
+	    && !square
+	    && !bw->o.visiblews
+	    && !dspasis
+	    && p && p->b && p->b->o.charmap && p->b->o.charmap->type) {
+		int defatr = (bw->o.hiline && bw->cursor->line == y - bw->y + bw->top->line)
+			? (bg_text & curlinmask) | bg_curlin
+			: bg_text;
+		int z = zig_bw_lgen(t, y, screen, attr, x, w, p, scr,
+			bw->o.syntax, st, p->b->o.charmap, p->b->o.tab, BG_COLOR(defatr),
+			t->palette, t->palette ? 256 : 0);
+		if (z >= 0)
+			return z;
+	}
+
 	int ansi = bw->o.ansi;
 	ptrdiff_t ox = x;
 	int tach;

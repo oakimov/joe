@@ -251,6 +251,8 @@ pub export fn ttopnn() void {
         zig_screen_swap_enabled = on;
     }
     if (zig_screen_swap_enabled != 0) zig_screen_drain_enabled = 1;
+    // Path A: gated live bw lgen → Zig-native render (default off).
+    zig_bw_lgen_apply_env();
 }
 pub export fn ttclose() void {
     ttclsn();
@@ -474,6 +476,9 @@ pub export var zig_screen_drain_enabled: c_int = 0;
 
 /// Set from scrn.zig; tty reads env `JOE_ZIG_SCREEN_SWAP` in `ttopnn`.
 pub extern var zig_screen_swap_enabled: c_int;
+
+/// Path A gate apply — defined in `bw_lgen.zig`, called from `ttopnn`.
+extern fn zig_bw_lgen_apply_env() void;
 
 pub export fn ttshell(arg_cmd: [*c]u8) c_int {
     var cmd = arg_cmd;

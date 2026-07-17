@@ -72,6 +72,8 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     ported_mod.addImport("terminal", terminal_mod);
+    // Path A: gated live `lgen` bridge (`src/bw_lgen.zig`) paints via Phase 6.
+    ported_mod.addImport("render", render_mod);
     const ported_obj = b.addObject(.{
         .name = "ported",
         .root_module = ported_mod,

@@ -34,6 +34,9 @@ extern int zig_bw_bwgen(BW *w, SCRN *t, int (*scrn)[COMPOSE], int *attr_base,
 	ptrdiff_t mid_y, P *top, P *cursor, off_t top_line, off_t offset,
 	int linums, int linchg, int dosquare,
 	off_t from, off_t to, off_t fromline, off_t toline);
+/* Path A Feature 2.1: gated Zig simple pipe substitute into vm_subst[]. */
+extern int zig_bw_table_simple(const unsigned char *line, int line_len, int row_type,
+	int *vm_subst, int vm_subst_len);
 
 /* Attributes for line numbers, and current line */
 int bg_linum = 0;
@@ -683,12 +686,12 @@ static int lgen_core(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
          			/* Starting column to display */
               			/* Range for marked block */
 {
-	/* Path A: Zig-native paint for plain UTF-8 lines (+ linear/square marks +
-	 * viewmode tables + visiblews + ansi ESC hide). Feature 2.2 padded table
-	 * rows skip lgen_core (painted via zig_bw_table_row / C fallback in
-	 * lgen_view). dspasis lives in outatr. Non-UTF-8 stays C. */
+	/* Path A: Zig-native paint for UTF-8 and byte charmaps (+ linear/square
+	 * marks + viewmode tables + visiblews + ansi ESC hide). Feature 2.2 padded
+	 * table rows skip lgen_core (painted via zig_bw_table_row / C fallback in
+	 * lgen_view). dspasis lives in outatr. */
 	if (zig_bw_lgen_enabled
-	    && p && p->b && p->b->o.charmap && p->b->o.charmap->type) {
+	    && p && p->b && p->b->o.charmap) {
 		int defatr = (bw->o.hiline && bw->cursor->line == y - bw->y + bw->top->line)
 			? (bg_text & curlinmask) | bg_curlin
 			: bg_text;
@@ -1940,45 +1943,56 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 				/* Skip rest of lgen_view — we rendered to screen directly */
 				goto table_rendered;
 			} else {
-				/* Find pipe positions in this line */
-				int pipe_positions[32];
-				int pipe_count = 0;
-				int ti;
-				for (ti = 0; ti < line_len && pipe_count < 32; ti++) {
-					if (line[ti] == '|')
-						pipe_positions[pipe_count++] = ti;
+				/* Feature 2.1 residual: no column widths — simple pipe substitute.
+				 * Path A: Zig applySimpleBorders; C fallback for separator-only. */
+				int zok = 0;
+				if (zig_bw_lgen_enabled && bw->b && bw->b->o.charmap && bw->b->o.charmap->type
+				    && viewmode_substitute && viewmode_substitute_size >= line_len) {
+					if (zig_bw_table_simple(line, line_len, (int)row_type,
+						viewmode_substitute, viewmode_substitute_size) >= 0)
+						zok = 1;
 				}
-
-				if (pipe_count > 0) {
-					switch (row_type) {
-				case TABLE_ROW_SEPARATOR:
-					/* Separator row: ├───┼───┤ */
-					if (pipe_count == 1) {
-						viewmode_substitute[pipe_positions[0]] = 0x251C; /* ├ */
-					} else {
-						viewmode_substitute[pipe_positions[0]] = 0x251C; /* ├ first */
-						int pi;
-						for (pi = 1; pi < pipe_count - 1; pi++)
-							viewmode_substitute[pipe_positions[pi]] = 0x253C; /* ┼ middle */
-						viewmode_substitute[pipe_positions[pipe_count - 1]] = 0x2524; /* ┤ last */
+				if (!zok) {
+					/* Find pipe positions in this line */
+					int pipe_positions[32];
+					int pipe_count = 0;
+					int ti;
+					for (ti = 0; ti < line_len && pipe_count < 32; ti++) {
+						if (line[ti] == '|')
+							pipe_positions[pipe_count++] = ti;
 					}
-					/* Replace dashes and colons (alignment indicators) with ─ */
-					{
-						int si;
-						for (si = 0; si < line_len; si++) {
-							if (line[si] == '-' || line[si] == ':') {
-								viewmode_substitute[si] = 0x2500; /* ─ */
+
+					if (pipe_count > 0) {
+						switch (row_type) {
+					case TABLE_ROW_SEPARATOR:
+						/* Separator row: ├───┼───┤ */
+						if (pipe_count == 1) {
+							viewmode_substitute[pipe_positions[0]] = 0x251C; /* ├ */
+						} else {
+							viewmode_substitute[pipe_positions[0]] = 0x251C; /* ├ first */
+							int pi;
+							for (pi = 1; pi < pipe_count - 1; pi++)
+								viewmode_substitute[pipe_positions[pi]] = 0x253C; /* ┼ middle */
+							viewmode_substitute[pipe_positions[pipe_count - 1]] = 0x2524; /* ┤ last */
+						}
+						/* Replace dashes and colons (alignment indicators) with ─ */
+						{
+							int si;
+							for (si = 0; si < line_len; si++) {
+								if (line[si] == '-' || line[si] == ':') {
+									viewmode_substitute[si] = 0x2500; /* ─ */
+								}
 							}
 						}
-					}
-					break;
-
-					case TABLE_ROW_HEADER:
-					case TABLE_ROW_BODY:
-					case TABLE_ROW_LAST:
-					default:
-					case TABLE_ROW_NONE:
 						break;
+
+						case TABLE_ROW_HEADER:
+						case TABLE_ROW_BODY:
+						case TABLE_ROW_LAST:
+						default:
+						case TABLE_ROW_NONE:
+							break;
+						}
 					}
 				}
 			}

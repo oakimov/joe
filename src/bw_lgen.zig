@@ -1,6 +1,6 @@
 //! Gated live bridge: JOE `lgen_core` / Feature 2.2 table rows / `gennum` → Zig paint.
 //!
-//! When `JOE_ZIG_BW_LGEN` / `zig_bw_lgen_enabled` is on, plain UTF-8 lines
+//! When `JOE_ZIG_BW_LGEN` / `zig_bw_lgen_enabled` is on, plain buffer lines
 //! (including linear/square mark inverse + viewmode hide/substitute/link tables +
 //! `-visiblews` glyphs + `-ansi` ESC hiding) paint through the Phase 6 renderer
 //! and emit via hybrid `outatr` (works with screen-swap shadow + classic tty
@@ -9,8 +9,9 @@
 //! gutters use `zig_bw_gennum` (JOE `" %21lld "` trailing `lincols`; past-EOF blanks).
 //! Window paint loops use `zig_bw_bwgen` (mark/lattr/viewmode setup stays in C;
 //! loops call C `getto`/`lgen`/`gennum` so Path A body/gutter bridges still apply).
-//! Default off until soak. Falls back to C when the gate is off or unsupported
-//! (non-UTF-8 body). Feature 2.1 simple pipe substitute stays in C.
+//! Feature 2.1 residual simple pipe substitute uses `zig_bw_table_simple`.
+//! Non-UTF-8 (byte) charmaps paint via `lgenLine` byte-mode.
+//! Default off until soak. Falls back to C when the gate is off.
 //!
 //! Hybrid `syntax.parse` fills `attr_buf` **per character** (`pgetc`); native
 //! `lgenLine` expects **per-byte** attrs — this bridge expands before paint.
@@ -141,6 +142,39 @@ pub export fn zig_bw_gennum(
         if (compose) |comp| comp[x] = ch;
     }
     outatr_complete(t);
+    return 0;
+}
+
+
+/// Feature 2.1 residual: fill `vm_subst` via `table.applySimpleBorders`.
+/// Live C only mutates separator rows when `table_col_count==0`; header/body/last
+/// are no-ops — this matches that. Returns `0` on success, `-1` to fall back.
+pub export fn zig_bw_table_simple(
+    line: ?[*]const u8,
+    line_len: c_int,
+    row_type: c_int,
+    vm_subst: ?[*]c_int,
+    vm_subst_len: c_int,
+) c_int {
+    if (zig_bw_lgen_enabled == 0) return -1;
+    if (line == null or line_len < 0) return -1;
+    if (vm_subst == null or vm_subst_len < line_len) return -1;
+
+    // Match live C residual: only separator mutates; others succeed as no-op.
+    if (row_type != 2) return 0; // TABLE_ROW_SEPARATOR == 2
+    if (line_len == 0) return 0;
+
+    const src = line.?[0..@intCast(line_len)];
+    const n: usize = @intCast(line_len);
+    const subst = std.heap.c_allocator.alloc(u21, n) catch return -1;
+    defer std.heap.c_allocator.free(subst);
+    @memset(subst, 0);
+    render.table.applySimpleBorders(subst, src, .separator);
+
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        if (subst[i] != 0) vm_subst.?[i] = @intCast(subst[i]);
+    }
     return 0;
 }
 
@@ -491,7 +525,8 @@ pub export fn zig_bw_lgen(
     if (zig_bw_lgen_enabled == 0) return -1;
     if (t == null or screen == null or attr_row == null or p == null) return -1;
     if (x1 <= x0) return -1;
-    if (charmap == null or charmap.?.@"type" == 0) return -1; // UTF-8 only for spike
+    if (charmap == null) return -1;
+    const byte_mode = charmap.?.@"type" == 0;
 
     const win_w_isize = x1 - x0;
     if (win_w_isize <= 0 or win_w_isize > 10000) return -1;
@@ -561,13 +596,22 @@ pub export fn zig_bw_lgen(
     if (use_attr_buf) {
         // Hybrid `parse`/`pgetc` fills one atr per character, not per byte.
         // Viewmode ASCII-mostly lines: char index ≡ byte index after C mutations.
-        const nchar = @min(utf8CharCount(content), @as(usize, @intCast(attr_size)));
+        const nchar = if (byte_mode)
+            @min(content.len, @as(usize, @intCast(attr_size)))
+        else
+            @min(utf8CharCount(content), @as(usize, @intCast(attr_size)));
         const char_attrs = alloc.alloc(Attribute, nchar) catch return -1;
         defer alloc.free(char_attrs);
         render.fromHybridRow(char_attrs, attr_buf[0..nchar], pal);
 
         const byte_attrs = alloc.alloc(Attribute, content.len) catch return -1;
-        expandCharAttrsToBytes(content, char_attrs, byte_attrs);
+        if (byte_mode) {
+            const n = @min(nchar, content.len);
+            @memcpy(byte_attrs[0..n], char_attrs[0..n]);
+            if (n < content.len) @memset(byte_attrs[n..], .none);
+        } else {
+            expandCharAttrsToBytes(content, char_attrs, byte_attrs);
+        }
         attrs_owned = byte_attrs;
         native_attrs = byte_attrs;
     }
@@ -708,7 +752,7 @@ pub export fn zig_bw_lgen(
         };
         if (mutable.len != paint_content.len) return -1;
         const tab_u16: u16 = if (tab <= 0) 1 else @intCast(tab);
-        applySquareMarkInverse(mutable, paint_content, tab_u16, from, to);
+        applySquareMarkInverse(mutable, paint_content, tab_u16, from, to, byte_mode);
         native_attrs = mutable;
     }
 
@@ -752,6 +796,7 @@ pub export fn zig_bw_lgen(
         .attrs = native_attrs,
         .view = view_ptr,
         .visible_ws = vws_ptr,
+        .byte_mode = byte_mode,
     };
     _ = render.lgenLine(&scratch, 0, 0, win_w, paint_line, opts, base_attr);
 
@@ -1083,7 +1128,7 @@ fn squareUnitWidth(cp: u21) u8 {
 /// Force inverse for square marks: `from`/`to` are display columns (`xcol`).
 /// JOE `SELECT_IF`: tab uses end-col `tcol > from && tcol <= to` (whole run);
 /// other units use start-col `col >= from && col < to`.
-fn applySquareMarkInverse(attrs: []Attribute, line: []const u8, tab: u16, from: i64, to: i64) void {
+fn applySquareMarkInverse(attrs: []Attribute, line: []const u8, tab: u16, from: i64, to: i64, byte_mode: bool) void {
     if (from == to) return;
     const t: i64 = if (tab == 0) 1 else tab;
     var col: i64 = 0;
@@ -1095,6 +1140,13 @@ fn applySquareMarkInverse(attrs: []Attribute, line: []const u8, tab: u16, from: 
             const tcol = col + t - @rem(col, t);
             if (tcol > from and tcol <= to) attrs[i].inverse = true;
             col = tcol;
+            i += 1;
+            continue;
+        }
+        if (byte_mode) {
+            const wid = squareUnitWidth(b);
+            if (col >= from and col < to) attrs[i].inverse = true;
+            col += wid;
             i += 1;
             continue;
         }
@@ -1205,7 +1257,7 @@ test "applyLinearMarkInverse no-op when from==to" {
 test "applySquareMarkInverse tab uses end-col inclusive" {
     var attrs = [_]Attribute{.{}} ** 4;
     // "ab\tc" tab=4 → a@0 b@1 tab→4 c@4; from=1 to=4 selects b + tab
-    applySquareMarkInverse(&attrs, "ab\tc", 4, 1, 4);
+    applySquareMarkInverse(&attrs, "ab\tc", 4, 1, 4, false);
     try std.testing.expect(!attrs[0].inverse);
     try std.testing.expect(attrs[1].inverse);
     try std.testing.expect(attrs[2].inverse);
@@ -1215,7 +1267,7 @@ test "applySquareMarkInverse tab uses end-col inclusive" {
 test "applySquareMarkInverse tab excluded when end past to" {
     var attrs = [_]Attribute{.{}} ** 3;
     // "\tX" tab=8, from=2 to=5: tcol=8 not in (2,5] → unselected
-    applySquareMarkInverse(&attrs, "\tX", 8, 2, 5);
+    applySquareMarkInverse(&attrs, "\tX", 8, 2, 5, false);
     try std.testing.expect(!attrs[0].inverse);
     try std.testing.expect(!attrs[1].inverse);
 }
@@ -1223,7 +1275,7 @@ test "applySquareMarkInverse tab excluded when end past to" {
 test "applySquareMarkInverse covers UTF-8 start column" {
     const line = "a\u{00e9}b";
     var attrs = [_]Attribute{.{}} ** 4;
-    applySquareMarkInverse(&attrs, line, 8, 1, 2);
+    applySquareMarkInverse(&attrs, line, 8, 1, 2, false);
     try std.testing.expect(!attrs[0].inverse);
     try std.testing.expect(attrs[1].inverse);
     try std.testing.expect(attrs[2].inverse);

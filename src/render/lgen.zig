@@ -52,6 +52,8 @@ pub const Options = struct {
     view: ?*const ViewTables = null,
     /// Optional visible-whitespace glyphs (JOE `-visiblews`).
     visible_ws: ?*const VisibleWs = null,
+    /// Non-UTF-8 charmap: each byte is one latin1-ish codepoint.
+    byte_mode: bool = false,
 };
 
 /// Merge cell atr with visible-ws style (JOE `((atr & vwsmask) | (vwsatr & ~vwsmask))`
@@ -239,6 +241,8 @@ const SliceIter = struct {
     i: usize = 0,
     /// Byte index (from BOL / slice start) of the unit returned by the last `next`.
     last_byte: usize = 0,
+    /// Non-UTF-8: each byte is one latin1-ish codepoint.
+    byte_mode: bool = false,
 
     fn next(self: *SliceIter) ?Unit {
         if (self.i >= self.text.len) return null;
@@ -249,6 +253,11 @@ const SliceIter = struct {
         if (b == '\t') {
             self.i += 1;
             return .{ .cp = '\t' };
+        }
+
+        if (self.byte_mode) {
+            self.i += 1;
+            return .{ .cp = b };
         }
 
         const seq_len = std.unicode.utf8ByteSequenceLength(b) catch {
@@ -296,7 +305,7 @@ pub fn lgenLine(
     opts: Options,
     base_attr: Attribute,
 ) u16 {
-    var it: SliceIter = .{ .text = text };
+    var it: SliceIter = .{ .text = text, .byte_mode = opts.byte_mode };
     return lgenUnits(term, x, y, w, &it, opts, base_attr);
 }
 
@@ -695,4 +704,16 @@ test "lgenLine visiblews skips vtab when offset cuts mid-tab" {
     try testing.expect(!term.cells[0].attr.dim);
     try testing.expectEqual(@as(u21, ' '), term.cells[1].cp);
     try testing.expectEqual(@as(u21, 'X'), term.cells[2].cp);
+}
+
+
+test "lgenLine byte_mode paints high bytes as codepoints" {
+    const gpa = testing.allocator;
+    var term = try TermScreen.init(gpa, 4, 1);
+    defer term.deinit();
+    const opts: Options = .{ .byte_mode = true };
+    _ = lgenLine(&term, 0, 0, 4, &[_]u8{ 'A', 0xE9, 'B' }, opts, .none);
+    try testing.expectEqual(@as(u21, 'A'), term.cells[0].cp);
+    try testing.expectEqual(@as(u21, 0xE9), term.cells[1].cp);
+    try testing.expectEqual(@as(u21, 'B'), term.cells[2].cp);
 }

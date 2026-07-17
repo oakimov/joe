@@ -48,6 +48,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    // Paint bridge may write into Zig-native terminal.Screen cells (tests-only).
+    window_mod.addImport("terminal", terminal_mod);
 
     // ── Pure Zig modules (replacing ported C files) ──────────────────
     // Each Zig module is compiled as an object and linked into the executable.

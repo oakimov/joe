@@ -1,0 +1,359 @@
+//! Bridge tests-only window paint shapes onto Zig-native `terminal.Screen` cells.
+//!
+//! Parallel to JOE `genfmt` / `menudisp` / `dispqw` / `disppw` / `mdisp` writing
+//! into SCRN. Not wired into live `joe` — unit-tested only.
+
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const testing = std.testing;
+
+const terminal = @import("terminal");
+const screen = @import("screen.zig");
+const tw = @import("tw.zig");
+const pw = @import("pw.zig");
+const qw = @import("qw.zig");
+const menu = @import("menu.zig");
+
+pub const TermScreen = terminal.Screen;
+pub const Attribute = terminal.Attribute;
+pub const Cell = terminal.screen.Cell;
+
+pub const CursorPos = struct {
+    x: u16 = 0,
+    y: u16 = 0,
+};
+
+/// Read one cell (tests / callers). Out-of-range returns a blank cell.
+pub fn cellAt(term: *const TermScreen, x: u16, y: u16) Cell {
+    if (x >= term.width or y >= term.height) return .{};
+    const idx = @as(usize, y) * @as(usize, term.width) + @as(usize, x);
+    return term.cells[idx];
+}
+
+fn screenY(term: *const TermScreen, y: i16) ?u16 {
+    if (y < 0 or y >= @as(i16, @intCast(term.height))) return null;
+    return @intCast(y);
+}
+
+fn toggleStyle(attr: Attribute, which: enum { underline, inverse, bold, italic, dim, blink, crossed_out, double_underline }) Attribute {
+    var out = attr;
+    switch (which) {
+        .underline => out.underline = !out.underline,
+        .inverse => out.inverse = !out.inverse,
+        .bold => out.bold = !out.bold,
+        .italic => out.italic = !out.italic,
+        .dim => out.dim = !out.dim,
+        .blink => out.blink = !out.blink,
+        .crossed_out => out.crossed_out = !out.crossed_out,
+        .double_underline => out.double_underline = !out.double_underline,
+    }
+    return out;
+}
+
+/// JOE `genfmt` shape: write format string `s` into cells at `(x, y)`, skipping
+/// the first `ofst` display columns. Attribute escapes (`\i`, `\u`, …) toggle
+/// styles. Byte-column width (matches window `fmtLen` scaffold). Returns the
+/// column after the last written glyph (clamped to `term.width`).
+pub fn writeFmt(term: *TermScreen, x: u16, y: i16, ofst: usize, s: []const u8, base_attr: Attribute) u16 {
+    const sy = screenY(term, y) orelse return x;
+    var col: usize = 0;
+    var cx: u16 = x;
+    var attr = base_attr;
+    var i: usize = 0;
+    while (i < s.len) {
+        if (s[i] == '\\' and i + 1 < s.len) {
+            const esc = s[i + 1];
+            i += 2;
+            switch (esc) {
+                'u', 'U' => attr = toggleStyle(attr, .underline),
+                'i', 'I' => attr = toggleStyle(attr, .inverse),
+                'b', 'B' => attr = toggleStyle(attr, .bold),
+                'l', 'L' => attr = toggleStyle(attr, .italic),
+                'd', 'D' => attr = toggleStyle(attr, .dim),
+                'f', 'F' => attr = toggleStyle(attr, .blink),
+                's', 'S' => attr = toggleStyle(attr, .crossed_out),
+                'z', 'Z' => attr = toggleStyle(attr, .double_underline),
+                '@' => {
+                    if (col >= ofst and cx < term.width) {
+                        term.writeChar(cx, sy, 0, attr);
+                        cx += 1;
+                    }
+                    col += 1;
+                },
+                else => {
+                    if (col >= ofst and cx < term.width) {
+                        term.writeChar(cx, sy, esc, attr);
+                        cx += 1;
+                    }
+                    col += 1;
+                },
+            }
+            continue;
+        }
+        const ch: u21 = s[i];
+        i += 1;
+        if (col >= ofst and cx < term.width) {
+            term.writeChar(cx, sy, ch, attr);
+            cx += 1;
+        }
+        col += 1;
+    }
+    return cx;
+}
+
+/// Clear cells from `x` through end of window width `win_w` on row `y` (eraeol shape).
+pub fn clearWinEol(term: *TermScreen, x: u16, y: i16, win_w: u16, attr: Attribute) void {
+    const sy = screenY(term, y) orelse return;
+    const end = @min(term.width, x +% win_w);
+    var cx = x;
+    while (cx < end) : (cx += 1) {
+        term.writeChar(cx, sy, ' ', attr);
+    }
+}
+
+/// Blit a menu `Paint` buffer into `term` at window origin `(ox, oy)`.
+pub fn blitMenu(term: *TermScreen, ox: u16, oy: i16, painted: *const menu.Paint, attr: Attribute) CursorPos {
+    var y: usize = 0;
+    while (y < painted.h) : (y += 1) {
+        const row_y: i16 = oy + @as(i16, @intCast(y));
+        const sy = screenY(term, row_y) orelse continue;
+        var x: usize = 0;
+        while (x < painted.w and ox + @as(u16, @intCast(x)) < term.width) : (x += 1) {
+            var a = attr;
+            if (painted.isInverse(x, y)) a.inverse = true;
+            term.writeChar(ox + @as(u16, @intCast(x)), sy, painted.charAt(x, y), a);
+        }
+    }
+    const cur_x = ox +% @as(u16, @intCast(@min(painted.cur.x, std.math.maxInt(u16))));
+    const cur_y_i: i16 = oy + @as(i16, @intCast(@min(painted.cur.y, std.math.maxInt(i16))));
+    const cur_y: u16 = if (screenY(term, cur_y_i)) |yy| yy else 0;
+    return .{ .x = @min(cur_x, term.width -| 1), .y = cur_y };
+}
+
+/// Paint a menu window into `term` (JOE `menudisp` → cells).
+pub fn paintMenu(term: *TermScreen, allocator: Allocator, m: *const menu.MenuWindow, focused: bool, attr: Attribute) !CursorPos {
+    var painted = try m.paint(allocator, focused);
+    defer painted.deinit();
+    return blitMenu(term, m.x, m.y, &painted, attr);
+}
+
+/// Blit query `Paint` rows into `term` at `(ox, oy)`.
+pub fn blitQuery(term: *TermScreen, ox: u16, oy: i16, painted: *const qw.Paint, attr: Attribute) CursorPos {
+    for (painted.rows, 0..) |row, y| {
+        const row_y: i16 = oy + @as(i16, @intCast(y));
+        _ = writeFmt(term, ox, row_y, 0, row, attr);
+    }
+    const cur_x = ox +% @as(u16, @intCast(@min(painted.cur.x, std.math.maxInt(u16))));
+    const cur_y_i: i16 = oy + @as(i16, @intCast(@min(painted.cur.y, std.math.maxInt(i16))));
+    const cur_y: u16 = if (screenY(term, cur_y_i)) |yy| yy else 0;
+    return .{ .x = @min(cur_x, term.width -| 1), .y = cur_y };
+}
+
+/// Paint a query window into `term` (JOE `dispqw` → cells).
+pub fn paintQuery(term: *TermScreen, allocator: Allocator, q: *const qw.QueryWindow, attr: Attribute) !CursorPos {
+    var painted = try q.paint(allocator);
+    defer painted.deinit();
+    return blitQuery(term, q.x, q.y, &painted, attr);
+}
+
+/// Paint prompt label + edit line into `term` (JOE `disppw` label half → cells).
+/// Edit bytes use plain `writeText` at the layout edit origin; no BW/render yet.
+pub fn paintPrompt(term: *TermScreen, p: *pw.PromptWindow, cursor_col: usize, attr: Attribute) CursorPos {
+    const lay = p.computeLayout(cursor_col);
+    _ = writeFmt(term, p.x, p.y, lay.prompt_ofst, p.prompt, attr);
+    const edit_x = p.x +% @as(u16, @intCast(@min(lay.prompt_visible, std.math.maxInt(u16))));
+    const edit = p.line.items;
+    const start = @min(lay.edit_offset, edit.len);
+    const vis = edit[start..];
+    if (screenY(term, p.y)) |sy| {
+        // Limit to remaining window width.
+        const budget = p.w -| @as(u16, @intCast(@min(lay.prompt_visible, p.w)));
+        const n = @min(vis.len, @as(usize, budget));
+        if (n > 0) term.writeText(edit_x, sy, vis[0..n], attr);
+        // Pad remainder of the prompt window row.
+        const used = @as(u16, @intCast(@min(lay.prompt_visible + n, p.w)));
+        clearWinEol(term, p.x +% used, p.y, p.w -| used, attr);
+    }
+    return .{
+        .x = p.x +% @as(u16, @intCast(@min(lay.curx, std.math.maxInt(u16)))),
+        .y = if (screenY(term, p.y)) |sy| sy else 0,
+    };
+}
+
+/// Write a composed status / format line into `term` (JOE `genfmt` status path).
+pub fn paintStatus(term: *TermScreen, x: u16, y: i16, win_w: u16, line: []const u8, attr: Attribute) void {
+    const end = writeFmt(term, x, y, 0, line, attr);
+    const used = end -% x;
+    if (used < win_w) clearWinEol(term, end, y, win_w -| used, attr);
+}
+
+/// Paint temporary top/bottom messages for `w` (JOE `msgout` / `mdisp`).
+pub fn paintMsgs(term: *TermScreen, w: *const screen.Window, status_enabled: bool, attr: Attribute) void {
+    if (w.msg_bot) |msg| {
+        if (w.msgBotRow()) |row| {
+            const len = tw.fmtLen(msg);
+            const ofst: usize = if (len <= term.width) 0 else len -| term.width;
+            _ = writeFmt(term, 0, row, ofst, msg, attr);
+        }
+    }
+    if (w.msg_top) |msg| {
+        if (w.msgTopRow(status_enabled)) |row| {
+            const len = tw.fmtLen(msg);
+            const ofst: usize = if (len <= term.width) 0 else len -| term.width;
+            _ = writeFmt(term, 0, row, ofst, msg, attr);
+        }
+    }
+}
+
+test "writeFmt toggles inverse and skips ofst" {
+    var term = try TermScreen.init(testing.allocator, 20, 4);
+    defer term.deinit();
+    const end = writeFmt(&term, 2, 1, 1, "a\\iBC\\ide", .none);
+    // ofst=1 skips 'a'; writes B,C inverse, then d,e normal. Start x=2.
+    try testing.expectEqual(@as(u16, 6), end);
+    try testing.expectEqual(@as(u21, 'B'), cellAt(&term, 2, 1).cp);
+    try testing.expect(cellAt(&term, 2, 1).attr.inverse);
+    try testing.expectEqual(@as(u21, 'C'), cellAt(&term, 3, 1).cp);
+    try testing.expect(cellAt(&term, 3, 1).attr.inverse);
+    try testing.expectEqual(@as(u21, 'd'), cellAt(&term, 4, 1).cp);
+    try testing.expect(!cellAt(&term, 4, 1).attr.inverse);
+    try testing.expectEqual(@as(u21, 'e'), cellAt(&term, 5, 1).cp);
+}
+
+test "writeFmt ignores off-screen rows" {
+    var term = try TermScreen.init(testing.allocator, 8, 2);
+    defer term.deinit();
+    _ = writeFmt(&term, 0, 0, 0, "ok", .none);
+    _ = writeFmt(&term, 0, -1, 0, "nope", .none);
+    _ = writeFmt(&term, 0, 2, 0, "nope", .none);
+    try testing.expectEqual(@as(u21, 'o'), cellAt(&term, 0, 0).cp);
+    // Row 1 untouched (blank default cell).
+    try testing.expect(cellAt(&term, 0, 1).isBlankNone());
+}
+
+test "paintMenu writes grid and inverse selection into cells" {
+    var scr = try screen.Screen.init(testing.allocator, 20, 24);
+    defer scr.deinit();
+    const win = try scr.createText(null, null, 24);
+    win.w = 11;
+    win.h = 2;
+    win.x = 3;
+    win.y = 4;
+
+    const items = [_][]const u8{ "a", "b", "c", "d", "e", "f" };
+    var menu_win = menu.MenuWindow.init(win, &items, 0);
+    menu_win.x = win.x;
+    menu_win.y = win.y;
+
+    var term = try TermScreen.init(testing.allocator, 20, 24);
+    defer term.deinit();
+    const cur = try paintMenu(&term, testing.allocator, &menu_win, true, .none);
+    try testing.expectEqual(@as(u21, 'a'), cellAt(&term, 3, 4).cp);
+    try testing.expect(cellAt(&term, 3, 4).attr.inverse);
+    try testing.expectEqual(@as(u21, 'b'), cellAt(&term, 5, 4).cp);
+    try testing.expect(!cellAt(&term, 5, 4).attr.inverse);
+    try testing.expectEqual(@as(u21, 'f'), cellAt(&term, 3, 5).cp);
+    try testing.expectEqual(@as(u16, 3 + 1), cur.x);
+    try testing.expectEqual(@as(u16, 4), cur.y);
+}
+
+test "paintQuery writes wrapped prompt rows into cells" {
+    var scr = try screen.Screen.init(testing.allocator, 20, 24);
+    defer scr.deinit();
+    const win = try scr.createText(null, null, 24);
+    win.x = 1;
+    win.y = 2;
+
+    // Word-wrap (JOE break_height): width 10 → "Replace" then "with ...".
+    const prompt = "Replace with (S to skip)";
+    var qw_win = try qw.QueryWindow.init(testing.allocator, win, prompt, .capture);
+    defer qw_win.deinit(testing.allocator);
+    qw_win.x = 1;
+    qw_win.y = 2;
+    qw_win.w = 10;
+    qw_win.h = 3;
+    qw_win.org_w = 10;
+
+    var term = try TermScreen.init(testing.allocator, 20, 24);
+    defer term.deinit();
+    const cur = try paintQuery(&term, testing.allocator, &qw_win, .none);
+    try testing.expectEqual(@as(u21, 'R'), cellAt(&term, 1, 2).cp);
+    try testing.expectEqual(@as(u21, 'w'), cellAt(&term, 1, 3).cp);
+    try testing.expectEqual(@as(u16, 4), cur.y); // last painted row (y=2 + h-1)
+}
+
+test "paintPrompt writes prompt and edit line into cells" {
+    var scr = try screen.Screen.init(testing.allocator, 40, 10);
+    defer scr.deinit();
+    const win = try scr.createText(null, null, 10);
+    win.w = 20;
+    win.h = 1;
+    win.x = 2;
+    win.y = 3;
+
+    var pw_win = try pw.PromptWindow.init(testing.allocator, win, "File: ");
+    defer pw_win.deinit(testing.allocator);
+    pw_win.x = win.x;
+    pw_win.y = win.y;
+    try pw_win.setLine(testing.allocator, "hello.txt");
+
+    var term = try TermScreen.init(testing.allocator, 40, 10);
+    defer term.deinit();
+    const cur = paintPrompt(&term, &pw_win, 0, .none);
+    try testing.expectEqual(@as(u21, 'F'), cellAt(&term, 2, 3).cp);
+    try testing.expectEqual(@as(u21, 'h'), cellAt(&term, 2 + 6, 3).cp);
+    try testing.expectEqual(@as(u16, 2 + 6), cur.x);
+    try testing.expectEqual(@as(u16, 3), cur.y);
+}
+
+test "paintStatus and paintMsgs write into terminal cells" {
+    var scr = try screen.Screen.init(testing.allocator, 20, 8);
+    defer scr.deinit();
+    const win = try scr.createText(null, null, 8);
+    try testing.expect(win.h >= 2);
+    win.y = 0;
+    win.setMsgBot("bottom-msg");
+    win.setMsgTop("top-msg");
+
+    var term = try TermScreen.init(testing.allocator, 20, 8);
+    defer term.deinit();
+
+    paintStatus(&term, win.x, win.y, win.w, "\\iSTATUS\\i ok", .{ .bold = true });
+    try testing.expectEqual(@as(u21, 'S'), cellAt(&term, win.x, 0).cp);
+    try testing.expect(cellAt(&term, win.x, 0).attr.inverse);
+    try testing.expect(cellAt(&term, win.x, 0).attr.bold);
+    // After closing \\i, space+'o' are bold only.
+    const o_x = win.x + 7; // "STATUS" = 6, then ' '
+    try testing.expectEqual(@as(u21, 'o'), cellAt(&term, o_x, 0).cp);
+    try testing.expect(!cellAt(&term, o_x, 0).attr.inverse);
+    try testing.expect(cellAt(&term, o_x, 0).attr.bold);
+
+    paintMsgs(&term, win, true, .none);
+    const bot = win.msgBotRow().?;
+    const top = win.msgTopRow(true).?;
+    try testing.expectEqual(@as(u21, 'b'), cellAt(&term, 0, @intCast(bot)).cp);
+    try testing.expectEqual(@as(u21, 't'), cellAt(&term, 0, @intCast(top)).cp);
+}
+
+test "paintStatus composes stagen left/right into a status row" {
+    var term = try TermScreen.init(testing.allocator, 40, 3);
+    defer term.deinit();
+    const ctx: tw.StatusContext = .{
+        .name = "demo.txt",
+        .line = 9,
+        .col = 2,
+        .changed = true,
+    };
+    const left = try tw.stagen(testing.allocator, "\\i%n %m\\i", &ctx, ' ');
+    defer testing.allocator.free(left);
+    const right = try tw.stagen(testing.allocator, "%r,%c", &ctx, ' ');
+    defer testing.allocator.free(right);
+    const line = try tw.composeStatus(testing.allocator, left, right, 40, ' ');
+    defer testing.allocator.free(line);
+
+    paintStatus(&term, 0, 0, 40, line, .none);
+    try testing.expectEqual(@as(u21, 'd'), cellAt(&term, 0, 0).cp);
+    try testing.expect(cellAt(&term, 0, 0).attr.inverse);
+    // Right side ends with "10,  3" (1-based row/col).
+    try testing.expectEqual(@as(u21, '3'), cellAt(&term, 39, 0).cp);
+}

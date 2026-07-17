@@ -17,7 +17,7 @@
 - ✅ Hybrid Phase 5: `qw` landed (replaces `joe/qw.c` — single-key query windows, 196/196 green)
 - ✅ Hybrid Phase 5: `menu` landed (replaces `joe/menu.c` — grid menu widget, 196/196 green)
 - ✅ Hybrid Phase 5: `mmenu` landed (replaces `joe/mmenu.c` — rc macro menus, 196/196 green)
-- 🚧 Phase 5 redesign: Zig-native `src/window/{root,screen,tw,pw,qw,menu}.zig` — Screen layout + grow/shrink/split/showAll/help-wind + `tw.stagen` status-line + `msg_top`/`msg_bot` helpers + harder layout (off-screen families, next/prev bring-into-view, `layout` child abort-to-fit) + `pw` history/submit/abort/tab callbacks + `qw` `breakHeight`/accept/abort + QueryMode + menu grid/nav/rc-menu/scroll + menu/query/prompt/text watom resize/move(/abort) hooks + create helpers attach typed objects + family `getminh` for `showAll`/`showOne` + `createQuery`/`createMenu` auto-height + tests-only paint shapes (`menu.paint`/`cursorPos`, `qw.paint`, `pw.computeLayout`/`visiblePrompt`) + `TextWindow` content geometry (`movetw`/`resizetw`: status/`lincols`); `zig build window-test` **65/65**; not wired into live joe
+- 🚧 Phase 5 redesign: Zig-native `src/window/{root,screen,tw,pw,qw,menu,paint}.zig` — Screen layout + grow/shrink/split/showAll/help-wind + `tw.stagen` status-line + `msg_top`/`msg_bot` helpers + harder layout (off-screen families, next/prev bring-into-view, `layout` child abort-to-fit) + `pw` history/submit/abort/tab callbacks + `qw` `breakHeight`/accept/abort + QueryMode + menu grid/nav/rc-menu/scroll + menu/query/prompt/text watom resize/move(/abort) hooks + create helpers attach typed objects + family `getminh` for `showAll`/`showOne` + `createQuery`/`createMenu` auto-height + tests-only paint shapes (`menu.paint`/`cursorPos`, `qw.paint`, `pw.computeLayout`/`visiblePrompt`) + `TextWindow` content geometry (`movetw`/`resizetw`: status/`lincols`) + paint→`terminal.Screen` bridge (`writeFmt`/`paintMenu`/`paintQuery`/`paintPrompt`/`paintStatus`/`paintMsgs`); `zig build window-test` **72/72**; not wired into live joe
 - 🚧 Phase 3 redesign deepen: Zig-native `src/terminal/{terminfo,tty,pty,screen,adapter}.zig` unit-tested (`zig build terminal-test` **68/68**); UTF-8 `writeText` + display-width, `Key`/`KeyParser`/`readKey` CSI+SS3+SGR-mouse+bracketed-paste+focus, mouse/alt-screen/keypad/paste/focus enter-leave, truecolor/`Color` SGR, SIGWINCH pending/`pollResize`, terminfo rare-cap cache + `formatCup`/`formatCsr`/`formatIl`/`formatDl`/`formatIch`/`formatDch`/`formatCuu`/`formatCud`/`formatCuf`/`formatCub`/`formatHpa`/`formatVpa` + scroll-region/IL/DL + clear-to-EOL/EOS (`el`/`ed`) + within-line ICH/DCH (`ich`/`dch`) + relative cursor CUU/CUD/CUF/CUB + save/restore (`sc`/`rc`) + smarter `moveTo` (full JOE `cposs` matrix: relative/CUP/CR/home/ll/hpa/vpa/cV/vpa+hpa + CR+vpa/ll+hpa/ll+vpa/home+hpa/home+vpa, scroll-region-relative `rr` home/ll/vpa, `has_cup`/`has_cr`) + tab-aware column costing (`ta`/`bt`/`it`/`xt`/`pt`, `use_tabs` default off) + thin hybrid↔native adapter (`attributeFromHybrid`/`attributeToHybrid` + obuf-style `OutSink`/`drainScreenOut`/`drainScreenOutGated`) + gated hybrid `ttWrite`/`drainZigScreen` (`JOE_ZIG_SCREEN_DRAIN` / `zig_screen_drain_enabled`, default off — live `obuf` path unchanged; not a screen swap); cell-diff `flush` (changed runs + EL blank tails; `display` sync; within-line ICH/DCH magic when pure insert/delete shift); gated hybrid `scrn` swap (`JOE_ZIG_SCREEN_SWAP` / `zig_screen_swap_enabled`, **default on** — paint updates shadow only; `zig_scrn_swap_flush` syncs→Zig cell-diff→drain; `flush_cup_only` + `cursor_valid` fix stale-cursor paints; opt out `=0`); Cell compose slots (`COMPOSE_MARKS=3`) + `writeText`/`syncHybridGridToScreen` combining + flush IL/DL scroll magic (`use_scroll`); `zig build terminal-test` **84/84**)
 - **Integration tests:** full suite **196/196 OK** (including viewmode)
 - **Recent hybrid fixes:** `binsb` uses `hallocFresh()` so freelist corruption cannot reclaim a still-live gap header and zero its `hole` (was wiping history into NULs/`@` on Command: prompt after 2× `blkcpy`); `inschn` skips `hfree` when `p.hdr == a`; `brm` uses `vsrm(current_dir)`; plus prior `brvs`/`vstrunc`, `binsmq`, `charmap->type`, unicode/`p_goto_bol`/`binsm`/`iskey` fixes
@@ -551,26 +551,31 @@ const terminal = struct {
 - Handles: status line rendering (`stagen()`), text body display via `render.zig`, cursor positioning.
 - Status line format strings (`%n`, `%r`, `%c`, etc.) — same logic, Zig string formatting.
 - ✅ Native scaffold: `StatusContext` + `stagen` / `composeStatus` / `fmtLen` / `fmtPos` / `simplifyPrefix` (unit-tested; no live BW yet).
-- ✅ Native messages: `Window.setMsgBot`/`setMsgTop`/`clearMsgs`/`msgBotRow`/`msgTopRow`, `Screen.composeMsg`/`msg_buf`, main-`close` message transfer (unit-tested; no live paint yet).
+- ✅ Native messages: `Window.setMsgBot`/`setMsgTop`/`clearMsgs`/`msgBotRow`/`msgTopRow`, `Screen.composeMsg`/`msg_buf`, main-`close` message transfer (unit-tested).
+- ✅ Native paint bridge: `paint.paintMsgs` writes msg top/bot into `terminal.Screen` cells (`mdisp`/`msgout` ofst; unit-tested; not live joe).
 - ✅ Native deepen: `TextWindow` content geometry + watom `on_move`/`on_resize` (`movetw`/`resizetw`: `status_enabled`/`status_on`/`lincols`; no SCRN scroll); `splitText` attaches object (unit-tested; no live BW yet).
+- ✅ Native paint bridge: `paint.paintStatus` + `writeFmt` (`genfmt` attr escapes) compose `stagen`/`composeStatus` into `terminal.Screen` cells (unit-tested; not live joe).
 
 #### `window/pw.zig` — Prompt Window
 - Replaces `pw.c` (~532 lines).
 - History, tab completion, callback on Enter.
 - ✅ Native deepen: `History` (append/promote) + `PromptWindow` submit/abort/tab callback shapes + `PromptFlags` (unit-tested; no live BW/completion UI yet).
-- ✅ Native paint shape: `computeLayout` / `visiblePrompt` (`disppw` scroll + ofst; unit-tested; no live paint yet).
+- ✅ Native paint shape: `computeLayout` / `visiblePrompt` (`disppw` scroll + ofst; unit-tested).
+- ✅ Native paint bridge: `paint.paintPrompt` writes prompt+edit into `terminal.Screen` cells (unit-tested; no live BW yet).
 
 #### `window/qw.zig` — Query Window
 - Replaces `qw.c` (~290 lines).
 - Key-capture callbacks for one-character queries.
 - ✅ Native deepen: `breakHeight`/`promptHeight` wrap + `QueryMode` (`mkqw`/`mkqwna`/`mkqwnsr`) + acceptKey/abort callbacks (unit-tested; no live paint yet).
-- ✅ Native paint shape: `QueryWindow.paint` wrapped prompt rows + cursor (`dispqw`; unit-tested; no live paint yet).
+- ✅ Native paint shape: `QueryWindow.paint` wrapped prompt rows + cursor (`dispqw`; unit-tested).
+- ✅ Native paint bridge: `paint.paintQuery` / `blitQuery` → `terminal.Screen` cells (unit-tested; not live joe).
 
 #### `menu.zig` — Menu System
 - Replaces `menu.c` (~720 lines) + `mmenu.c` (~174 lines).
 - Generic grid menu + macro-defined menus from rc file.
 - Same rendering (INVERSE highlight, column-major layout), same key dispatch.
-- ✅ Native paint shape: `MenuWindow.paint` / `cursorPos` / `paintField` (`menudisp` grid + inverse selection; unit-tested; no live paint yet).
+- ✅ Native paint shape: `MenuWindow.paint` / `cursorPos` / `paintField` (`menudisp` grid + inverse selection; unit-tested).
+- ✅ Native paint bridge: `paint.paintMenu` / `blitMenu` → `terminal.Screen` cells with inverse selection (unit-tested; not live joe).
 
 ---
 
@@ -766,7 +771,7 @@ The build is always working — start with a binary that compiles and runs, then
 - ✅ `qw.zig` — hybrid C-ABI port replacing `joe/qw.c` (single-key query windows; 196/196)
 - ✅ `menu.zig` — hybrid C-ABI port replacing `joe/menu.c` (grid menu widget; 196/196)
 - ✅ `mmenu.zig` — hybrid C-ABI port replacing `joe/mmenu.c` (rc macro menus; 196/196)
-- 🚧 redesign `src/window/{root,screen,tw,pw,qw,menu}.zig` — Zig-native window types (Screen layout + grow/shrink/splitText/showAll/setHelpLines + `tw.stagen`/`composeStatus` + `msg_top`/`msg_bot` + off-screen families / child abort-to-fit in `layout` + `pw.History`/submit/abort/tab + `qw.breakHeight`/acceptKey/abort + QueryMode + menu grid/nav/rc-menu + `scrollUp`/`scrollDown`/`pageUp`/`pageDown` + menu/query/prompt/text watom `on_resize`/`on_move`(/`on_abort`) + `createText`/`createPrompt`/`createQuery`/`createMenu` attach typed objects + family `minHeight` (`getminh`) driving `showAll`/`showOne` + query/menu create heights from wrap/`linesFor` + tests-only paint shapes (`menudisp`/`dispqw`/`disppw`: `menu.paint`/`cursorPos`, `qw.paint`, `pw.computeLayout`/`visiblePrompt`) + `TextWindow` content geometry (`movetw`/`resizetw` status/`lincols`; `splitText` attaches object); `zig build window-test` **65/65**; hybrid ports remain live)
+- 🚧 redesign `src/window/{root,screen,tw,pw,qw,menu,paint}.zig` — Zig-native window types (Screen layout + grow/shrink/splitText/showAll/setHelpLines + `tw.stagen`/`composeStatus` + `msg_top`/`msg_bot` + off-screen families / child abort-to-fit in `layout` + `pw.History`/submit/abort/tab + `qw.breakHeight`/acceptKey/abort + QueryMode + menu grid/nav/rc-menu + `scrollUp`/`scrollDown`/`pageUp`/`pageDown` + menu/query/prompt/text watom `on_resize`/`on_move`(/`on_abort`) + `createText`/`createPrompt`/`createQuery`/`createMenu` attach typed objects + family `minHeight` (`getminh`) driving `showAll`/`showOne` + query/menu create heights from wrap/`linesFor` + tests-only paint shapes (`menudisp`/`dispqw`/`disppw`: `menu.paint`/`cursorPos`, `qw.paint`, `pw.computeLayout`/`visiblePrompt`) + `TextWindow` content geometry (`movetw`/`resizetw` status/`lincols`; `splitText` attaches object) + paint→`terminal.Screen` bridge (`writeFmt`/`paintMenu`/`paintQuery`/`paintPrompt`/`paintStatus`/`paintMsgs`); `zig build window-test` **72/72**; hybrid ports remain live)
 - ✅ `mmenu.zig` — hybrid rc menus (`joe/mmenu.c`; 196/196)
 - At this point: multi-window editing works
 

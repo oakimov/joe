@@ -9,6 +9,7 @@ pub const tw = @import("tw.zig");
 pub const pw = @import("pw.zig");
 pub const qw = @import("qw.zig");
 pub const menu = @import("menu.zig");
+pub const paint = @import("paint.zig");
 
 pub const Screen = screen.Screen;
 pub const Window = screen.Window;
@@ -44,10 +45,19 @@ pub const linesFor = menu.linesFor;
 pub const commonPrefix = menu.commonPrefix;
 pub const completePrefix = menu.completePrefix;
 
+pub const TermScreen = paint.TermScreen;
+pub const writeFmt = paint.writeFmt;
+pub const paintMenu = paint.paintMenu;
+pub const paintQuery = paint.paintQuery;
+pub const paintPrompt = paint.paintPrompt;
+pub const paintStatus = paint.paintStatus;
+pub const paintMsgs = paint.paintMsgs;
+
 test {
     _ = screen;
     _ = tw;
     _ = pw;
     _ = qw;
     _ = menu;
+    _ = paint;
 }

@@ -12,6 +12,7 @@
 //! Hex dump paint uses `zig_bw_bwgenh` (mark setup stays in C; loop calls C `genfield`).
 //! Table region detect uses `zig_bw_table_detect` → `table.layoutAt` (fills C widths/aligns).
 //! Cursor follow/scroll uses `zig_bw_bwfllwt` / `zig_bw_bwfllwh` (C scroll helpers).
+//! Post-edit window scroll uses `zig_bw_bwins` / `zig_bw_bwdel`.
 //! Feature 2.1 residual simple pipe substitute uses `zig_bw_table_simple`.
 //! Non-UTF-8 (byte) charmaps paint via `lgenLine` byte-mode.
 //! Default off until soak. Falls back to C when the gate is off.
@@ -486,6 +487,108 @@ pub export fn zig_bw_bwfllwh(
         off = col - (win_w - 1);
         offset.?.* = off;
         zig_c_bw_msetI(updtab.? + @as(usize, @intCast(win_y)), 1, win_h);
+    }
+    return 0;
+}
+
+/// Path A post-insert window scroll (`bwins`).
+/// Returns `0` on success, `-1` to fall back to C.
+pub export fn zig_bw_bwins(
+    t: ?*SCRN,
+    updtab: ?[*]c_int,
+    sary: ?[*]isize,
+    li: isize,
+    win_y: isize,
+    win_h: isize,
+    top_line: i64,
+    eof_line: i64,
+    l: i64,
+    n: i64,
+    flg: c_int,
+    do_highlight: c_int,
+) c_int {
+    if (zig_bw_lgen_enabled == 0) return -1;
+    if (t == null or updtab == null or win_h <= 0) return -1;
+
+    if (do_highlight != 0) {
+        if (l < top_line) {
+            zig_c_bw_msetI(updtab.? + @as(usize, @intCast(win_y)), 1, win_h);
+        } else if ((l + 1) < top_line + win_h) {
+            const start: isize = @intCast(l + 1 - top_line);
+            const size = win_h - start;
+            zig_c_bw_msetI(updtab.? + @as(usize, @intCast(win_y + start)), 1, size);
+        }
+    }
+
+    if (l + flg + n < top_line + win_h and l + flg >= top_line and l + flg <= eof_line) {
+        if (flg != 0) {
+            if (sary == null) return -1;
+            sary.?[@intCast(win_y + l - top_line)] = li;
+        }
+        zig_c_bw_nscrldn(t, @intCast(win_y + l + flg - top_line), win_y + win_h, @intCast(n));
+    }
+
+    if (l < top_line + win_h and l >= top_line) {
+        if (n >= win_h - (l - top_line)) {
+            zig_c_bw_msetI(updtab.? + @as(usize, @intCast(win_y + l - top_line)), 1, win_h - @as(isize, @intCast(l - top_line)));
+        } else {
+            zig_c_bw_msetI(updtab.? + @as(usize, @intCast(win_y + l - top_line)), 1, @intCast(n + 1));
+        }
+    }
+    return 0;
+}
+
+/// Path A post-delete window scroll (`bwdel`).
+/// Returns `0` on success, `-1` to fall back to C.
+pub export fn zig_bw_bwdel(
+    t: ?*SCRN,
+    updtab: ?[*]c_int,
+    win_y: isize,
+    win_h: isize,
+    top_line: i64,
+    eof_line: i64,
+    l: i64,
+    n: i64,
+    flg: c_int,
+    do_highlight: c_int,
+) c_int {
+    if (zig_bw_lgen_enabled == 0) return -1;
+    if (t == null or updtab == null or win_h <= 0) return -1;
+
+    if (do_highlight != 0) {
+        if (l < top_line) {
+            zig_c_bw_msetI(updtab.? + @as(usize, @intCast(win_y)), 1, win_h);
+        } else if ((l + 1) < top_line + win_h) {
+            const start: isize = @intCast(l + 1 - top_line);
+            const size = win_h - start;
+            zig_c_bw_msetI(updtab.? + @as(usize, @intCast(win_y + start)), 1, size);
+        }
+    }
+
+    if (l < top_line + win_h and l >= top_line)
+        updtab.?[@intCast(win_y + l - top_line)] = 1;
+
+    if (l + n < top_line + win_h and l + n >= top_line)
+        updtab.?[@intCast(win_y + l + n - top_line)] = 1;
+
+    if (l < top_line + win_h and (l + n >= top_line + win_h or (l + n == eof_line and eof_line >= top_line + win_h))) {
+        if (l >= top_line) {
+            zig_c_bw_msetI(updtab.? + @as(usize, @intCast(win_y + l - top_line)), 1, win_h - @as(isize, @intCast(l - top_line)));
+        } else {
+            zig_c_bw_msetI(updtab.? + @as(usize, @intCast(win_y)), 1, win_h);
+        }
+    } else if (l < top_line + win_h and l + n == eof_line and eof_line < top_line + win_h) {
+        if (l >= top_line) {
+            zig_c_bw_msetI(updtab.? + @as(usize, @intCast(win_y + l - top_line)), 1, @intCast(n));
+        } else {
+            zig_c_bw_msetI(updtab.? + @as(usize, @intCast(win_y)), 1, @intCast(eof_line - top_line));
+        }
+    } else if (l + n < top_line + win_h and l + n > top_line and l + n < eof_line) {
+        if (l + flg >= top_line) {
+            zig_c_bw_nscrlup(t, @intCast(win_y + l + flg - top_line), win_y + win_h, @intCast(n));
+        } else {
+            zig_c_bw_nscrlup(t, win_y, win_y + win_h, @intCast(l + n - top_line));
+        }
     }
     return 0;
 }

@@ -50,6 +50,13 @@ extern int zig_bw_bwfllwt(P *top, P *cursor, SCRN *t, int *updtab,
 	off_t *offset, off_t *curlin, int hiline);
 extern int zig_bw_bwfllwh(P *top, P *cursor, SCRN *t, int *updtab,
 	ptrdiff_t y, ptrdiff_t h, ptrdiff_t w, off_t *offset);
+/* Path A: gated Zig post-edit window scroll. */
+extern int zig_bw_bwins(SCRN *t, int *updtab, ptrdiff_t *sary, ptrdiff_t li,
+	ptrdiff_t y, ptrdiff_t h, off_t top_line, off_t eof_line,
+	off_t l, off_t n, int flg, int do_highlight);
+extern int zig_bw_bwdel(SCRN *t, int *updtab,
+	ptrdiff_t y, ptrdiff_t h, off_t top_line, off_t eof_line,
+	off_t l, off_t n, int flg, int do_highlight);
 /* Path A Feature 2.1: gated Zig simple pipe substitute into vm_subst[]. */
 extern int zig_bw_table_simple(const unsigned char *line, int line_len, int row_type,
 	int *vm_subst, int vm_subst_len);
@@ -315,6 +322,14 @@ static HIGHLIGHT_STATE get_highlight_state(BW *w, P *p, off_t line)
 
 void bwins(BW *w, off_t l, off_t n, int flg)
 {
+	/* Path A: Zig-native post-insert scroll (JOE_ZIG_BW_LGEN). */
+	if (zig_bw_lgen_enabled) {
+		int z = zig_bw_bwins(w->t->t, w->t->t->updtab, w->t->t->sary, w->t->t->li,
+			w->y, w->h, w->top->line, w->b->eof->line,
+			l, n, flg, (w->o.highlight && w->o.syntax) ? 1 : 0);
+		if (z >= 0)
+			return;
+	}
 	/* If highlighting is enabled... */
 	if (w->o.highlight && w->o.syntax) {
 		/* Invalidate cache */
@@ -350,6 +365,14 @@ void bwins(BW *w, off_t l, off_t n, int flg)
 
 void bwdel(BW *w, off_t l, off_t n, int flg)
 {
+	/* Path A: Zig-native post-delete scroll (JOE_ZIG_BW_LGEN). */
+	if (zig_bw_lgen_enabled) {
+		int z = zig_bw_bwdel(w->t->t, w->t->t->updtab,
+			w->y, w->h, w->top->line, w->b->eof->line,
+			l, n, flg, (w->o.highlight && w->o.syntax) ? 1 : 0);
+		if (z >= 0)
+			return;
+	}
 	/* If highlighting is enabled... */
 	if (w->o.highlight && w->o.syntax) {
 		/* lattr_cut(w->db, l + 1); */

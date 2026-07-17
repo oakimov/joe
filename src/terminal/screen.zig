@@ -244,6 +244,12 @@ pub const Screen = struct {
     /// Inclusive scroll-region bounds (JOE `top`/`bot-1` style → last inclusive).
     scroll_top: u16 = 0,
     scroll_last: u16 = 0,
+    /// When true, home/ll/vpa are scroll-region relative (JOE terminfo `rr`).
+    region_relative: bool = false,
+    /// When false, CUP is treated as unavailable (JOE when `cm` is null).
+    has_cup: bool = true,
+    /// When false, CR-based ways are disabled (JOE when `cr` is null).
+    has_cr: bool = true,
     /// When true, relative column motion may use tab / back-tab (JOE `opt_usetabs`).
     /// Default false matches JOE; enable explicitly for tab-aware `moveTo`.
     use_tabs: bool = false,
@@ -252,6 +258,11 @@ pub const Screen = struct {
     /// Optional sequence overrides (unit tests / hosts without terminfo).
     tab_seq: ?[]const u8 = null,
     back_tab_seq: ?[]const u8 = null,
+    home_seq: ?[]const u8 = null,
+    ll_seq: ?[]const u8 = null,
+    /// Fixed HPA/VPA stand-ins (tests); when set, cost = len and emit is literal.
+    hpa_seq: ?[]const u8 = null,
+    vpa_seq: ?[]const u8 = null,
     /// Output scratch buffer (obuf-style for Phase 0–5 compatibility).
     out: std.ArrayList(u8),
 
@@ -586,6 +597,7 @@ pub const Screen = struct {
     }
 
     fn cupMoveCost(self: *const Screen, x: u16, y: u16) usize {
+        if (!self.has_cup) return std.math.maxInt(usize);
         if (self.terminfo) |ti| {
             if (ti.formatCup(x, y)) |seq| {
                 if (seq.len != 0) return seq.len;
@@ -595,6 +607,9 @@ pub const Screen = struct {
     }
 
     fn hpaMoveCost(self: *const Screen, x: u16) usize {
+        if (self.hpa_seq) |seq| {
+            if (seq.len != 0) return seq.len;
+        }
         if (self.terminfo) |ti| {
             if (ti.formatHpa(x)) |seq| {
                 if (seq.len != 0) return seq.len;
@@ -603,13 +618,22 @@ pub const Screen = struct {
         return ansiCsiNumLen(x + 1); // CSI {x+1} G
     }
 
+    /// Absolute-row parameter for `vpa`/`cv` — region-relative when `rr` is set.
+    fn vpaParam(self: *const Screen, y: u16) u16 {
+        return y -| self.homeRow();
+    }
+
     fn vpaMoveCost(self: *const Screen, y: u16) usize {
+        if (self.vpa_seq) |seq| {
+            if (seq.len != 0) return seq.len;
+        }
+        const yp = self.vpaParam(y);
         if (self.terminfo) |ti| {
-            if (ti.formatVpa(y)) |seq| {
+            if (ti.formatVpa(yp)) |seq| {
                 if (seq.len != 0) return seq.len;
             }
         }
-        return ansiCsiNumLen(y + 1); // CSI {y+1} d
+        return ansiCsiNumLen(yp + 1); // CSI {yp+1} d
     }
 
     /// JOE `cV`: go to column 0 of row `y` via `CSI {y+1} H` (no terminfo name).
@@ -617,25 +641,40 @@ pub const Screen = struct {
         return ansiCsiNumLen(y + 1);
     }
 
-    fn lastLineRow(self: *const Screen) u16 {
-        // Prefer active scroll-region bottom when set (JOE `hl` with `rr`).
-        return @min(self.scroll_last, self.height -| 1);
+    fn homeRow(self: *const Screen) u16 {
+        // JOE `hy`: scroll-region top only when terminfo `rr` is set.
+        if (self.region_relative) return @min(self.scroll_top, self.height -| 1);
+        return 0;
     }
 
-    /// Home sequence cost: prefer terminfo `home`, else `cup(0,0)`, else ANSI `CSI H`.
+    fn lastLineRow(self: *const Screen) u16 {
+        // JOE `hl`: scroll-region bottom only when terminfo `rr` is set.
+        if (self.region_relative) return @min(self.scroll_last, self.height -| 1);
+        return self.height -| 1;
+    }
+
+    /// Home sequence cost: prefer override / terminfo `home`, else `cup(0,hy)`, else ANSI.
     fn homeMoveCost(self: *const Screen) usize {
+        if (self.home_seq) |seq| {
+            if (seq.len != 0) return seq.len;
+        }
+        const hy = self.homeRow();
         if (self.terminfo) |ti| {
             if (ti.caps.home) |seq| {
                 if (seq.len != 0) return seq.len;
             }
-            if (ti.formatCup(0, 0)) |seq| {
+            if (ti.formatCup(0, hy)) |seq| {
                 if (seq.len != 0) return seq.len;
             }
         }
-        return 3; // \x1b[H
+        if (hy == 0) return 3; // \x1b[H
+        return ansiCsiNumLen(hy + 1); // \x1b[{hy+1}H
     }
 
     fn llMoveCost(self: *const Screen) usize {
+        if (self.ll_seq) |seq| {
+            if (seq.len != 0) return seq.len;
+        }
         if (self.terminfo) |ti| {
             if (ti.caps.ll) |seq| {
                 if (seq.len != 0) return seq.len;
@@ -645,31 +684,52 @@ pub const Screen = struct {
     }
 
     fn appendHome(self: *Screen) !void {
+        const hy = self.homeRow();
+        if (self.home_seq) |seq| {
+            if (seq.len != 0) {
+                try self.out.appendSlice(self.allocator, seq);
+                self.cursor_x = 0;
+                self.cursor_y = hy;
+                return;
+            }
+        }
         if (self.terminfo) |ti| {
             if (ti.caps.home) |seq| {
                 if (seq.len != 0) {
                     try self.out.appendSlice(self.allocator, seq);
                     self.cursor_x = 0;
-                    self.cursor_y = 0;
+                    self.cursor_y = hy;
                     return;
                 }
             }
-            if (ti.formatCup(0, 0)) |seq| {
+            if (ti.formatCup(0, hy)) |seq| {
                 if (seq.len != 0) {
                     try self.out.appendSlice(self.allocator, seq);
                     self.cursor_x = 0;
-                    self.cursor_y = 0;
+                    self.cursor_y = hy;
                     return;
                 }
             }
         }
-        try self.out.appendSlice(self.allocator, "\x1b[H");
+        if (hy == 0) {
+            try self.out.appendSlice(self.allocator, "\x1b[H");
+        } else {
+            try self.out.print(self.allocator, "\x1b[{d}H", .{hy + 1});
+        }
         self.cursor_x = 0;
-        self.cursor_y = 0;
+        self.cursor_y = hy;
     }
 
     fn appendLl(self: *Screen) !void {
         const hl = self.lastLineRow();
+        if (self.ll_seq) |seq| {
+            if (seq.len != 0) {
+                try self.out.appendSlice(self.allocator, seq);
+                self.cursor_x = 0;
+                self.cursor_y = hl;
+                return;
+            }
+        }
         if (self.terminfo) |ti| {
             if (ti.caps.ll) |seq| {
                 if (seq.len != 0) {
@@ -685,6 +745,13 @@ pub const Screen = struct {
 
     fn appendHpa(self: *Screen, x: u16) !void {
         const tx = @min(x, self.width -| 1);
+        if (self.hpa_seq) |seq| {
+            if (seq.len != 0) {
+                try self.out.appendSlice(self.allocator, seq);
+                self.cursor_x = tx;
+                return;
+            }
+        }
         if (self.terminfo) |ti| {
             if (ti.formatHpa(tx)) |seq| {
                 if (seq.len != 0) {
@@ -700,8 +767,16 @@ pub const Screen = struct {
 
     fn appendVpa(self: *Screen, y: u16) !void {
         const ty = @min(y, self.height -| 1);
+        if (self.vpa_seq) |seq| {
+            if (seq.len != 0) {
+                try self.out.appendSlice(self.allocator, seq);
+                self.cursor_y = ty;
+                return;
+            }
+        }
+        const yp = self.vpaParam(ty);
         if (self.terminfo) |ti| {
-            if (ti.formatVpa(ty)) |seq| {
+            if (ti.formatVpa(yp)) |seq| {
                 if (seq.len != 0) {
                     try self.out.appendSlice(self.allocator, seq);
                     self.cursor_y = ty;
@@ -709,7 +784,7 @@ pub const Screen = struct {
                 }
             }
         }
-        try self.out.print(self.allocator, "\x1b[{d}d", .{ty + 1});
+        try self.out.print(self.allocator, "\x1b[{d}d", .{yp + 1});
         self.cursor_y = ty;
     }
 
@@ -722,7 +797,8 @@ pub const Screen = struct {
     }
 
     /// Move cursor to `(x, y)`, choosing the cheapest among relative CU*/tabs/CUP/
-    /// CR+rel / home+rel / ll+rel / hpa+rel / vpa+rel / cV+rel / vpa+hpa
+    /// CR+rel / home+rel / ll+rel / hpa+rel / vpa+rel / cV+rel / vpa+hpa /
+    /// CR+vpa / ll+hpa / ll+vpa / home+hpa / home+vpa
     /// (JOE `cposs`/`relcost` style). Updates logical cursor and emits into `out`.
     pub fn moveTo(self: *Screen, x: u16, y: u16) !void {
         const tx = @min(x, self.width -| 1);
@@ -731,22 +807,23 @@ pub const Screen = struct {
 
         const cx = self.cursor_x;
         const cy = self.cursor_y;
+        const hy = self.homeRow();
         const hl = self.lastLineRow();
 
         const rel_cost = self.relativeMoveCost(cx, cy, tx, ty);
         const cup_cost = self.cupMoveCost(tx, ty);
 
         // CR returns to column 0 on the current row, then relative the rest.
-        const cr_cost: usize = if (cx == 0)
+        const cr_cost: usize = if (!self.has_cr or cx == 0)
             std.math.maxInt(usize)
         else
             1 + self.relativeMoveCost(0, cy, tx, ty);
 
-        // Home to (0,0), then relative — wins for destinations near the origin.
-        const home_cost: usize = if (cx == 0 and cy == 0)
+        // Home to (0,hy), then relative — wins for destinations near home.
+        const home_cost: usize = if (cx == 0 and cy == hy)
             std.math.maxInt(usize)
         else
-            self.homeMoveCost() + self.relativeMoveCost(0, 0, tx, ty);
+            self.homeMoveCost() + self.relativeMoveCost(0, hy, tx, ty);
 
         // Last-line (`ll`), then relative.
         const ll_cost: usize = if (cx == 0 and cy == hl)
@@ -775,6 +852,24 @@ pub const Screen = struct {
         else
             self.vpaMoveCost(ty) + self.hpaMoveCost(tx);
 
+        // JOE way 8: CR + vpa, then column from (0, ty).
+        const cr_vpa_cost: usize = if (!self.has_cr or ty == cy)
+            std.math.maxInt(usize)
+        else
+            1 + self.vpaMoveCost(ty) + self.relativeMoveCost(0, ty, tx, ty);
+
+        // JOE way 9: ll + hpa, then row from (tx, hl).
+        const ll_hpa_cost = self.llMoveCost() + self.hpaMoveCost(tx) + self.relativeMoveCost(tx, hl, tx, ty);
+
+        // JOE way 10: ll + vpa, then column from (0, ty).
+        const ll_vpa_cost = self.llMoveCost() + self.vpaMoveCost(ty) + self.relativeMoveCost(0, ty, tx, ty);
+
+        // JOE way 11: home + hpa, then row from (tx, hy).
+        const home_hpa_cost = self.homeMoveCost() + self.hpaMoveCost(tx) + self.relativeMoveCost(tx, hy, tx, ty);
+
+        // JOE way 12: home + vpa, then column from (0, ty).
+        const home_vpa_cost = self.homeMoveCost() + self.vpaMoveCost(ty) + self.relativeMoveCost(0, ty, tx, ty);
+
         const Way = enum {
             relative,
             cup,
@@ -785,6 +880,11 @@ pub const Screen = struct {
             vpa_relative,
             cv_relative,
             vpa_hpa,
+            cr_vpa,
+            ll_hpa,
+            ll_vpa,
+            home_hpa,
+            home_vpa,
         };
         var best_cost = rel_cost;
         var best: Way = .relative;
@@ -820,6 +920,26 @@ pub const Screen = struct {
         if (vpa_hpa_cost < best_cost) {
             best_cost = vpa_hpa_cost;
             best = .vpa_hpa;
+        }
+        if (cr_vpa_cost < best_cost) {
+            best_cost = cr_vpa_cost;
+            best = .cr_vpa;
+        }
+        if (ll_hpa_cost < best_cost) {
+            best_cost = ll_hpa_cost;
+            best = .ll_hpa;
+        }
+        if (ll_vpa_cost < best_cost) {
+            best_cost = ll_vpa_cost;
+            best = .ll_vpa;
+        }
+        if (home_hpa_cost < best_cost) {
+            best_cost = home_hpa_cost;
+            best = .home_hpa;
+        }
+        if (home_vpa_cost < best_cost) {
+            best_cost = home_vpa_cost;
+            best = .home_vpa;
         }
 
         switch (best) {
@@ -863,6 +983,34 @@ pub const Screen = struct {
             .vpa_hpa => {
                 try self.appendVpa(ty);
                 try self.appendHpa(tx);
+            },
+            .cr_vpa => {
+                try self.out.append(self.allocator, '\r');
+                self.cursor_x = 0;
+                try self.appendVpa(ty);
+                try self.appendColumnMove(tx);
+            },
+            .ll_hpa => {
+                try self.appendLl();
+                try self.appendHpa(tx);
+                const dy: i32 = @as(i32, @intCast(ty)) - @as(i32, @intCast(self.cursor_y));
+                if (dy != 0) try self.moveBy(0, dy);
+            },
+            .ll_vpa => {
+                try self.appendLl();
+                try self.appendVpa(ty);
+                try self.appendColumnMove(tx);
+            },
+            .home_hpa => {
+                try self.appendHome();
+                try self.appendHpa(tx);
+                const dy: i32 = @as(i32, @intCast(ty)) - @as(i32, @intCast(self.cursor_y));
+                if (dy != 0) try self.moveBy(0, dy);
+            },
+            .home_vpa => {
+                try self.appendHome();
+                try self.appendVpa(ty);
+                try self.appendColumnMove(tx);
             },
             .relative => {
                 const dy: i32 = @as(i32, @intCast(ty)) - @as(i32, @intCast(self.cursor_y));
@@ -1837,4 +1985,111 @@ test "ansi cursor cost helpers" {
     try testing.expectEqual(@as(usize, 8), ansiCupLen(40, 20)); // \x1b[21;41H
     try testing.expectEqual(@as(usize, 4), ansiCsiNumLen(3)); // \x1b[3G / \x1b[3d
     try testing.expectEqual(@as(usize, 5), ansiCsiNumLen(16)); // \x1b[16H
+}
+
+test "Screen.moveTo prefers ll+hpa when overrides make it cheapest" {
+    var screen = try Screen.init(testing.allocator, 80, 24);
+    defer screen.deinit();
+    screen.has_cup = false;
+    screen.ll_seq = "L"; // 1-byte ll
+    screen.hpa_seq = "H"; // 1-byte hpa
+
+    screen.setCursor(50, 0);
+    try screen.moveTo(40, 23);
+    // ll+hpa = 2 beats ll+CUF40 (1+5) and relative/CR/home/cV paths
+    try testing.expectEqual(@as(u16, 40), screen.cursor_x);
+    try testing.expectEqual(@as(u16, 23), screen.cursor_y);
+    try testing.expectEqualStrings("LH", screen.takeOut());
+}
+
+test "Screen.moveTo prefers home+hpa when overrides make it cheapest" {
+    var screen = try Screen.init(testing.allocator, 80, 24);
+    defer screen.deinit();
+    screen.has_cup = false;
+    screen.home_seq = "O"; // 1-byte home
+    screen.hpa_seq = "H";
+
+    screen.setCursor(50, 20);
+    try screen.moveTo(40, 0);
+    // home+hpa = 2 beats home+CUF40 (1+5) and vpa+hpa without cheap overrides
+    try testing.expectEqual(@as(u16, 40), screen.cursor_x);
+    try testing.expectEqual(@as(u16, 0), screen.cursor_y);
+    try testing.expectEqualStrings("OH", screen.takeOut());
+}
+
+test "Screen.moveTo prefers CR+vpa when overrides make it cheapest" {
+    var screen = try Screen.init(testing.allocator, 80, 24);
+    defer screen.deinit();
+    screen.has_cup = false;
+    screen.vpa_seq = "V"; // 1-byte vpa
+
+    screen.setCursor(50, 5);
+    try screen.moveTo(0, 18);
+    // CR+vpa = 1+1 = 2 beats vpa+CUB50 (1+5) and cV (5)
+    try testing.expectEqual(@as(u16, 0), screen.cursor_x);
+    try testing.expectEqual(@as(u16, 18), screen.cursor_y);
+    try testing.expectEqualStrings("\rV", screen.takeOut());
+}
+
+test "Screen.moveTo prefers home+vpa when overrides make it cheapest" {
+    var screen = try Screen.init(testing.allocator, 80, 24);
+    defer screen.deinit();
+    screen.has_cup = false;
+    screen.has_cr = false; // otherwise CR+vpa ties and wins by order
+    screen.home_seq = "O";
+    screen.vpa_seq = "V";
+
+    screen.setCursor(50, 5);
+    try screen.moveTo(0, 12);
+    // home+vpa = 1+1 = 2 beats cV (5) and vpa+CUB50 (6)
+    try testing.expectEqual(@as(u16, 0), screen.cursor_x);
+    try testing.expectEqual(@as(u16, 12), screen.cursor_y);
+    try testing.expectEqualStrings("OV", screen.takeOut());
+}
+
+test "Screen.moveTo prefers ll+vpa when overrides make it cheapest" {
+    var screen = try Screen.init(testing.allocator, 80, 24);
+    defer screen.deinit();
+    screen.has_cup = false;
+    screen.has_cr = false; // otherwise CR+vpa ties and wins by order
+    screen.ll_seq = "L";
+    screen.vpa_seq = "V";
+
+    screen.setCursor(50, 0);
+    try screen.moveTo(0, 10);
+    // ll+vpa = 1+1 = 2 beats cV (5)
+    try testing.expectEqual(@as(u16, 0), screen.cursor_x);
+    try testing.expectEqual(@as(u16, 10), screen.cursor_y);
+    try testing.expectEqualStrings("LV", screen.takeOut());
+}
+
+test "Screen.moveTo region_relative home uses scroll_top" {
+    var screen = try Screen.init(testing.allocator, 80, 24);
+    defer screen.deinit();
+    try screen.setScrollRegion(3, 20);
+    screen.clearOut();
+    screen.region_relative = true;
+    screen.has_cup = false;
+    screen.home_seq = "O";
+
+    screen.setCursor(10, 15);
+    try screen.moveTo(0, 3); // home row under rr
+    try testing.expectEqual(@as(u16, 0), screen.cursor_x);
+    try testing.expectEqual(@as(u16, 3), screen.cursor_y);
+    try testing.expectEqualStrings("O", screen.takeOut());
+}
+
+test "Screen.moveTo region_relative vpa is offset by scroll_top" {
+    var screen = try Screen.init(testing.allocator, 80, 24);
+    defer screen.deinit();
+    try screen.setScrollRegion(5, 20);
+    screen.clearOut();
+    screen.region_relative = true;
+    screen.has_cup = false;
+
+    screen.setCursor(7, 18);
+    try screen.moveTo(7, 8); // abs row 8 → vpa param 8-5=3 → \x1b[4d
+    try testing.expectEqual(@as(u16, 7), screen.cursor_x);
+    try testing.expectEqual(@as(u16, 8), screen.cursor_y);
+    try testing.expectEqualStrings("\x1b[4d", screen.takeOut());
 }

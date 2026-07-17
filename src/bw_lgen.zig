@@ -1,13 +1,16 @@
 //! Gated live bridge: JOE `lgen_core` → Zig-native `render.lgenLine`.
 //!
-//! When `JOE_ZIG_BW_LGEN` / `zig_bw_lgen_enabled` is on, non-viewmode /
-//! non-mark / UTF-8 lines paint through the Phase 6 renderer and emit via
-//! hybrid `outatr` (works with screen-swap shadow + classic tty path).
+//! When `JOE_ZIG_BW_LGEN` / `zig_bw_lgen_enabled` is on, plain UTF-8 lines
+//! (including linear mark inverse) paint through the Phase 6 renderer and
+//! emit via hybrid `outatr` (works with screen-swap shadow + classic tty path).
 //! Default off until soak. Falls back to C `lgen_core` when the gate is off
-//! or the line is unsupported.
+//! or the line is unsupported (viewmode / square / ansi / visiblews / non-UTF-8).
 //!
 //! Hybrid `syntax.parse` fills `attr_buf` **per character** (`pgetc`); native
 //! `lgenLine` expects **per-byte** attrs — this bridge expands before paint.
+//! Linear marks (`from`/`to` byte range, non-square) force `inverse` on bytes
+//! in range, matching C `SELECT_IF(byte >= from && byte < to)` + default
+//! `selectatr=INVERSE`.
 
 const std = @import("std");
 const terminal = @import("terminal");
@@ -86,6 +89,9 @@ pub export fn zig_bw_lgen(
     defatr: c_int,
     palette: ?[*]c_int,
     palette_len: c_int,
+    from: i64,
+    to: i64,
+    line_byte: i64,
 ) c_int {
     if (zig_bw_lgen_enabled == 0) return -1;
     if (t == null or screen == null or attr_row == null or p == null) return -1;
@@ -152,6 +158,18 @@ pub export fn zig_bw_lgen(
         expandCharAttrsToBytes(line, char_attrs, byte_attrs);
         attrs_owned = byte_attrs;
         native_attrs = byte_attrs;
+    }
+
+    // Linear mark inverse (JOE non-square `SELECT_IF(byte >= from && byte < to)`).
+    // Default selectatr/selectmask force INVERSE; we set `inverse` on marked bytes.
+    if (from != to and line.len > 0) {
+        if (attrs_owned == null) {
+            const byte_attrs = alloc.alloc(Attribute, line.len) catch return -1;
+            @memset(byte_attrs, .none);
+            attrs_owned = byte_attrs;
+        }
+        applyLinearMarkInverse(attrs_owned.?, line_byte, from, to);
+        native_attrs = attrs_owned;
     }
 
     const base_attr = terminal.attributeFromHybrid(defatr, pal);
@@ -226,6 +244,15 @@ fn attributeToHybridOrDef(attr: Attribute, palette: *TruecolorPalette, defatr: c
     return terminal.attributeToHybrid(attr, palette) catch defatr;
 }
 
+/// Force inverse on bytes whose absolute buffer offset is in `[from, to)`.
+fn applyLinearMarkInverse(attrs: []Attribute, line_byte: i64, from: i64, to: i64) void {
+    if (from == to) return;
+    for (attrs, 0..) |*a, i| {
+        const b = line_byte + @as(i64, @intCast(i));
+        if (b >= from and b < to) a.inverse = true;
+    }
+}
+
 /// Expand hybrid per-character `attr_buf` (from `parse`/`pgetc`) into per-byte
 /// attrs for UTF-8 `lgenLine` (lead + continuation share the char's atr).
 fn expandCharAttrsToBytes(line: []const u8, char_attrs: []const Attribute, out: []Attribute) void {
@@ -281,4 +308,36 @@ test "expandCharAttrsToBytes maps UTF-8 multi-byte to shared atr" {
     try std.testing.expect(out[1].underline);
     try std.testing.expect(out[2].underline); // continuation of é
     try std.testing.expect(out[3].italic);
+}
+
+test "applyLinearMarkInverse marks ASCII byte range" {
+    var attrs = [_]Attribute{ .{ .bold = true }, .{ .bold = true }, .{ .bold = true }, .{ .bold = true }, .{ .bold = true } };
+    // Line starts at byte 10; mark [11, 14) → indices 1,2,3
+    applyLinearMarkInverse(&attrs, 10, 11, 14);
+    try std.testing.expect(!attrs[0].inverse);
+    try std.testing.expect(attrs[1].inverse);
+    try std.testing.expect(attrs[2].inverse);
+    try std.testing.expect(attrs[3].inverse);
+    try std.testing.expect(!attrs[4].inverse);
+    try std.testing.expect(attrs[1].bold); // preserves other styles
+}
+
+test "applyLinearMarkInverse covers UTF-8 continuation bytes" {
+    // "aéb" = a, c3 a9, b — mark only the é lead absolute byte
+    var attrs = [_]Attribute{.{}} ** 4;
+    const line_byte: i64 = 100;
+    // Mark bytes 101..103 (both bytes of é)
+    applyLinearMarkInverse(&attrs, line_byte, 101, 103);
+    try std.testing.expect(!attrs[0].inverse);
+    try std.testing.expect(attrs[1].inverse);
+    try std.testing.expect(attrs[2].inverse);
+    try std.testing.expect(!attrs[3].inverse);
+}
+
+test "applyLinearMarkInverse no-op when from==to" {
+    var attrs = [_]Attribute{.{ .underline = true }} ** 3;
+    applyLinearMarkInverse(&attrs, 0, 5, 5);
+    try std.testing.expect(!attrs[0].inverse);
+    try std.testing.expect(!attrs[1].inverse);
+    try std.testing.expect(!attrs[2].inverse);
 }

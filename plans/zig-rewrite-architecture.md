@@ -793,9 +793,10 @@ The build is always working — start with a binary that compiles and runs, then
 - ✅ `lgen_view` Feature 2.1/2.2 table box-drawing (`table.zig`: region detect, widths/align, padded borders; `paintBody` wired; unit-tested)
 - ✅ OSC 8 hyperlink emit (`Cell.url` / `Screen.writeCharLink` + flush `ESC]8;;urlST`; viewmode `link_url` → lgen; unit-tested)
 - ✅ Screen buffer diff + dirty-cell-only flush — redesign `Screen.flush` cell-diff + EL + within-line ICH/DCH magic + IL/DL scroll magic + combining slots + gated hybrid `scrn` swap landed (**default on**)
-- ✅ Path A gated live bridge: `src/bw_lgen.zig` (`JOE_ZIG_BW_LGEN` / `zig_bw_lgen_enabled`, default off; applied from `ttopnn`) — plain UTF-8 `lgen_core` body paint via hybrid `syntax.parse` → per-byte `attr_buf` expand → `render.lgenLine` → hybrid `outatr`; C fallback for `viewmode_skip_parse` / marks (`from!=to`) / non-UTF-8 / `ansi` / `square` / `visiblews` / `dspasis`
+- ✅ Path A gated live bridge: `src/bw_lgen.zig` (`JOE_ZIG_BW_LGEN` / `zig_bw_lgen_enabled`, default off; applied from `ttopnn`) — plain UTF-8 `lgen_core` body paint via hybrid `syntax.parse` → per-byte `attr_buf` expand → `render.lgenLine` → hybrid `outatr`; linear mark inverse (`from`/`to` byte range); C fallback for `viewmode_skip_parse` / `square` / non-UTF-8 / `ansi` / `visiblews`
 - ✅ Path A soak: `./runtests` **196/196** with and without `JOE_ZIG_BW_LGEN=1`; critical EOF semantics — do **not** `p_goto_bol` before paint (past-EOF `getto` leaves `p` at EOF so C paints blank; bol rewind broke `test_bos_short` / `test_isearch_resume`); advance with `pnextl` only after successful paint
-- 🚧 Path A widen: cover remaining C `lgen_core` paths until `joe/bw.c` can be deleted
+- ✅ Path A linear marks: byte-range `SELECT_IF` inverse via `applyLinearMarkInverse` (square still C)
+- 🚧 Path A widen: cover remaining C `lgen_core` paths (viewmode / square / ansi / visiblews) until `joe/bw.c` can be deleted
 - At this point: fully functional editor with markdown viewmode
 
 ### Phase 7: File I/O & Commands (3-4 weeks) — NOT STARTED

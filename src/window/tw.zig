@@ -43,6 +43,19 @@ pub const TextWindow = struct {
     status_on: bool = false,
     /// Optional precomposed status row (borrowed) for paintAll / tests — no live BW yet.
     status_line: ?[]const u8 = null,
+    /// Optional borrowed body lines for tests-only paint — no live BW/gapbuffer yet.
+    /// Index `i` is buffer line `i`; paint starts at `top_line`.
+    body_lines: ?[]const []const u8 = null,
+    /// First visible buffer line — JOE `bw->top->line`.
+    top_line: u64 = 0,
+    /// Horizontal scroll in display columns — JOE `bw->offset`.
+    offset: u16 = 0,
+    /// Cursor buffer line — JOE `bw->cursor->line`.
+    cursor_line: u64 = 0,
+    /// Cursor display column — JOE `bw->cursor->xcol`.
+    cursor_col: u64 = 0,
+    /// Paint line-number gutter when `lincols > 0` — JOE `o.linums`.
+    linums: bool = false,
 
     pub fn init(parent: *screen.Window) TextWindow {
         var self: TextWindow = .{ .parent = parent };
@@ -86,6 +99,34 @@ pub const TextWindow = struct {
     pub fn statusRow(self: *const TextWindow) ?i16 {
         if (!self.status_on) return null;
         return self.parent.y;
+    }
+
+    /// Absolute screen cursor from content geometry — JOE `disptw` curx/cury (non-hex).
+    /// `curx = xcol - offset + lincols` (window-relative); we return screen-absolute.
+    pub fn contentCursor(self: *const TextWindow) struct { x: u16, y: i16 } {
+        const col = if (self.cursor_col >= self.offset)
+            self.cursor_col - self.offset
+        else
+            0;
+        const row = if (self.cursor_line >= self.top_line)
+            self.cursor_line - self.top_line
+        else
+            0;
+        const x = self.x +% @as(u16, @intCast(@min(col, std.math.maxInt(u16))));
+        const y = self.y + @as(i16, @intCast(@min(row, std.math.maxInt(i16))));
+        return .{ .x = x, .y = y };
+    }
+
+    /// Buffer line index for content row `row` (0 = top of content area).
+    pub fn lineAtRow(self: *const TextWindow, row: u16) u64 {
+        return self.top_line +% row;
+    }
+
+    /// Borrowed body text for buffer line `line`, if stubbed and in range.
+    pub fn bodyLine(self: *const TextWindow, line: u64) ?[]const u8 {
+        const lines = self.body_lines orelse return null;
+        if (line >= lines.len) return null;
+        return lines[@intCast(line)];
     }
 };
 
@@ -646,6 +687,30 @@ test "stagen keyseq and char codes" {
     defer testing.allocator.free(got);
     // "^Ax " (already 4 cols) + " 79" + "4f"
     try testing.expectEqualStrings("^Ax  794f", got);
+}
+
+test "TextWindow contentCursor and bodyLine respect top/offset" {
+    var scr = try screen.Screen.init(testing.allocator, 40, 10);
+    defer scr.deinit();
+    const win = try scr.createText(null, null, 10);
+    scr.layout();
+    const t = win.asText().?;
+    t.setLincols(3);
+    t.top_line = 2;
+    t.offset = 4;
+    t.cursor_line = 5;
+    t.cursor_col = 7;
+    const lines = [_][]const u8{ "a", "b", "c", "d", "e", "f" };
+    t.body_lines = &lines;
+
+    try testing.expectEqualStrings("c", t.bodyLine(2).?);
+    try testing.expect(t.bodyLine(9) == null);
+    try testing.expectEqual(@as(u64, 4), t.lineAtRow(2));
+
+    const cur = t.contentCursor();
+    // x = content_x + (7-4) = 3 + 3 = 6; y = content_y + (5-2)
+    try testing.expectEqual(@as(u16, t.x + 3), cur.x);
+    try testing.expectEqual(@as(i16, t.y + 3), cur.y);
 }
 
 test "TextWindow move/resize reserve status and lincols" {

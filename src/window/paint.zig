@@ -205,10 +205,73 @@ pub fn paintMsgs(term: *TermScreen, w: *const screen.Window, status_enabled: boo
     }
 }
 
+/// JOE `gennum` scaffold: right-align 1-based line number into `lincols` cols
+/// (trailing space when `lincols >= 2`). Past-EOF / blank → spaces.
+pub fn paintLinum(term: *TermScreen, x: u16, y: i16, lincols: u16, line_1based: ?u64, attr: Attribute) void {
+    if (lincols == 0) return;
+    const sy = screenY(term, y) orelse return;
+    var buf: [24]u8 = .{' '} ** 24;
+    if (line_1based) |n| {
+        var tmp: [24]u8 = undefined;
+        // Match JOE `" %21lld "` then take the trailing `lincols` chars.
+        const formatted = std.fmt.bufPrint(&tmp, " {d: >21} ", .{n}) catch {
+            clearWinEol(term, x, y, lincols, attr);
+            return;
+        };
+        const take = @min(@as(usize, lincols), formatted.len);
+        const src = formatted[formatted.len - take ..];
+        @memcpy(buf[0..take], src);
+    }
+    const n = @min(@as(usize, lincols), @as(usize, term.width -| x));
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        term.writeChar(x + @as(u16, @intCast(i)), sy, buf[i], attr);
+    }
+}
+
+/// Shallow text-body paint (bwgen/lgen scaffold): stub lines + optional linums.
+/// No gapbuffer/syntax — Phase 6/`render` replaces this with real `lgen`.
+/// Clears each content row (and gutter when `linums`); applies `offset` as a
+/// byte-column skip (ASCII scaffold).
+pub fn paintBody(term: *TermScreen, t: *const tw.TextWindow, attr: Attribute) void {
+    if (t.h == 0) return;
+    if (t.w == 0 and t.lincols == 0) return;
+    var row: u16 = 0;
+    while (row < t.h) : (row += 1) {
+        const row_y: i16 = t.y + @as(i16, @intCast(row));
+        const line_idx = t.lineAtRow(row);
+        // null body_lines → no stub buffer (treat as past EOF / blank).
+        const past_eof = if (t.body_lines) |lines| line_idx >= lines.len else true;
+
+        if (t.linums and t.lincols > 0) {
+            const num: ?u64 = if (past_eof) null else line_idx + 1;
+            paintLinum(term, t.parent.x, row_y, t.lincols, num, attr);
+        } else if (t.lincols > 0) {
+            // Gutter reserved but linums off — clear so ghost digits don't linger.
+            clearWinEol(term, t.parent.x, row_y, t.lincols, attr);
+        }
+
+        if (t.w == 0) continue;
+        const text = if (!past_eof) t.bodyLine(line_idx) else null;
+        if (text) |s| {
+            const start = @min(@as(usize, t.offset), s.len);
+            const vis = s[start..];
+            if (screenY(term, row_y)) |sy| {
+                const n = @min(vis.len, @as(usize, t.w));
+                if (n > 0) term.writeText(t.x, sy, vis[0..n], attr);
+                const used: u16 = @intCast(n);
+                if (used < t.w) clearWinEol(term, t.x +% used, row_y, t.w -| used, attr);
+            }
+        } else {
+            clearWinEol(term, t.x, row_y, t.w, attr);
+        }
+    }
+}
+
 pub const PaintError = error{NoTerminal} || Allocator.Error;
 
-/// Paint text-window chrome (status row). Body cells wait for Phase 6/`render`.
-/// Returns content-area cursor origin (JOE `bw->cursor` abs pos scaffold).
+/// Paint text-window chrome (status) + shallow body stub (bwgen-shaped).
+/// Returns content-area cursor (JOE `disptw` curx/cury abs scaffold).
 pub fn paintText(term: *TermScreen, t: *const tw.TextWindow, status_line: ?[]const u8, attr: Attribute) CursorPos {
     if (t.statusRow()) |row| {
         const line = status_line orelse t.status_line;
@@ -218,11 +281,10 @@ pub fn paintText(term: *TermScreen, t: *const tw.TextWindow, status_line: ?[]con
             clearWinEol(term, t.parent.x, row, t.parent.w, attr);
         }
     }
-    const cy: u16 = if (t.y >= 0 and t.y < @as(i16, @intCast(term.height)))
-        @intCast(t.y)
-    else
-        0;
-    return .{ .x = @min(t.x, term.width -| 1), .y = cy };
+    paintBody(term, t, attr);
+    const cur = t.contentCursor();
+    const cy: u16 = if (screenY(term, cur.y)) |yy| yy else 0;
+    return .{ .x = @min(cur.x, term.width -| 1), .y = cy };
 }
 
 /// Dispatch one window's paint shape into `term` (JOE `watom->disp`).
@@ -518,6 +580,70 @@ test "paintText writes status_line and reports content cursor" {
     try testing.expectEqual(@as(u21, 'S'), cellAt(&term, 0, 0).cp);
     try testing.expectEqual(@as(u16, t.x), cur.x);
     try testing.expectEqual(@as(u16, @intCast(t.y)), cur.y);
+}
+
+test "paintBody writes stub lines, linums, offset, and content cursor" {
+    const prev = tw.status_enabled;
+    defer tw.status_enabled = prev;
+    tw.status_enabled = true;
+
+    var scr = try screen.Screen.init(testing.allocator, 20, 8);
+    defer scr.deinit();
+    const win = try scr.createText(null, null, 8);
+    scr.layout();
+    const t = win.asText().?;
+    try testing.expect(t.status_on);
+
+    const lines = [_][]const u8{ "alpha", "bravo", "charlie", "delta" };
+    t.body_lines = &lines;
+    t.top_line = 1; // show bravo..
+    t.offset = 1; // skip first column
+    t.cursor_line = 2; // charlie
+    t.cursor_col = 3;
+    t.setLincols(4);
+    t.linums = true;
+
+    var term = try TermScreen.init(testing.allocator, 20, 8);
+    defer term.deinit();
+    const cur = paintText(&term, t, "STAT", .none);
+
+    // Status still on row 0.
+    try testing.expectEqual(@as(u21, 'S'), cellAt(&term, 0, 0).cp);
+
+    // Content row 0 (screen y=1): linum for buffer line 2 ("  2 "), then "ravo" (offset 1 into "bravo").
+    try testing.expectEqual(@as(u21, '2'), cellAt(&term, 2, 1).cp); // right-aligned in 4-col gutter
+    try testing.expectEqual(@as(u21, ' '), cellAt(&term, 3, 1).cp);
+    try testing.expectEqual(@as(u21, 'r'), cellAt(&term, 4, 1).cp);
+    try testing.expectEqual(@as(u21, 'a'), cellAt(&term, 5, 1).cp);
+
+    // Content row 1: "charlie" with offset → "harlie"
+    try testing.expectEqual(@as(u21, '3'), cellAt(&term, 2, 2).cp);
+    try testing.expectEqual(@as(u21, 'h'), cellAt(&term, 4, 2).cp);
+
+    // Cursor: x = content_x + (cursor_col - offset) = 4 + (3 - 1) = 6
+    //         y = content_y + (cursor_line - top_line) = 1 + (2 - 1) = 2
+    try testing.expectEqual(@as(u16, 6), cur.x);
+    try testing.expectEqual(@as(u16, 2), cur.y);
+
+    // Past-EOF row (top=1, 4 lines → rows covering lines 1,2,3 then past): line 4 is past.
+    // h content = 7 (status on). Row for line_idx 4 is row 3 → y=4.
+    try testing.expect(cellAt(&term, 4, 4).cp == ' ' or cellAt(&term, 4, 4).cp == 0);
+    try testing.expect(cellAt(&term, 0, 4).cp == ' ' or cellAt(&term, 0, 4).cp == 0);
+}
+
+test "paintBody clears content when no stub lines" {
+    var scr = try screen.Screen.init(testing.allocator, 12, 4);
+    defer scr.deinit();
+    const win = try scr.createText(null, null, 4);
+    scr.layout();
+    const t = win.asText().?;
+
+    var term = try TermScreen.init(testing.allocator, 12, 4);
+    defer term.deinit();
+    // Dirty a content cell, then paintBody should blank it.
+    term.writeChar(t.x, @intCast(t.y), 'Z', .none);
+    paintBody(&term, t, .none);
+    try testing.expect(cellAt(&term, t.x, @intCast(t.y)).isBlankNone());
 }
 
 test "resize syncs attached terminal dimensions" {

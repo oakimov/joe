@@ -11,9 +11,28 @@ const testing = std.testing;
 
 const screen = @import("screen.zig");
 
+fn onResize(w: *screen.Window, wi: u16, he: u16) void {
+    const m = w.asMenu() orelse return;
+    m.resize(wi, he);
+}
+
+fn onMove(w: *screen.Window, x: u16, y: i16) void {
+    const m = w.asMenu() orelse return;
+    m.x = x;
+    m.y = y;
+}
+
+fn onAbort(w: *screen.Window) i32 {
+    const m = w.asMenu() orelse return -1;
+    return m.abort();
+}
+
 pub const vtable: screen.WindowVTable = .{
     .kind = .menu,
     .context = "menu",
+    .on_resize = onResize,
+    .on_move = onMove,
+    .on_abort = onAbort,
 };
 
 /// Optional display-width of a label; default treats each byte as width 1.
@@ -106,9 +125,11 @@ pub const MenuWindow = struct {
     cursor: usize = 0,
     /// First visible item index (row-aligned when not transpose).
     top: usize = 0,
-    /// Window geometry mirror (JOE MENU `w`/`h`).
+    /// Window geometry mirror (JOE MENU `w`/`h`/`x`/`y`).
     w: u16 = 0,
     h: u16 = 0,
+    x: u16 = 0,
+    y: i16 = 0,
     grid: GridConfig = .{},
     transpose: bool = false,
     on_select: ?SelectFn = null,
@@ -124,6 +145,8 @@ pub const MenuWindow = struct {
             .items = items,
             .w = parent.w,
             .h = parent.h,
+            .x = parent.x,
+            .y = parent.y,
             .target = parent.target orelse parent.main,
         };
         m.load(items, cursor);
@@ -773,7 +796,36 @@ test "MenuWindow pageUp/pageDown use half height" {
     try testing.expectEqual(@as(usize, 0), menu_win.cursor);
 }
 
+test "MenuWindow vtable resize/move hooks sync geometry" {
+    var scr = try screen.Screen.init(testing.allocator, 80, 20);
+    defer scr.deinit();
+
+    const twnd = try scr.createText(null, null, 20);
+    scr.layout();
+    const items = [_][]const u8{ "alpha", "beta", "gamma", "delta" };
+    const menu_w = try scr.createMenu(twnd.id, twnd.id, twnd.id, &items, 0);
+    scr.layout();
+
+    const obj = menu_w.asMenu().?;
+    try testing.expectEqual(menu_w.w, obj.w);
+    try testing.expectEqual(menu_w.h, obj.h);
+    try testing.expectEqual(menu_w.x, obj.x);
+    try testing.expectEqual(menu_w.y, obj.y);
+
+    // Simulate a later layout resize/move through the watom hooks.
+    vtable.on_resize.?(menu_w, 40, 3);
+    try testing.expectEqual(@as(u16, 40), obj.w);
+    try testing.expectEqual(@as(u16, 3), obj.h);
+    // Width 40 with short labels packs multiple per line.
+    try testing.expect(obj.grid.perline >= 1);
+
+    vtable.on_move.?(menu_w, 2, 7);
+    try testing.expectEqual(@as(u16, 2), obj.x);
+    try testing.expectEqual(@as(i16, 7), obj.y);
+}
+
 test "MenuWindow jump and callbacks" {
+
     var scr = try screen.Screen.init(testing.allocator, 20, 24);
     defer scr.deinit();
     const win = try scr.createText(null, null, 24);

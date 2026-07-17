@@ -26,4 +26,6 @@ comptime {
     _ = @import("rc.zig");
     _ = @import("colors.zig");
     _ = @import("syntax.zig");
+    _ = @import("termcap.zig");
+    _ = @import("tty.zig");
 }

@@ -167,6 +167,11 @@ export fn _vsset(vary_in: [*c]u8, pos: isize, el: u8) [*c]u8 {
     return vary;
 }
 
+/// C header provides `vsset` as a macro; Zig callers need a real symbol.
+export fn vsset(vary: [*c]u8, pos: isize, el: u8) [*c]u8 {
+    return _vsset(vary, pos, el);
+}
+
 /// C header provides `vsadd` as a macro; Zig callers need a real symbol.
 export fn vsadd(vary_in: [*c]u8, el: u8) [*c]u8 {
     var vary = vary_in;

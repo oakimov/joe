@@ -66,8 +66,8 @@ pub fn build(b: *std.Build) void {
             // REMOVED: joe/regex.c — replaced by src/regex.zig
             "joe/scrn.c",
             "joe/tab.c",
-            "joe/termcap.c",
-            "joe/tty.c",
+            // REMOVED: joe/termcap.c — replaced by src/termcap.zig
+            // REMOVED: joe/tty.c — replaced by src/tty.zig
             "joe/tw.c",
             "joe/ublock.c",
             "joe/uedit.c",

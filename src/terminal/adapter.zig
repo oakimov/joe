@@ -4,7 +4,8 @@
 //! and the redesign `Attribute`/`Color` types, plus an obuf-style output sink
 //! that can drain `Screen.out` without coupling to hybrid `ttputs`/`obuf`.
 //!
-//! Not wired into the live binary — unit-tested only.
+//! Hybrid `src/tty.zig` wires `drainScreenOut` into live `obuf` behind the
+//! `JOE_ZIG_SCREEN_DRAIN` / `zig_screen_drain_enabled` gate (default off).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -209,6 +210,34 @@ pub fn drainScreenOut(scr: *Screen, sink: *OutSink) !void {
     try sink.flush();
 }
 
+/// Gated variant used by hybrid `tty.drainZigScreen`.
+/// When `enabled` is false, leaves `Screen.out` untouched and returns `false`.
+/// When true, drains via `drainScreenOut` and returns `true`.
+pub fn drainScreenOutGated(scr: *Screen, sink: *OutSink, enabled: bool) !bool {
+    if (!enabled) return false;
+    try drainScreenOut(scr, sink);
+    return true;
+}
+
+/// Pure helper mirroring hybrid `ttputc` → `obuf` growth/flush behaviour.
+/// Used by unit tests and documents the contract `ttWrite` must match.
+pub fn writeIntoObuf(
+    obuf: []u8,
+    obufp: *usize,
+    bytes: []const u8,
+    flush: *const fn (*anyopaque) void,
+    flush_ctx: *anyopaque,
+) void {
+    for (bytes) |c| {
+        obuf[obufp.*] = c;
+        obufp.* += 1;
+        if (obufp.* == obuf.len) {
+            flush(flush_ctx);
+            obufp.* = 0;
+        }
+    }
+}
+
 // --- tests ---
 
 test "hybrid style bits roundtrip" {
@@ -326,4 +355,68 @@ test "drainScreenOut pushes Screen.out through OutSink" {
     try testing.expect(std.mem.indexOf(u8, ctx.out.items, "Hi") != null);
     try testing.expect(std.mem.indexOf(u8, ctx.out.items, "\x1b[0;1") != null);
     try testing.expect(sink.flushed_total == ctx.out.items.len);
+}
+
+test "drainScreenOutGated is a no-op when disabled" {
+    const Ctx = struct {
+        out: std.ArrayList(u8),
+        allocator: Allocator,
+        fn write(ctx: *anyopaque, bytes: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            try self.out.appendSlice(self.allocator, bytes);
+        }
+    };
+    var ctx: Ctx = .{ .out = .empty, .allocator = testing.allocator };
+    defer ctx.out.deinit(testing.allocator);
+
+    var scr = try Screen.init(testing.allocator, 4, 1);
+    defer scr.deinit();
+    scr.writeText(0, 0, "Hi", .{});
+    try scr.flush();
+    const pending = scr.takeOut().len;
+    try testing.expect(pending > 0);
+
+    var storage: [64]u8 = undefined;
+    var sink = OutSink.init(&storage, &ctx, Ctx.write);
+    try testing.expect(!(try drainScreenOutGated(&scr, &sink, false)));
+    try testing.expectEqual(pending, scr.takeOut().len);
+    try testing.expectEqual(@as(usize, 0), ctx.out.items.len);
+}
+
+test "drainScreenOutGated drains when enabled into hybrid-style obuf" {
+    const Obuf = struct {
+        buf: [8]u8 = undefined,
+        pos: usize = 0,
+        captured: std.ArrayList(u8),
+        allocator: Allocator,
+
+        fn flush(ctx: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (self.pos == 0) return;
+            self.captured.appendSlice(self.allocator, self.buf[0..self.pos]) catch {};
+            self.pos = 0;
+        }
+
+        fn write(ctx: *anyopaque, bytes: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            writeIntoObuf(&self.buf, &self.pos, bytes, flush, ctx);
+        }
+    };
+    var obuf: Obuf = .{ .captured = .empty, .allocator = testing.allocator };
+    defer obuf.captured.deinit(testing.allocator);
+
+    var scr = try Screen.init(testing.allocator, 8, 1);
+    defer scr.deinit();
+    // Bypass cell SGR — inject raw bytes as if Screen.out already held escapes.
+    try scr.out.appendSlice(testing.allocator, "ABCDEFGHIJKLMNOP"); // 16 bytes → two obuf flushes + remainder
+
+    var storage: [4]u8 = undefined;
+    var sink = OutSink.init(&storage, &obuf, Obuf.write);
+    try testing.expect(try drainScreenOutGated(&scr, &sink, true));
+    try testing.expectEqual(@as(usize, 0), scr.takeOut().len);
+
+    // Final partial obuf contents still pending until explicit flush (like ttflsh).
+    Obuf.flush(&obuf);
+    try testing.expectEqualStrings("ABCDEFGHIJKLMNOP", obuf.captured.items);
+    try testing.expectEqual(@as(usize, 0), obuf.pos);
 }

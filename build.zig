@@ -27,6 +27,19 @@ pub fn build(b: *std.Build) void {
     mod.addCMacro("JOERC", "\"\"");
     mod.addCMacro("JOEDATA", "\"\"");
 
+    // ── Zig-native terminal redesign (Phase 3) ────────────────────
+    // Parallel module tree; hybrid `src/tty.zig` may import it for the
+    // gated `Screen.out` → obuf drain (default off). Not a screen swap.
+    const terminal_mod = b.createModule(.{
+        .root_source_file = b.path("src/terminal/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    terminal_mod.linkSystemLibrary("ncurses", .{});
+    terminal_mod.addIncludePath(.{ .cwd_relative = "/opt/local/include" });
+    terminal_mod.addLibraryPath(.{ .cwd_relative = "/opt/local/lib" });
+
     // ── Pure Zig modules (replacing ported C files) ──────────────────
     // Each Zig module is compiled as an object and linked into the executable.
     // The Zig code exports C ABI functions that the remaining C code calls,
@@ -35,7 +48,9 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/ported.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
+    ported_mod.addImport("terminal", terminal_mod);
     const ported_obj = b.addObject(.{
         .name = "ported",
         .root_module = ported_mod,
@@ -111,18 +126,6 @@ pub fn build(b: *std.Build) void {
 
     // ── Install ──────────────────────────────────────────────────────
     b.installArtifact(exe);
-
-    // ── Zig-native terminal redesign (Phase 3) ────────────────────
-    // Parallel module tree; not yet replacing hybrid src/{tty,termcap,scrn}.zig.
-    const terminal_mod = b.createModule(.{
-        .root_source_file = b.path("src/terminal/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    terminal_mod.linkSystemLibrary("ncurses", .{});
-    terminal_mod.addIncludePath(.{ .cwd_relative = "/opt/local/include" });
-    terminal_mod.addLibraryPath(.{ .cwd_relative = "/opt/local/lib" });
 
     const terminal_tests = b.addTest(.{
         .name = "terminal-tests",

@@ -52,6 +52,11 @@ pub const Caps = struct {
     /// Clear to end of line / end of display (`el`/`ed`); ANSI CSI K/J are fallbacks.
     el: ?[:0]const u8 = null,
     ed: ?[:0]const u8 = null,
+    /// Parameterized insert/delete characters (`ich`/`dch`); prefer over `ich1`/`dch1`.
+    ich: ?[:0]const u8 = null,
+    dch: ?[:0]const u8 = null,
+    ich1: ?[:0]const u8 = null,
+    dch1: ?[:0]const u8 = null,
 };
 
 pub const TermInfo = struct {
@@ -102,6 +107,10 @@ pub const TermInfo = struct {
             .dl1 = presentStr("dl1"),
             .el = presentStr("el"),
             .ed = presentStr("ed"),
+            .ich = presentStr("ich"),
+            .dch = presentStr("dch"),
+            .ich1 = presentStr("ich1"),
+            .dch1 = presentStr("dch1"),
         };
     }
 
@@ -198,6 +207,30 @@ pub const TermInfo = struct {
         if (count == 1) return self.caps.dl1;
         return null;
     }
+
+    /// Format insert-n-characters (`ich`). Falls back to `ich1` for count==1.
+    /// Returns null when neither cap works — caller should emit ANSI `CSI n @`.
+    pub fn formatIch(self: TermInfo, count: u16) ?[]const u8 {
+        if (count == 0) return "";
+        if (self.caps.ich) |fmt| {
+            const p = c.tiparm(fmt.ptr, @as(c_int, count)) orelse return null;
+            return std.mem.span(p);
+        }
+        if (count == 1) return self.caps.ich1;
+        return null;
+    }
+
+    /// Format delete-n-characters (`dch`). Falls back to `dch1` for count==1.
+    /// Returns null when neither cap works — caller should emit ANSI `CSI n P`.
+    pub fn formatDch(self: TermInfo, count: u16) ?[]const u8 {
+        if (count == 0) return "";
+        if (self.caps.dch) |fmt| {
+            const p = c.tiparm(fmt.ptr, @as(c_int, count)) orelse return null;
+            return std.mem.span(p);
+        }
+        if (count == 1) return self.caps.dch1;
+        return null;
+    }
 };
 
 test "StrCap cancelled sentinel" {
@@ -251,4 +284,11 @@ test "TermInfo.init against current TERM" {
     // Soft-check clear-to-EOL/EOS rare caps when present.
     _ = ti.caps.el;
     _ = ti.caps.ed;
+    // Soft-check insert/delete character parameterization when caps exist.
+    if (ti.caps.ich != null or ti.caps.ich1 != null) {
+        _ = ti.formatIch(1);
+    }
+    if (ti.caps.dch != null or ti.caps.dch1 != null) {
+        _ = ti.formatDch(1);
+    }
 }

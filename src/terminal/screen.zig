@@ -554,6 +554,74 @@ pub const Screen = struct {
         try self.appendSeqOrAnsi(seq, "\x1b[J");
     }
 
+    /// Insert `count` blank cells at `(x, y)`, shifting the rest of the row
+    /// right (cells past the right edge are dropped). Emits ICH (terminfo
+    /// `ich`/`ich1` or ANSI `CSI n @`).
+    pub fn insertChars(self: *Screen, x: u16, y: u16, count: u16) !void {
+        if (count == 0 or y >= self.height or x >= self.width) return;
+        const n = @min(count, self.width - x);
+        const row = self.rowSlice(y);
+
+        // Shift right within [x, width): copy from the end so we don't overwrite.
+        var src: u16 = self.width - n;
+        while (src > x) {
+            src -= 1;
+            row[src + n] = row[src];
+        }
+        @memset(row[x .. x + n], .{});
+        self.dirty_rows.set(y);
+
+        self.cursor_x = x;
+        self.cursor_y = y;
+        try self.appendCup(x, y);
+        if (self.terminfo) |ti| {
+            if (ti.formatIch(n)) |seq| {
+                if (seq.len != 0) {
+                    try self.out.appendSlice(self.allocator, seq);
+                    return;
+                }
+            }
+        }
+        if (n == 1) {
+            try self.out.appendSlice(self.allocator, "\x1b[@");
+        } else {
+            try self.out.print(self.allocator, "\x1b[{d}@", .{n});
+        }
+    }
+
+    /// Delete `count` cells at `(x, y)`, shifting the rest of the row left and
+    /// blanking the trailing columns. Emits DCH (terminfo `dch`/`dch1` or
+    /// ANSI `CSI n P`).
+    pub fn deleteChars(self: *Screen, x: u16, y: u16, count: u16) !void {
+        if (count == 0 or y >= self.height or x >= self.width) return;
+        const n = @min(count, self.width - x);
+        const row = self.rowSlice(y);
+
+        var dst: u16 = x;
+        while (dst + n < self.width) : (dst += 1) {
+            row[dst] = row[dst + n];
+        }
+        @memset(row[self.width - n ..], .{});
+        self.dirty_rows.set(y);
+
+        self.cursor_x = x;
+        self.cursor_y = y;
+        try self.appendCup(x, y);
+        if (self.terminfo) |ti| {
+            if (ti.formatDch(n)) |seq| {
+                if (seq.len != 0) {
+                    try self.out.appendSlice(self.allocator, seq);
+                    return;
+                }
+            }
+        }
+        if (n == 1) {
+            try self.out.appendSlice(self.allocator, "\x1b[P");
+        } else {
+            try self.out.print(self.allocator, "\x1b[{d}P", .{n});
+        }
+    }
+
     /// Emit dirty rows to `out`, then copy cells → display and clear dirty bits.
     /// Does not write to a TTY — caller drains `out` / `takeOut()`.
     pub fn flush(self: *Screen) !void {
@@ -833,4 +901,59 @@ test "Screen.clearToEos clears below and emits ED" {
     const out = screen.takeOut();
     try testing.expect(std.mem.indexOf(u8, out, "\x1b[2;2H") != null);
     try testing.expect(std.mem.indexOf(u8, out, "\x1b[J") != null);
+}
+
+
+test "Screen.insertChars shifts cells and emits ICH" {
+    var screen = try Screen.init(testing.allocator, 5, 2);
+    defer screen.deinit();
+    screen.writeText(0, 0, "ABCDE", .none);
+    screen.writeText(0, 1, "vwxyz", .none);
+    screen.clearOut();
+
+    try screen.insertChars(1, 0, 2);
+    try testing.expectEqual(@as(u21, 'A'), screen.cells[0].cp);
+    try testing.expectEqual(@as(u21, ' '), screen.cells[1].cp);
+    try testing.expectEqual(@as(u21, ' '), screen.cells[2].cp);
+    try testing.expectEqual(@as(u21, 'B'), screen.cells[3].cp);
+    try testing.expectEqual(@as(u21, 'C'), screen.cells[4].cp); // D,E dropped
+    try testing.expectEqual(@as(u21, 'v'), screen.cells[5].cp); // other row untouched
+    try testing.expectEqual(@as(u16, 1), screen.cursor_x);
+    try testing.expectEqual(@as(u16, 0), screen.cursor_y);
+    const out = screen.takeOut();
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[1;2H") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[2@") != null);
+}
+
+test "Screen.deleteChars shifts cells and emits DCH" {
+    var screen = try Screen.init(testing.allocator, 5, 2);
+    defer screen.deinit();
+    screen.writeText(0, 0, "ABCDE", .none);
+    screen.writeText(0, 1, "vwxyz", .none);
+    screen.clearOut();
+
+    try screen.deleteChars(1, 0, 2);
+    try testing.expectEqual(@as(u21, 'A'), screen.cells[0].cp);
+    try testing.expectEqual(@as(u21, 'D'), screen.cells[1].cp);
+    try testing.expectEqual(@as(u21, 'E'), screen.cells[2].cp);
+    try testing.expectEqual(@as(u21, ' '), screen.cells[3].cp);
+    try testing.expectEqual(@as(u21, ' '), screen.cells[4].cp);
+    try testing.expectEqual(@as(u21, 'v'), screen.cells[5].cp); // other row untouched
+    try testing.expectEqual(@as(u16, 1), screen.cursor_x);
+    try testing.expectEqual(@as(u16, 0), screen.cursor_y);
+    const out = screen.takeOut();
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[1;2H") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[2P") != null);
+}
+
+test "Screen.insertChars count one emits bare CSI @" {
+    var screen = try Screen.init(testing.allocator, 3, 1);
+    defer screen.deinit();
+    screen.writeText(0, 0, "ABC", .none);
+    screen.clearOut();
+    try screen.insertChars(0, 0, 1);
+    try testing.expectEqual(@as(u21, ' '), screen.cells[0].cp);
+    try testing.expectEqual(@as(u21, 'A'), screen.cells[1].cp);
+    try testing.expectEqual(@as(u21, 'B'), screen.cells[2].cp);
+    try testing.expect(std.mem.indexOf(u8, screen.takeOut(), "\x1b[@") != null);
 }

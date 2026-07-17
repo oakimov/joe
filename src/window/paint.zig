@@ -13,6 +13,8 @@ const tw = @import("tw.zig");
 const pw = @import("pw.zig");
 const qw = @import("qw.zig");
 const menu = @import("menu.zig");
+const fmt_esc = @import("fmt.zig");
+const render = @import("render");
 
 pub const TermScreen = terminal.Screen;
 pub const Attribute = terminal.Attribute;
@@ -35,20 +37,6 @@ fn screenY(term: *const TermScreen, y: i16) ?u16 {
     return @intCast(y);
 }
 
-fn toggleStyle(attr: Attribute, which: enum { underline, inverse, bold, italic, dim, blink, crossed_out, double_underline }) Attribute {
-    var out = attr;
-    switch (which) {
-        .underline => out.underline = !out.underline,
-        .inverse => out.inverse = !out.inverse,
-        .bold => out.bold = !out.bold,
-        .italic => out.italic = !out.italic,
-        .dim => out.dim = !out.dim,
-        .blink => out.blink = !out.blink,
-        .crossed_out => out.crossed_out = !out.crossed_out,
-        .double_underline => out.double_underline = !out.double_underline,
-    }
-    return out;
-}
 
 /// JOE `genfmt` shape: write format string `s` into cells at `(x, y)`, skipping
 /// the first `ofst` display columns. Attribute escapes (`\i`, `\u`, …) toggle
@@ -64,15 +52,10 @@ pub fn writeFmt(term: *TermScreen, x: u16, y: i16, ofst: usize, s: []const u8, b
         if (s[i] == '\\' and i + 1 < s.len) {
             const esc = s[i + 1];
             i += 2;
+            if (fmt_esc.applyStyleEsc(&attr, esc)) {
+                continue;
+            }
             switch (esc) {
-                'u', 'U' => attr = toggleStyle(attr, .underline),
-                'i', 'I' => attr = toggleStyle(attr, .inverse),
-                'b', 'B' => attr = toggleStyle(attr, .bold),
-                'l', 'L' => attr = toggleStyle(attr, .italic),
-                'd', 'D' => attr = toggleStyle(attr, .dim),
-                'f', 'F' => attr = toggleStyle(attr, .blink),
-                's', 'S' => attr = toggleStyle(attr, .crossed_out),
-                'z', 'Z' => attr = toggleStyle(attr, .double_underline),
                 '@' => {
                     if (col >= ofst and cx < term.width) {
                         term.writeChar(cx, sy, 0, attr);
@@ -229,10 +212,9 @@ pub fn paintLinum(term: *TermScreen, x: u16, y: i16, lincols: u16, line_1based: 
     }
 }
 
-/// Shallow text-body paint (bwgen/lgen scaffold): stub lines + optional linums.
-/// No gapbuffer/syntax — Phase 6/`render` replaces this with real `lgen`.
-/// Clears each content row (and gutter when `linums`); applies `offset` as a
-/// byte-column skip (ASCII scaffold).
+/// Text-body paint (bwgen-shaped): optional linums + `render.lgenLine`.
+/// No gapbuffer/syntax/viewmode yet — Phase 6 deepen. `offset` is a display
+/// column (JOE `bw->offset`), not a byte index.
 pub fn paintBody(term: *TermScreen, t: *const tw.TextWindow, attr: Attribute) void {
     if (t.h == 0) return;
     if (t.w == 0 and t.lincols == 0) return;
@@ -252,19 +234,19 @@ pub fn paintBody(term: *TermScreen, t: *const tw.TextWindow, attr: Attribute) vo
         }
 
         if (t.w == 0) continue;
-        const text = if (!past_eof) t.bodyLine(line_idx) else null;
-        if (text) |s| {
-            const start = @min(@as(usize, t.offset), s.len);
-            const vis = s[start..];
-            if (screenY(term, row_y)) |sy| {
-                const n = @min(vis.len, @as(usize, t.w));
-                if (n > 0) term.writeText(t.x, sy, vis[0..n], attr);
-                const used: u16 = @intCast(n);
-                if (used < t.w) clearWinEol(term, t.x +% used, row_y, t.w -| used, attr);
-            }
-        } else {
+        const sy = screenY(term, row_y) orelse continue;
+        if (past_eof) {
             clearWinEol(term, t.x, row_y, t.w, attr);
+            continue;
         }
+        const text = t.bodyLine(line_idx) orelse {
+            clearWinEol(term, t.x, row_y, t.w, attr);
+            continue;
+        };
+        _ = render.lgenLine(term, t.x, sy, t.w, text, .{
+            .tab = t.tab,
+            .offset = t.offset,
+        }, attr);
     }
 }
 
@@ -279,10 +261,12 @@ fn helpMinWidth(line: []const u8) struct { width: usize, nspans: usize } {
         if (line[i] == '\\' and i + 1 < line.len) {
             const esc = line[i + 1];
             i += 2;
-            switch (esc) {
-                'u', 'U', 'i', 'I', 'b', 'B', 'l', 'L', 'd', 'D', 'f', 'F', 's', 'S', 'z', 'Z' => {},
-                '|' => nspans += 1,
-                else => width += 1,
+            if (fmt_esc.isAttrEsc(esc)) {
+                // attribute toggles consume no columns
+            } else if (esc == '|') {
+                nspans += 1;
+            } else {
+                width += 1;
             }
             continue;
         }
@@ -314,15 +298,10 @@ pub fn paintHelpLine(term: *TermScreen, y: i16, line: []const u8, base_attr: Att
         if (line[i] == '\\' and i + 1 < line.len) {
             const esc = line[i + 1];
             i += 2;
+            if (fmt_esc.applyStyleEsc(&attr, esc)) {
+                continue;
+            }
             switch (esc) {
-                'u', 'U' => attr = toggleStyle(attr, .underline),
-                'i', 'I' => attr = toggleStyle(attr, .inverse),
-                'b', 'B' => attr = toggleStyle(attr, .bold),
-                'l', 'L' => attr = toggleStyle(attr, .italic),
-                'd', 'D' => attr = toggleStyle(attr, .dim),
-                'f', 'F' => attr = toggleStyle(attr, .blink),
-                's', 'S' => attr = toggleStyle(attr, .crossed_out),
-                'z', 'Z' => attr = toggleStyle(attr, .double_underline),
                 '|' => {
                     var z: usize = 0;
                     while (z < spanwidth and x < twid) : (z += 1) {
@@ -373,7 +352,7 @@ pub fn paintHelp(term: *TermScreen, wind: u16, text: ?[]const u8, attr: Attribut
 
 pub const PaintError = error{NoTerminal} || Allocator.Error;
 
-/// Paint text-window chrome (status) + shallow body stub (bwgen-shaped).
+/// Paint text-window chrome (status) + body via `render.lgenLine` (bwgen-shaped).
 /// Returns content-area cursor (JOE `disptw` curx/cury abs scaffold).
 pub fn paintText(term: *TermScreen, t: *const tw.TextWindow, status_line: ?[]const u8, attr: Attribute) CursorPos {
     if (t.statusRow()) |row| {

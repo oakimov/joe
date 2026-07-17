@@ -9,6 +9,7 @@ const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
 const screen = @import("screen.zig");
+const fmt_esc = @import("fmt.zig");
 
 fn onResize(w: *screen.Window, wi: u16, he: u16) void {
     const t = w.asText() orelse return;
@@ -56,6 +57,8 @@ pub const TextWindow = struct {
     cursor_col: u64 = 0,
     /// Paint line-number gutter when `lincols > 0` — JOE `o.linums`.
     linums: bool = false,
+    /// Tab stop width — JOE `o.tab` (used by Phase 6 `lgen`).
+    tab: u16 = 8,
 
     pub fn init(parent: *screen.Window) TextWindow {
         var self: TextWindow = .{ .parent = parent };
@@ -244,24 +247,20 @@ pub fn simplifyPrefix(allocator: Allocator, path: []const u8, home: ?[]const u8)
     return try allocator.dupe(u8, path);
 }
 
-/// Display column width of a JOE format string: `\[iudfbIUDFb]` escapes are zero-width.
-/// ASCII/byte width only (native scaffold; full UTF-8 width comes with render).
+/// Display column width of a JOE format string: attribute escapes (`\i`, `\l`, …)
+/// are zero-width. ASCII/byte width only (status scaffold; body uses `render`).
 pub fn fmtLen(s: []const u8) usize {
     var col: usize = 0;
     var i: usize = 0;
     while (i < s.len) : (i += 1) {
         if (s[i] == '\\' and i + 1 < s.len) {
-            switch (s[i + 1]) {
-                'u', 'i', 'd', 'f', 'b', 'U', 'I', 'D', 'F', 'B' => {
-                    i += 1;
-                    continue;
-                },
-                else => {
-                    col += 1;
-                    i += 1;
-                    continue;
-                },
+            if (fmt_esc.isAttrEsc(s[i + 1])) {
+                i += 1;
+                continue;
             }
+            col += 1;
+            i += 1;
+            continue;
         }
         col += 1;
     }
@@ -275,17 +274,13 @@ pub fn fmtPos(s: []const u8, goal: usize) usize {
     var i: usize = 0;
     while (i < s.len and col < goal) {
         if (s[i] == '\\' and i + 1 < s.len) {
-            switch (s[i + 1]) {
-                'u', 'i', 'd', 'f', 'b', 'U', 'I', 'D', 'F', 'B' => {
-                    i += 2;
-                    continue;
-                },
-                else => {
-                    i += 2;
-                    col += 1;
-                    continue;
-                },
+            if (fmt_esc.isAttrEsc(s[i + 1])) {
+                i += 2;
+                continue;
             }
+            i += 2;
+            col += 1;
+            continue;
         }
         i += 1;
         col += 1;
@@ -675,6 +670,8 @@ test "stagen default lmsg/rmsg pair" {
 test "fmtLen skips attribute escapes" {
     try testing.expectEqual(@as(usize, 3), fmtLen("\\iabc"));
     try testing.expectEqual(@as(usize, 1), fmtLen("\\i\\uA\\I"));
+    try testing.expectEqual(@as(usize, 1), fmtLen("\\lA\\L"));
+    try testing.expectEqual(@as(usize, 1), fmtLen("\\zA\\Z"));
     // `\i` + a,b,c → 3 cols occupies bytes 0..5 (index past 'c')
     try testing.expectEqual(@as(usize, 5), fmtPos("\\iabcd", 3));
 }

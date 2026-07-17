@@ -10,6 +10,7 @@ pub const pw = @import("pw.zig");
 pub const qw = @import("qw.zig");
 pub const menu = @import("menu.zig");
 pub const paint = @import("paint.zig");
+pub const fmt = @import("fmt.zig");
 
 pub const Screen = screen.Screen;
 pub const Window = screen.Window;
@@ -68,4 +69,5 @@ test {
     _ = qw;
     _ = menu;
     _ = paint;
+    _ = fmt;
 }

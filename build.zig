@@ -40,6 +40,15 @@ pub fn build(b: *std.Build) void {
     terminal_mod.addIncludePath(.{ .cwd_relative = "/opt/local/include" });
     terminal_mod.addLibraryPath(.{ .cwd_relative = "/opt/local/lib" });
 
+    // ── Zig-native rendering pipeline (Phase 6) ─────────────────
+    // Parallel to `joe/bw.c` lgen/bwgen; not wired into live joe yet.
+    const render_mod = b.createModule(.{
+        .root_source_file = b.path("src/render/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    render_mod.addImport("terminal", terminal_mod);
+
     // ── Zig-native window redesign (Phase 5) ──────────────────────
     // Parallel module tree; hybrid `src/{w,tw,pw,qw,menu,mmenu}.zig`
     // remain the live path. Not wired into joe yet.
@@ -50,6 +59,7 @@ pub fn build(b: *std.Build) void {
     });
     // Paint bridge may write into Zig-native terminal.Screen cells (tests-only).
     window_mod.addImport("terminal", terminal_mod);
+    window_mod.addImport("render", render_mod);
 
     // ── Pure Zig modules (replacing ported C files) ──────────────────
     // Each Zig module is compiled as an object and linked into the executable.
@@ -145,6 +155,14 @@ pub fn build(b: *std.Build) void {
     const run_terminal_tests = b.addRunArtifact(terminal_tests);
     const terminal_test_step = b.step("terminal-test", "Run Zig-native terminal unit tests");
     terminal_test_step.dependOn(&run_terminal_tests.step);
+
+    const render_tests = b.addTest(.{
+        .name = "render-tests",
+        .root_module = render_mod,
+    });
+    const run_render_tests = b.addRunArtifact(render_tests);
+    const render_test_step = b.step("render-test", "Run Zig-native render unit tests");
+    render_test_step.dependOn(&run_render_tests.step);
 
     const window_tests = b.addTest(.{
         .name = "window-tests",

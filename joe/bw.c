@@ -17,6 +17,12 @@ extern int zig_bw_lgen(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
 	int *palette, int palette_len, off_t from, off_t to, off_t line_byte,
 	int viewmode, char *vm_hide, int vm_hide_len, int *vm_subst, int vm_subst_len,
 	char **vm_urls, int vm_urls_len, int visiblews, int square, int ansi);
+/* Path A Feature 2.2: gated Zig padded table row (widths/aligns from C). */
+extern int zig_bw_table_row(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
+	ptrdiff_t x0, ptrdiff_t x1, const unsigned char *line, int line_len,
+	int ncols, const int *widths, const int *aligns, int row_type,
+	struct charmap *charmap, int defatr, int *palette, int palette_len,
+	off_t *col_map, int col_map_size);
 
 /* Attributes for line numbers, and current line */
 int bg_linum = 0;
@@ -667,8 +673,9 @@ static int lgen_core(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
               			/* Range for marked block */
 {
 	/* Path A: Zig-native paint for plain UTF-8 lines (+ linear/square marks +
-	 * viewmode tables + visiblews + ansi ESC hide). Table padded rows skip
-	 * lgen_core entirely. dspasis lives in outatr. Non-UTF-8 stays C. */
+	 * viewmode tables + visiblews + ansi ESC hide). Feature 2.2 padded table
+	 * rows skip lgen_core (painted via zig_bw_table_row / C fallback in
+	 * lgen_view). dspasis lives in outatr. Non-UTF-8 stays C. */
 	if (zig_bw_lgen_enabled
 	    && p && p->b && p->b->o.charmap && p->b->o.charmap->type) {
 		int defatr = (bw->o.hiline && bw->cursor->line == y - bw->y + bw->top->line)
@@ -1873,8 +1880,51 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 
 		if (row_type != TABLE_ROW_NONE) {
 			if (table_col_count > 0) {
-				/* Feature 2.2: Full table layout engine */
-				render_padded_table_row(t, y, screen, attr, x, w, bw, line, line_len, row_type);
+				/* Feature 2.2: Full table layout engine.
+				 * Path A: try Zig padded row when gate+UTF-8; fall back to C.
+				 * Region detect / widths / aligns stay in C. */
+				{
+					int need = line_len > 0 ? line_len : 1;
+					if (!viewmode_col_map || viewmode_col_map_size < need) {
+						off_t *nm = (off_t *)joe_realloc(viewmode_col_map, (ptrdiff_t)need * (ptrdiff_t)sizeof(off_t));
+						if (!nm) {
+							if (viewmode_col_map) joe_free(viewmode_col_map);
+							viewmode_col_map = NULL;
+							viewmode_col_map_size = 0;
+							viewmode_col_map_line = -1;
+						} else {
+							viewmode_col_map = nm;
+							viewmode_col_map_size = need;
+						}
+					}
+				}
+				{
+					int used_zig = 0;
+					if (zig_bw_lgen_enabled
+					    && bw->b && bw->b->o.charmap && bw->b->o.charmap->type) {
+						int defatr = (bw->o.hiline && bw->cursor->line == y - bw->y + bw->top->line)
+							? (bg_text & curlinmask) | bg_curlin
+							: bg_text;
+						int ncols = table_col_count;
+						if (ncols > MAX_TABLE_COLS) ncols = MAX_TABLE_COLS;
+						int z = zig_bw_table_row(t, y, screen, attr, x, w, line, line_len,
+							ncols, table_col_width, table_col_align, (int)row_type,
+							bw->b->o.charmap, BG_COLOR(defatr),
+							t->palette, t->palette ? 256 : 0,
+							viewmode_col_map, viewmode_col_map_size);
+						if (z >= 0) {
+							used_zig = 1;
+							/* Match C render_padded_table_row: set map line after
+							 * non-separator fill (separator returns before col_map). */
+							if (row_type != TABLE_ROW_SEPARATOR
+							    && viewmode_col_map
+							    && viewmode_col_map_size >= (line_len > 0 ? line_len : 1))
+								viewmode_col_map_line = bw->top->line + y - bw->y;
+						}
+					}
+					if (!used_zig)
+						render_padded_table_row(t, y, screen, attr, x, w, bw, line, line_len, row_type);
+				}
 				viewmode_table_rendered = 1;
 				/* Skip rest of lgen_view — we rendered to screen directly */
 				goto table_rendered;

@@ -1,12 +1,13 @@
-//! Gated live bridge: JOE `lgen_core` → Zig-native `render.lgenLine`.
+//! Gated live bridge: JOE `lgen_core` / Feature 2.2 table rows → Zig-native paint.
 //!
 //! When `JOE_ZIG_BW_LGEN` / `zig_bw_lgen_enabled` is on, plain UTF-8 lines
 //! (including linear/square mark inverse + viewmode hide/substitute/link tables +
 //! `-visiblews` glyphs + `-ansi` ESC hiding) paint through the Phase 6 renderer
 //! and emit via hybrid `outatr` (works with screen-swap shadow + classic tty
-//! path). Default off until soak. Falls back to C `lgen_core` when the gate is
-//! off or the line is unsupported (non-UTF-8). Table padded rows stay in C
-//! (`viewmode_table_rendered` skips `lgen_core`).
+//! path). Feature 2.2 padded table rows use `zig_bw_table_row` → `render.table.paintRow`
+//! with C-computed widths/aligns (region detect stays in C `lgen_view`). Default
+//! off until soak. Falls back to C when the gate is off or the line is unsupported
+//! (non-UTF-8). Feature 2.1 simple pipe substitute stays in C.
 //!
 //! Hybrid `syntax.parse` fills `attr_buf` **per character** (`pgetc`); native
 //! `lgenLine` expects **per-byte** attrs — this bridge expands before paint.
@@ -26,6 +27,8 @@ const Attribute = terminal.Attribute;
 const TruecolorPalette = terminal.TruecolorPalette;
 const ViewTables = render.ViewTables;
 const VisibleWs = render.VisibleWs;
+const TableLayout = render.table.Layout;
+const TableRowKind = render.table.RowKind;
 
 const COMPOSE = 4;
 const NO_MORE_DATA: c_int = -256;
@@ -81,6 +84,148 @@ pub export fn zig_bw_lgen_apply_env() void {
     if (std.c.getenv("JOE_ZIG_BW_LGEN")) |v| {
         zig_bw_lgen_enabled = if (v[0] == '1' or v[0] == 'y' or v[0] == 'Y') 1 else 0;
     }
+}
+
+/// Feature 2.2 padded table row → Zig `table.paintRow` → hybrid `outatr`.
+///
+/// C still detects the table region and computes `widths`/`aligns`/`row_type`.
+/// Returns `0` on success, `-1` to fall back to C `render_padded_table_row`.
+/// Does **not** advance `P` (C `lgen_view` does `pnextl` when table-rendered).
+/// Optional `col_map` fill matches C (only when already sized).
+pub export fn zig_bw_table_row(
+    t: ?*SCRN,
+    y: isize,
+    screen: ?[*][COMPOSE]c_int,
+    attr_row: ?[*]c_int,
+    x0: isize,
+    x1: isize,
+    line: ?[*]const u8,
+    line_len: c_int,
+    ncols: c_int,
+    widths: ?[*]const c_int,
+    aligns: ?[*]const c_int,
+    row_type: c_int,
+    charmap: ?*Charmap,
+    defatr: c_int,
+    palette: ?[*]c_int,
+    palette_len: c_int,
+    col_map: ?[*]i64,
+    col_map_size: c_int,
+) c_int {
+    if (zig_bw_lgen_enabled == 0) return -1;
+    if (t == null or screen == null or attr_row == null) return -1;
+    if (line == null or line_len < 0) return -1;
+    if (x1 <= x0) return -1;
+    if (charmap == null or charmap.?.@"type" == 0) return -1;
+    if (ncols <= 0 or widths == null or aligns == null) return -1;
+    if (ncols > render.table.max_cols) return -1;
+
+    const win_w_isize = x1 - x0;
+    if (win_w_isize <= 0 or win_w_isize > 10000) return -1;
+    const win_w: u16 = @intCast(win_w_isize);
+    const src = line.?[0..@intCast(line_len)];
+
+    const row_kind: TableRowKind = switch (row_type) {
+        1 => .header, // TABLE_ROW_HEADER
+        2 => .separator, // TABLE_ROW_SEPARATOR
+        3 => .body, // TABLE_ROW_BODY
+        4 => .last, // TABLE_ROW_LAST
+        else => return -1,
+    };
+
+    var layout: TableLayout = .{
+        .start = 0,
+        .end = 4,
+        .sep = 1,
+        .ncols = @intCast(ncols),
+    };
+    // Synthetic indices so `Layout.kind` matches JOE row_type. Feature 2.2 paints
+    // `.last` like `.body` (│ borders); only header/separator change glyphs/attrs.
+    const line_idx: usize = switch (row_kind) {
+        .header => 0,
+        .separator => 1,
+        .body, .last => 2,
+        .none => return -1,
+    };
+
+    var ci: usize = 0;
+    while (ci < layout.ncols) : (ci += 1) {
+        const w = widths.?[ci];
+        layout.widths[ci] = if (w < 0) 0 else @intCast(@min(w, 65535));
+        layout.aligns[ci] = switch (aligns.?[ci]) {
+            1 => .center,
+            2 => .right,
+            else => .left,
+        };
+    }
+
+    const alloc = std.heap.c_allocator;
+    const pal: ?[]const i32 = if (palette != null and palette_len > 0)
+        palette.?[0..@intCast(palette_len)]
+    else
+        null;
+    const base_attr = terminal.attributeFromHybrid(defatr, pal);
+
+    var scratch = terminal.Screen.init(alloc, win_w, 1) catch return -1;
+    defer scratch.deinit();
+
+    if (!render.table.paintRow(&scratch, 0, 0, win_w, src, layout, line_idx, base_attr))
+        return -1;
+
+    var tc_pal: TruecolorPalette = .{};
+    if (palette != null and palette_len > 0) {
+        var pi: u8 = 1;
+        const plen: usize = @intCast(palette_len);
+        while (pi < 255 and pi < plen) : (pi += 1) {
+            const v = palette.?[pi];
+            if (v >= 0) {
+                tc_pal.slots[pi] = @intCast(v);
+                if (tc_pal.next <= pi) tc_pal.next = pi +% 1;
+            }
+        }
+    }
+
+    var cx: u16 = 0;
+    while (cx < win_w) : (cx += 1) {
+        const cell = scratch.cells[cx];
+        if (cell.cp == 0) continue;
+        const atr: c_int = attributeToHybridOrDef(cell.attr, &tc_pal, defatr);
+        const xx: isize = x0 + @as(isize, @intCast(cx));
+        outatr(
+            charmap,
+            t,
+            @ptrCast(screen.? + @as(usize, @intCast(xx))),
+            @ptrCast(attr_row.? + @as(usize, @intCast(xx))),
+            xx,
+            y,
+            @intCast(cell.cp),
+            atr,
+        );
+        for (cell.combine) |mark| {
+            if (mark == 0) break;
+            outatr(
+                charmap,
+                t,
+                @ptrCast(screen.? + @as(usize, @intCast(xx))),
+                @ptrCast(attr_row.? + @as(usize, @intCast(xx))),
+                xx,
+                y,
+                @intCast(mark),
+                atr,
+            );
+        }
+    }
+    outatr_complete(t);
+    // paintRow already cleared the scratch to win_w; emit covers [x0,x1).
+    // eraeol from x1 clears any cells past the window right edge (matches C when oc==w).
+    _ = eraeol(t, x1, y, defatr);
+
+    // C `render_padded_table_row` skips col_map on separator rows (early return).
+    if (row_kind != .separator and col_map != null and col_map_size >= line_len and line_len > 0) {
+        fillTableColMap(col_map.?, @intCast(col_map_size), src, layout, x0);
+    }
+
+    return 0;
 }
 
 /// Returns:
@@ -443,6 +588,125 @@ pub export fn zig_bw_lgen(
 
 fn attributeToHybridOrDef(attr: Attribute, palette: *TruecolorPalette, defatr: c_int) c_int {
     return terminal.attributeToHybrid(attr, palette) catch defatr;
+}
+
+/// JOE `render_padded_table_row` col_map fill — buffer byte → display column.
+/// `base_x` is window content left (`bw->x`), matching C.
+fn fillTableColMap(col_map: [*]i64, col_map_size: usize, line: []const u8, layout: TableLayout, base_x: isize) void {
+    const n = @min(line.len, col_map_size);
+    if (n == 0) return;
+    var bi: usize = 0;
+    while (bi < n) : (bi += 1) col_map[bi] = 0;
+
+    var pipe_pos: [render.table.max_cols]usize = undefined;
+    const pipe_count = blk: {
+        var count: usize = 0;
+        var i: usize = 0;
+        while (i < line.len and count < pipe_pos.len) : (i += 1) {
+            if (line[i] == '|') {
+                pipe_pos[count] = i;
+                count += 1;
+            }
+        }
+        break :blk count;
+    };
+    if (pipe_count == 0) return;
+    const ncols = @min(if (pipe_count > 0) pipe_count - 1 else 0, layout.ncols);
+    if (ncols == 0) return;
+
+    var cells: [render.table.max_cols]struct { start: usize, end: usize, width: u16 } = undefined;
+    var ci: usize = 0;
+    while (ci < ncols) : (ci += 1) {
+        const cs = pipe_pos[ci] + 1;
+        const ce = if (ci + 1 < pipe_count) pipe_pos[ci + 1] else line.len;
+        var ts = cs;
+        while (ts < ce and (line[ts] == ' ' or line[ts] == '\t')) : (ts += 1) {}
+        var te = ce;
+        while (te > ts and (line[te - 1] == ' ' or line[te - 1] == '\t')) : (te -= 1) {}
+        var width: u16 = 0;
+        var p = ts;
+        while (p < te) {
+            const b = line[p];
+            if ((b & 0x80) == 0) {
+                const cw = terminal.displayWidth(b);
+                if (cw > 0) width +|= cw;
+                p += 1;
+            } else {
+                const seq_len = std.unicode.utf8ByteSequenceLength(b) catch {
+                    width +|= 1;
+                    p += 1;
+                    continue;
+                };
+                if (p + seq_len > te) break;
+                const cp = std.unicode.utf8Decode(line[p..][0..seq_len]) catch {
+                    width +|= 1;
+                    p += 1;
+                    continue;
+                };
+                const cw = terminal.displayWidth(cp);
+                if (cw > 0) width +|= cw;
+                p += seq_len;
+            }
+        }
+        cells[ci] = .{ .start = ts, .end = te, .width = width };
+    }
+
+    var content_display_start: [render.table.max_cols]isize = undefined;
+    var col_start_disp: isize = base_x;
+    ci = 0;
+    while (ci < ncols) : (ci += 1) {
+        content_display_start[ci] = col_start_disp;
+        var cw = layout.widths[ci];
+        if (cw < cells[ci].width) cw = cells[ci].width;
+        col_start_disp += 3 + @as(isize, @intCast(cw));
+    }
+
+    ci = 0;
+    while (ci < ncols) : (ci += 1) {
+        const base = content_display_start[ci];
+        var cw = layout.widths[ci];
+        if (cw < cells[ci].width) cw = cells[ci].width;
+        const pad_t: u16 = cw -| cells[ci].width;
+        const pl: u16 = switch (layout.aligns[ci]) {
+            .left => 0,
+            .center => pad_t / 2,
+            .right => pad_t,
+        };
+        if (ci < pipe_count and pipe_pos[ci] < n) col_map[pipe_pos[ci]] = base;
+
+        var content_col: isize = base + 1 + 1 + @as(isize, @intCast(pl));
+        var buf_i = cells[ci].start;
+        var p = cells[ci].start;
+        while (p < cells[ci].end and buf_i < cells[ci].end) {
+            const b = line[p];
+            var seq_len: usize = 1;
+            var cww: u16 = 1;
+            if ((b & 0x80) == 0) {
+                cww = terminal.displayWidth(b);
+                p += 1;
+            } else {
+                seq_len = std.unicode.utf8ByteSequenceLength(b) catch 1;
+                if (p + seq_len > cells[ci].end) break;
+                if (std.unicode.utf8Decode(line[p..][0..seq_len])) |cp| {
+                    cww = terminal.displayWidth(cp);
+                } else |_| {
+                    seq_len = 1;
+                    cww = 1;
+                }
+                p += seq_len;
+            }
+            while (buf_i < cells[ci].end and buf_i < p) {
+                if (buf_i < n) col_map[buf_i] = content_col;
+                buf_i += 1;
+            }
+            if (cww > 0) content_col += cww;
+        }
+        const content_end_col: isize = base + 1 + 1 + @as(isize, @intCast(cw)) + 1;
+        const next_pipe = if (ci + 1 < pipe_count) pipe_pos[ci + 1] else line.len;
+        while (buf_i < next_pipe and buf_i < n) : (buf_i += 1) {
+            col_map[buf_i] = content_end_col;
+        }
+    }
 }
 
 /// JOE `out_osc8_link` shaped — content equality (C uses pointer equality on shared URLs).

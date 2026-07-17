@@ -49,6 +49,9 @@ pub const Caps = struct {
     dl: ?[:0]const u8 = null,
     il1: ?[:0]const u8 = null,
     dl1: ?[:0]const u8 = null,
+    /// Clear to end of line / end of display (`el`/`ed`); ANSI CSI K/J are fallbacks.
+    el: ?[:0]const u8 = null,
+    ed: ?[:0]const u8 = null,
 };
 
 pub const TermInfo = struct {
@@ -97,6 +100,8 @@ pub const TermInfo = struct {
             .dl = presentStr("dl"),
             .il1 = presentStr("il1"),
             .dl1 = presentStr("dl1"),
+            .el = presentStr("el"),
+            .ed = presentStr("ed"),
         };
     }
 
@@ -243,4 +248,7 @@ test "TermInfo.init against current TERM" {
     if (ti.caps.dl != null or ti.caps.dl1 != null) {
         _ = ti.formatDl(1);
     }
+    // Soft-check clear-to-EOL/EOS rare caps when present.
+    _ = ti.caps.el;
+    _ = ti.caps.ed;
 }

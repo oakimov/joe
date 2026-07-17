@@ -50,6 +50,14 @@ pub const Key = union(enum) {
     /// Function key F1..F12 (1..=12).
     f: u8,
     mouse: MouseEvent,
+    /// Bracketed paste begin (`CSI 200~`).
+    paste_start,
+    /// Bracketed paste end (`CSI 201~`).
+    paste_end,
+    /// Focus gained (`CSI I` with focus-event mode).
+    focus_in,
+    /// Focus lost (`CSI O` with focus-event mode).
+    focus_out,
 
     pub fn eql(a: Key, b: Key) bool {
         return switch (a) {
@@ -190,7 +198,7 @@ pub const KeyParser = struct {
                 return decodeSgrMouse(params[1..], final == 'm') orelse .{ .char = final };
             }
         }
-        // Arrow / home / end letter forms: ESC [ A/B/C/D/H/F
+        // Arrow / home / end / focus letter forms: ESC [ A/B/C/D/H/F/I/O
         if (params.len == 0) {
             return switch (final) {
                 'A' => .up,
@@ -199,6 +207,8 @@ pub const KeyParser = struct {
                 'D' => .left,
                 'H' => .home,
                 'F' => .end,
+                'I' => .focus_in,
+                'O' => .focus_out,
                 else => .{ .char = final },
             };
         }
@@ -224,6 +234,8 @@ pub const KeyParser = struct {
                 21 => .{ .f = 10 },
                 23 => .{ .f = 11 },
                 24 => .{ .f = 12 },
+                200 => .paste_start,
+                201 => .paste_end,
                 else => .{ .char = '~' },
             };
         }
@@ -395,6 +407,26 @@ pub const Tty = struct {
         try self.writeAll(keypad_disable);
     }
 
+    /// Enable xterm bracketed paste (`CSI ?2004h`); JOE `brp`.
+    pub fn enableBracketedPaste(self: Tty) !void {
+        try self.writeAll(bracketed_paste_enable);
+    }
+
+    /// Disable xterm bracketed paste (`CSI ?2004l`); JOE `bre`.
+    pub fn disableBracketedPaste(self: Tty) !void {
+        try self.writeAll(bracketed_paste_disable);
+    }
+
+    /// Enable xterm focus-in/out events (`CSI ?1004h`).
+    pub fn enableFocusEvents(self: Tty) !void {
+        try self.writeAll(focus_enable);
+    }
+
+    /// Disable xterm focus-in/out events (`CSI ?1004l`).
+    pub fn disableFocusEvents(self: Tty) !void {
+        try self.writeAll(focus_disable);
+    }
+
     /// Blocking single-byte read. Higher-level key parsing: `readKey`.
     pub fn readByte(self: Tty) !u8 {
         var buf: [1]u8 = undefined;
@@ -466,6 +498,16 @@ pub const alt_screen_leave = "\x1b[?1049l";
 pub const keypad_enable = "\x1b[?1h\x1b=";
 /// Normal cursor keys + keypad (ANSI/xterm fallback for `rmkx`).
 pub const keypad_disable = "\x1b[?1l\x1b>";
+
+/// Enable xterm bracketed paste (matches JOE `brp` when `-brpaste`).
+pub const bracketed_paste_enable = "\x1b[?2004h";
+/// Disable xterm bracketed paste (matches JOE `bre`).
+pub const bracketed_paste_disable = "\x1b[?2004l";
+
+/// Enable xterm focus reporting (`CSI I` / `CSI O`).
+pub const focus_enable = "\x1b[?1004h";
+/// Disable xterm focus reporting.
+pub const focus_disable = "\x1b[?1004l";
 
 /// Set by the default SIGWINCH handler; cleared by `takeWinchPending`.
 var winch_pending: std.atomic.Value(bool) = .init(false);
@@ -626,6 +668,24 @@ test "alt-screen and keypad ANSI sequences" {
     try testing.expect(std.mem.indexOf(u8, keypad_enable, "=") != null);
     try testing.expect(std.mem.indexOf(u8, keypad_disable, "?1l") != null);
     try testing.expect(std.mem.indexOf(u8, keypad_disable, ">") != null);
+}
+
+test "KeyParser bracketed paste and focus events" {
+    var p: KeyParser = .{};
+    try testing.expectEqual(@as(?Key, .paste_start), feedAll(&p, "\x1b[200~"));
+    p.reset();
+    try testing.expectEqual(@as(?Key, .paste_end), feedAll(&p, "\x1b[201~"));
+    p.reset();
+    try testing.expectEqual(@as(?Key, .focus_in), feedAll(&p, "\x1b[I"));
+    p.reset();
+    try testing.expectEqual(@as(?Key, .focus_out), feedAll(&p, "\x1b[O"));
+}
+
+test "bracketed paste and focus ANSI sequences" {
+    try testing.expectEqualStrings("\x1b[?2004h", bracketed_paste_enable);
+    try testing.expectEqualStrings("\x1b[?2004l", bracketed_paste_disable);
+    try testing.expectEqualStrings("\x1b[?1004h", focus_enable);
+    try testing.expectEqualStrings("\x1b[?1004l", focus_disable);
 }
 
 test "winch pending flag set and clear" {

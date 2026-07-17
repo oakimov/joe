@@ -516,6 +516,44 @@ pub const Screen = struct {
         }
     }
 
+    /// Clear cells from column `x` through end of row `y`, then emit EL
+    /// (terminfo `el` or ANSI `CSI K`). Moves the logical cursor to `(x, y)`.
+    pub fn clearToEol(self: *Screen, x: u16, y: u16) !void {
+        if (y >= self.height) return;
+        const start_x = @min(x, self.width);
+        if (start_x < self.width) {
+            const row = self.rowSlice(y);
+            @memset(row[start_x..], .{});
+            self.dirty_rows.set(y);
+        }
+        self.cursor_x = start_x;
+        self.cursor_y = y;
+        try self.appendCup(start_x, y);
+        const seq: ?[]const u8 = if (self.terminfo) |ti| ti.caps.el else null;
+        try self.appendSeqOrAnsi(seq, "\x1b[K");
+    }
+
+    /// Clear from `(x, y)` through end of screen: rest of row `y`, then all
+    /// rows below. Emits ED (terminfo `ed` or ANSI `CSI J`).
+    pub fn clearToEos(self: *Screen, x: u16, y: u16) !void {
+        if (y >= self.height) return;
+        const start_x = @min(x, self.width);
+        if (start_x < self.width) {
+            @memset(self.rowSlice(y)[start_x..], .{});
+        }
+        var clear_y: u16 = y + 1;
+        while (clear_y < self.height) : (clear_y += 1) {
+            @memset(self.rowSlice(clear_y), .{});
+        }
+        self.markDirtyRange(y, self.height -| 1);
+        const cup_x = @min(start_x, self.width -| 1);
+        self.cursor_x = cup_x;
+        self.cursor_y = y;
+        try self.appendCup(cup_x, y);
+        const seq: ?[]const u8 = if (self.terminfo) |ti| ti.caps.ed else null;
+        try self.appendSeqOrAnsi(seq, "\x1b[J");
+    }
+
     /// Emit dirty rows to `out`, then copy cells → display and clear dirty bits.
     /// Does not write to a TTY — caller drains `out` / `takeOut()`.
     pub fn flush(self: *Screen) !void {
@@ -753,4 +791,46 @@ test "Screen.deleteLines shifts cells and emits DL" {
     try testing.expectEqual(@as(u21, 'D'), screen.cells[6].cp);
     try testing.expectEqual(@as(u21, ' '), screen.cells[9].cp); // blank at bottom
     try testing.expect(std.mem.indexOf(u8, screen.takeOut(), "\x1b[M") != null);
+}
+
+test "Screen.clearToEol clears tail and emits EL" {
+    var screen = try Screen.init(testing.allocator, 5, 2);
+    defer screen.deinit();
+    screen.writeText(0, 0, "ABCDE", .none);
+    screen.writeText(0, 1, "fghij", .none);
+    screen.clearOut();
+
+    try screen.clearToEol(2, 0);
+    try testing.expectEqual(@as(u21, 'A'), screen.cells[0].cp);
+    try testing.expectEqual(@as(u21, 'B'), screen.cells[1].cp);
+    try testing.expectEqual(@as(u21, ' '), screen.cells[2].cp);
+    try testing.expectEqual(@as(u21, ' '), screen.cells[4].cp);
+    try testing.expectEqual(@as(u21, 'f'), screen.cells[5].cp); // other row untouched
+    try testing.expectEqual(@as(u16, 2), screen.cursor_x);
+    try testing.expectEqual(@as(u16, 0), screen.cursor_y);
+    const out = screen.takeOut();
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[1;3H") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[K") != null);
+}
+
+test "Screen.clearToEos clears below and emits ED" {
+    var screen = try Screen.init(testing.allocator, 3, 3);
+    defer screen.deinit();
+    screen.writeText(0, 0, "ABC", .none);
+    screen.writeText(0, 1, "DEF", .none);
+    screen.writeText(0, 2, "GHI", .none);
+    screen.clearOut();
+
+    try screen.clearToEos(1, 1);
+    try testing.expectEqual(@as(u21, 'A'), screen.cells[0].cp);
+    try testing.expectEqual(@as(u21, 'D'), screen.cells[3].cp);
+    try testing.expectEqual(@as(u21, ' '), screen.cells[4].cp);
+    try testing.expectEqual(@as(u21, ' '), screen.cells[5].cp);
+    try testing.expectEqual(@as(u21, ' '), screen.cells[6].cp);
+    try testing.expectEqual(@as(u21, ' '), screen.cells[8].cp);
+    try testing.expectEqual(@as(u16, 1), screen.cursor_x);
+    try testing.expectEqual(@as(u16, 1), screen.cursor_y);
+    const out = screen.takeOut();
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[2;2H") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[J") != null);
 }

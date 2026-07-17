@@ -13,6 +13,8 @@ const c = struct {
     pub extern fn tigetflag(capname: [*:0]const u8) c_int;
     pub extern fn tigetnum(capname: [*:0]const u8) c_int;
     pub extern fn tigetstr(capname: [*:0]const u8) ?[*:0]u8;
+    /// Parameterize a terminfo string. Result points at a static ncurses buffer.
+    pub extern fn tiparm(fmt: [*:0]const u8, ...) ?[*:0]u8;
 };
 
 pub const SetupError = error{
@@ -144,6 +146,16 @@ pub const TermInfo = struct {
         if (n <= 0) return null;
         return @intCast(n);
     }
+
+    /// Format cursor-address (`cup`) for 0-based (x, y).
+    /// Returns null when the cap is missing or tiparm fails — caller should
+    /// fall back to ANSI `CSI row;col H`.
+    pub fn formatCup(self: TermInfo, x: u16, y: u16) ?[:0]const u8 {
+        const fmt = self.caps.cup orelse return null;
+        // terminfo cup takes row then column; %i in the string makes them 1-based.
+        const p = c.tiparm(fmt.ptr, @as(c_int, y), @as(c_int, x)) orelse return null;
+        return std.mem.span(p);
+    }
 };
 
 test "StrCap cancelled sentinel" {
@@ -174,6 +186,11 @@ test "TermInfo.init against current TERM" {
         .present => |p| {
             try testing.expect(ti.caps.cup != null);
             try testing.expectEqualStrings(std.mem.span(p), ti.caps.cup.?);
+            // tiparm should produce a CSI-like address for (0,0).
+            if (ti.formatCup(0, 0)) |cup| {
+                try testing.expect(cup.len > 0);
+                try testing.expect(std.mem.indexOfScalar(u8, cup, 'H') != null or std.mem.indexOfScalar(u8, cup, 'f') != null);
+            }
         },
         else => {},
     }

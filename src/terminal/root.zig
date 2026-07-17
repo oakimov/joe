@@ -14,9 +14,11 @@ pub const Caps = terminfo.Caps;
 pub const Tty = tty.Tty;
 pub const Key = tty.Key;
 pub const KeyParser = tty.KeyParser;
+pub const MouseEvent = tty.MouseEvent;
 pub const Pty = pty.Pty;
 pub const Screen = screen.Screen;
 pub const Attribute = screen.Attribute;
+pub const displayWidth = screen.displayWidth;
 
 test {
     _ = terminfo;

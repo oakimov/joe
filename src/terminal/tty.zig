@@ -16,6 +16,22 @@ pub const Size = struct {
     cols: u16,
 };
 
+/// XTerm SGR/1006 mouse event (parsed from `CSI < Cb ; Cx ; Cy M/m`).
+pub const MouseEvent = struct {
+    /// Raw button/modifier bits from the SGR `Cb` field (release bit stripped).
+    button: u16,
+    /// 1-based cell coordinates from the terminal.
+    x: u16,
+    y: u16,
+    release: bool,
+    /// Motion/drag bit (Cb & 32) was set.
+    drag: bool,
+
+    pub fn eql(a: MouseEvent, b: MouseEvent) bool {
+        return a.button == b.button and a.x == b.x and a.y == b.y and a.release == b.release and a.drag == b.drag;
+    }
+};
+
 /// Logical key events produced by the input parser.
 /// Special keys are a Zig-native union (not JOE's 0x10000x mouse codes).
 pub const Key = union(enum) {
@@ -33,11 +49,13 @@ pub const Key = union(enum) {
     delete,
     /// Function key F1..F12 (1..=12).
     f: u8,
+    mouse: MouseEvent,
 
     pub fn eql(a: Key, b: Key) bool {
         return switch (a) {
             .char => |c| b == .char and b.char == c,
             .f => |n| b == .f and b.f == n,
+            .mouse => |m| b == .mouse and MouseEvent.eql(m, b.mouse),
             else => std.meta.activeTag(a) == std.meta.activeTag(b),
         };
     }
@@ -166,6 +184,12 @@ pub const KeyParser = struct {
     }
 
     fn decodeCsi(params: []const u8, final: u8) Key {
+        // XTerm SGR mouse: ESC [ < Cb ; Cx ; Cy M/m
+        if (params.len > 0 and params[0] == '<') {
+            if (final == 'M' or final == 'm') {
+                return decodeSgrMouse(params[1..], final == 'm') orelse .{ .char = final };
+            }
+        }
         // Arrow / home / end letter forms: ESC [ A/B/C/D/H/F
         if (params.len == 0) {
             return switch (final) {
@@ -217,6 +241,35 @@ pub const KeyParser = struct {
             'S' => .{ .f = 4 },
             else => .{ .char = final },
         };
+    }
+
+    fn decodeSgrMouse(params: []const u8, release_final: bool) ?Key {
+        // params = "Cb;Cx;Cy" (leading '<' already stripped)
+        var parts: [3]u16 = .{ 0, 0, 0 };
+        var part_i: usize = 0;
+        var i: usize = 0;
+        while (i < params.len and part_i < 3) : (part_i += 1) {
+            const start = i;
+            while (i < params.len and params[i] >= '0' and params[i] <= '9') : (i += 1) {}
+            if (i == start) return null;
+            parts[part_i] = std.fmt.parseInt(u16, params[start..i], 10) catch return null;
+            if (part_i < 2) {
+                if (i >= params.len or params[i] != ';') return null;
+                i += 1;
+            }
+        }
+        if (part_i != 3 or i != params.len) return null;
+
+        var cb = parts[0];
+        const drag = (cb & 32) != 0;
+        cb &= ~@as(u16, 32);
+        return .{ .mouse = .{
+            .button = cb,
+            .x = parts[1],
+            .y = parts[2],
+            .release = release_final,
+            .drag = drag,
+        } };
     }
 
     fn decodeSs3(final: u8) Key {
@@ -445,4 +498,41 @@ test "KeyParser SS3 and lone Escape flush" {
     p.reset();
     try testing.expect(p.feed(0x1b) == null);
     try testing.expectEqual(@as(?Key, .escape), p.flushPending());
+}
+
+/// Enable xterm mouse tracking + SGR 1006 coordinates (matches JOE mouseopen).
+pub const mouse_enable_sgr = "\x1b[?1000h\x1b[?1006h";
+/// Disable xterm mouse tracking + SGR 1006.
+pub const mouse_disable_sgr = "\x1b[?1000l\x1b[?1006l";
+
+test "KeyParser SGR mouse press release and drag" {
+    var p: KeyParser = .{};
+    // Left press at (1-based) 5,10
+    const press = feedAll(&p, "\x1b[<0;5;10M").?;
+    try testing.expect(press == .mouse);
+    try testing.expectEqual(@as(u16, 0), press.mouse.button);
+    try testing.expectEqual(@as(u16, 5), press.mouse.x);
+    try testing.expectEqual(@as(u16, 10), press.mouse.y);
+    try testing.expect(!press.mouse.release);
+    try testing.expect(!press.mouse.drag);
+
+    p.reset();
+    const release = feedAll(&p, "\x1b[<0;5;10m").?;
+    try testing.expect(release == .mouse);
+    try testing.expect(release.mouse.release);
+
+    p.reset();
+    // Drag: Cb has +32
+    const drag = feedAll(&p, "\x1b[<32;8;3M").?;
+    try testing.expect(drag == .mouse);
+    try testing.expect(drag.mouse.drag);
+    try testing.expectEqual(@as(u16, 0), drag.mouse.button);
+    try testing.expectEqual(@as(u16, 8), drag.mouse.x);
+    try testing.expectEqual(@as(u16, 3), drag.mouse.y);
+
+    p.reset();
+    // Wheel down often reported as button 64+1 = 65
+    const wheel = feedAll(&p, "\x1b[<65;1;1M").?;
+    try testing.expect(wheel == .mouse);
+    try testing.expectEqual(@as(u16, 65), wheel.mouse.button);
 }

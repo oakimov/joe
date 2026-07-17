@@ -71,7 +71,7 @@ pub fn build(b: *std.Build) void {
             // REMOVED: joe/kbd.c — replaced by src/kbd.zig
             // REMOVED: joe/macro.c — replaced by src/macro.zig
             "joe/main.c",
-            "joe/menu.c",
+            // REMOVED: joe/menu.c — replaced by src/menu.zig
             "joe/path.c",
             "joe/poshist.c",
             // REMOVED: joe/pw.c — replaced by src/pw.zig

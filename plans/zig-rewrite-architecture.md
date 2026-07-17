@@ -15,6 +15,7 @@
 - ✅ Hybrid Phase 5: `tw` landed (replaces `joe/tw.c` — text window + status line, 196/196 green)
 - ✅ Hybrid Phase 5: `pw` landed (replaces `joe/pw.c` — prompt window/history/completion, 196/196 green)
 - ✅ Hybrid Phase 5: `qw` landed (replaces `joe/qw.c` — single-key query windows, 196/196 green)
+- ✅ Hybrid Phase 5: `menu` landed (replaces `joe/menu.c` — grid menu widget, 196/196 green)
 - 🚧 Phase 3 redesign deepen: Zig-native `src/terminal/{terminfo,tty,pty,screen,adapter}.zig` unit-tested (`zig build terminal-test` **68/68**); UTF-8 `writeText` + display-width, `Key`/`KeyParser`/`readKey` CSI+SS3+SGR-mouse+bracketed-paste+focus, mouse/alt-screen/keypad/paste/focus enter-leave, truecolor/`Color` SGR, SIGWINCH pending/`pollResize`, terminfo rare-cap cache + `formatCup`/`formatCsr`/`formatIl`/`formatDl`/`formatIch`/`formatDch`/`formatCuu`/`formatCud`/`formatCuf`/`formatCub`/`formatHpa`/`formatVpa` + scroll-region/IL/DL + clear-to-EOL/EOS (`el`/`ed`) + within-line ICH/DCH (`ich`/`dch`) + relative cursor CUU/CUD/CUF/CUB + save/restore (`sc`/`rc`) + smarter `moveTo` (full JOE `cposs` matrix: relative/CUP/CR/home/ll/hpa/vpa/cV/vpa+hpa + CR+vpa/ll+hpa/ll+vpa/home+hpa/home+vpa, scroll-region-relative `rr` home/ll/vpa, `has_cup`/`has_cr`) + tab-aware column costing (`ta`/`bt`/`it`/`xt`/`pt`, `use_tabs` default off) + thin hybrid↔native adapter (`attributeFromHybrid`/`attributeToHybrid` + obuf-style `OutSink`/`drainScreenOut`/`drainScreenOutGated`) + gated hybrid `ttWrite`/`drainZigScreen` (`JOE_ZIG_SCREEN_DRAIN` / `zig_screen_drain_enabled`, default off — live `obuf` path unchanged; not a screen swap); cell-diff `flush` (changed runs + EL blank tails; `display` sync; within-line ICH/DCH magic when pure insert/delete shift); gated hybrid `scrn` swap (`JOE_ZIG_SCREEN_SWAP` / `zig_screen_swap_enabled`, **default on** — paint updates shadow only; `zig_scrn_swap_flush` syncs→Zig cell-diff→drain; `flush_cup_only` + `cursor_valid` fix stale-cursor paints; opt out `=0`); Cell compose slots (`COMPOSE_MARKS=3`) + `writeText`/`syncHybridGridToScreen` combining + flush IL/DL scroll magic (`use_scroll`); `zig build terminal-test` **84/84**)
 - **Integration tests:** full suite **196/196 OK** (including viewmode)
 - **Recent hybrid fixes:** `binsb` uses `hallocFresh()` so freelist corruption cannot reclaim a still-live gap header and zero its `hole` (was wiping history into NULs/`@` on Command: prompt after 2× `blkcpy`); `inschn` skips `hfree` when `p.hdr == a`; `brm` uses `vsrm(current_dir)`; plus prior `brvs`/`vstrunc`, `binsmq`, `charmap->type`, unicode/`p_goto_bol`/`binsm`/`iskey` fixes
@@ -753,9 +754,10 @@ The build is always working — start with a binary that compiles and runs, then
 - ✅ `tw.zig` — hybrid C-ABI port replacing `joe/tw.c` (text window, status line/`stagen`, split/dup/abort; goto-free `utw1`; exported `piscol` glue; 196/196)
 - ✅ `pw.zig` — hybrid C-ABI port replacing `joe/pw.c` (prompt window, history, tab completion; 196/196)
 - ✅ `qw.zig` — hybrid C-ABI port replacing `joe/qw.c` (single-key query windows; 196/196)
+- ✅ `menu.zig` — hybrid C-ABI port replacing `joe/menu.c` (grid menu widget; 196/196)
 - ⬜ redesign `screen.zig` / `window/*.zig` — Zig-native window types (after hybrid ports)
 - ⬜ hybrid `qw` — query window
-- ⬜ `menu.zig` — menu widget + rc menus
+- ✅ `menu.zig` — hybrid grid menu (`joe/menu.c`); ⬜ rc menus (`joe/mmenu.c`) still C
 - At this point: multi-window editing works
 
 ### Phase 6: Rendering (4-6 weeks) — NOT STARTED

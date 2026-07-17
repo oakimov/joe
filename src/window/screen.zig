@@ -98,6 +98,26 @@ pub const Window = struct {
         const skip_status = self.h > 1 and (self.y != 0 or status_enabled);
         return self.y + @as(i16, if (skip_status) 1 else 0);
     }
+    pub fn asText(self: *Window) ?*tw.TextWindow {
+        if (self.vtable.kind != .text) return null;
+        return if (self.object) |obj| @ptrCast(@alignCast(obj)) else null;
+    }
+
+    pub fn asPrompt(self: *Window) ?*pw.PromptWindow {
+        if (self.vtable.kind != .prompt) return null;
+        return if (self.object) |obj| @ptrCast(@alignCast(obj)) else null;
+    }
+
+    pub fn asQuery(self: *Window) ?*qw.QueryWindow {
+        if (self.vtable.kind != .query) return null;
+        return if (self.object) |obj| @ptrCast(@alignCast(obj)) else null;
+    }
+
+    pub fn asMenu(self: *Window) ?*menu.MenuWindow {
+        if (self.vtable.kind != .menu) return null;
+        return if (self.object) |obj| @ptrCast(@alignCast(obj)) else null;
+    }
+
 };
 
 pub const Screen = struct {
@@ -133,11 +153,65 @@ pub const Screen = struct {
 
     pub fn deinit(self: *Screen) void {
         for (self.order.items) |w| {
+            self.destroyAttachedObject(w);
             self.allocator.destroy(w);
         }
         self.order.deinit(self.allocator);
         self.by_id.deinit(self.allocator);
         self.* = undefined;
+    }
+
+    /// Free the typed object hanging off `Window.object` (pw/qw/menu/tw).
+    fn destroyAttachedObject(self: *Screen, w: *Window) void {
+        const obj = w.object orelse return;
+        w.object = null;
+        switch (w.vtable.kind) {
+            .text => {
+                const tw_obj: *tw.TextWindow = @ptrCast(@alignCast(obj));
+                self.allocator.destroy(tw_obj);
+            },
+            .prompt => {
+                const pw_obj: *pw.PromptWindow = @ptrCast(@alignCast(obj));
+                pw_obj.deinit(self.allocator);
+                self.allocator.destroy(pw_obj);
+            },
+            .query => {
+                const qw_obj: *qw.QueryWindow = @ptrCast(@alignCast(obj));
+                qw_obj.deinit(self.allocator);
+                self.allocator.destroy(qw_obj);
+            },
+            .menu => {
+                const menu_obj: *menu.MenuWindow = @ptrCast(@alignCast(obj));
+                self.allocator.destroy(menu_obj);
+            },
+            .base => {},
+        }
+    }
+
+    /// Undo a partially constructed window (restore org height, no layout/callbacks).
+    fn abandonNewWindow(self: *Screen, w: *Window) void {
+        const give_back: u16 = if (w.h != 0) w.h else if (w.req_h != 0) w.req_h else self.desiredHeight(w);
+        if (w.org) |oid| {
+            if (self.get(oid)) |donor| {
+                const cur = if (donor.h != 0) donor.h else if (donor.req_h != 0) donor.req_h else self.desiredHeight(donor);
+                self.setHeight(donor, cur + give_back);
+            }
+        }
+        if (self.cur_id == w.id) self.cur_id = w.target orelse w.org orelse 0;
+        if (self.top_id == w.id) self.top_id = w.target orelse w.org orelse 0;
+        if (self.indexOf(w.id)) |idx| {
+            _ = self.order.orderedRemove(idx);
+        }
+        _ = self.by_id.remove(w.id);
+        self.destroyAttachedObject(w);
+        self.allocator.destroy(w);
+        if (self.order.items.len == 0) {
+            self.cur_id = 0;
+            self.top_id = 0;
+        } else {
+            if (self.get(self.cur_id) == null) self.cur_id = self.order.items[0].id;
+            if (self.get(self.top_id) == null) self.top_id = self.order.items[0].id;
+        }
     }
 
     pub fn usableHeight(self: *const Screen) u16 {
@@ -291,19 +365,69 @@ pub const Screen = struct {
     }
 
     pub fn createText(self: *Screen, after: ?WindowId, org: ?WindowId, height: u16) !*Window {
-        return self.createWindow(&tw.vtable, after, null, org, height, null);
+        const w = try self.createWindow(&tw.vtable, after, null, org, height, null);
+        errdefer self.abandonNewWindow(w);
+        const obj = try self.allocator.create(tw.TextWindow);
+        obj.* = .{ .parent = w };
+        w.object = obj;
+        return w;
     }
 
-    pub fn createPrompt(self: *Screen, after: WindowId, target: WindowId, org: WindowId, height: u16) !*Window {
-        return self.createWindow(&pw.vtable, after, target, org, height, null);
+    /// Create a prompt child and attach a `PromptWindow` — JOE `wmkpw` (height usually 1).
+    pub fn createPrompt(
+        self: *Screen,
+        after: WindowId,
+        target: WindowId,
+        org: WindowId,
+        height: u16,
+        prompt_text: []const u8,
+    ) !*Window {
+        const w = try self.createWindow(&pw.vtable, after, target, org, height, null);
+        errdefer self.abandonNewWindow(w);
+        const obj = try self.allocator.create(pw.PromptWindow);
+        errdefer self.allocator.destroy(obj);
+        obj.* = try pw.PromptWindow.init(self.allocator, w, prompt_text);
+        w.object = obj;
+        return w;
     }
 
-    pub fn createQuery(self: *Screen, after: WindowId, target: WindowId, org: WindowId, height: u16) !*Window {
-        return self.createWindow(&qw.vtable, after, target, org, height, null);
+    /// Create a query child and attach a `QueryWindow` — JOE `mkqw` family.
+    pub fn createQuery(
+        self: *Screen,
+        after: WindowId,
+        target: WindowId,
+        org: WindowId,
+        height: u16,
+        prompt_text: []const u8,
+        mode: qw.QueryMode,
+    ) !*Window {
+        const w = try self.createWindow(&qw.vtable, after, target, org, height, null);
+        errdefer self.abandonNewWindow(w);
+        const obj = try self.allocator.create(qw.QueryWindow);
+        errdefer self.allocator.destroy(obj);
+        obj.* = try qw.QueryWindow.init(self.allocator, w, prompt_text, mode);
+        // Prefer booked window height when caller overrides wrap estimate.
+        obj.org_h = height;
+        w.object = obj;
+        return w;
     }
 
-    pub fn createMenu(self: *Screen, after: WindowId, target: WindowId, org: WindowId, height: u16) !*Window {
-        return self.createWindow(&menu.vtable, after, target, org, height, null);
+    /// Create a menu child and attach a `MenuWindow` — JOE `mkmenu`.
+    pub fn createMenu(
+        self: *Screen,
+        after: WindowId,
+        target: WindowId,
+        org: WindowId,
+        height: u16,
+        items: []const []const u8,
+        cursor: usize,
+    ) !*Window {
+        const w = try self.createWindow(&menu.vtable, after, target, org, height, null);
+        errdefer self.abandonNewWindow(w);
+        const obj = try self.allocator.create(menu.MenuWindow);
+        obj.* = menu.MenuWindow.init(w, items, cursor);
+        w.object = obj;
+        return w;
     }
 
     /// Abort one window (and dependents) during `layout` without relayouting.
@@ -373,6 +497,7 @@ pub const Screen = struct {
                 _ = self.order.orderedRemove(idx);
             }
             _ = self.by_id.remove(kid);
+            self.destroyAttachedObject(node);
             self.allocator.destroy(node);
         }
 
@@ -702,6 +827,7 @@ pub const Screen = struct {
                 _ = self.order.orderedRemove(idx);
             }
             _ = self.by_id.remove(kid);
+            self.destroyAttachedObject(node);
             self.allocator.destroy(node);
         }
 
@@ -795,7 +921,7 @@ test "prompt child takes height from parent" {
 
     const twnd = try scr.createText(null, null, 24);
     scr.layout();
-    const prompt = try scr.createPrompt(twnd.id, twnd.id, twnd.id, 1);
+    const prompt = try scr.createPrompt(twnd.id, twnd.id, twnd.id, 1, "File: ");
     scr.layout();
     try testing.expect(prompt.target == twnd.id);
     try testing.expectEqual(twnd.id, prompt.main);
@@ -826,7 +952,7 @@ test "close returns space to org" {
 
     const twnd = try scr.createText(null, null, 24);
     scr.layout();
-    const prompt = try scr.createPrompt(twnd.id, twnd.id, twnd.id, 2);
+    const prompt = try scr.createPrompt(twnd.id, twnd.id, twnd.id, 2, "Replace with: ");
     scr.layout();
     try testing.expectEqual(@as(u16, 22), twnd.h);
     try scr.close(prompt.id);
@@ -997,7 +1123,7 @@ test "closing child does not transfer messages" {
 
     const twnd = try scr.createText(null, null, 24);
     scr.layout();
-    const prompt = try scr.createPrompt(twnd.id, twnd.id, twnd.id, 1);
+    const prompt = try scr.createPrompt(twnd.id, twnd.id, twnd.id, 1, "File: ");
     scr.layout();
     prompt.setMsgBot("child-msg");
     try scr.close(prompt.id);
@@ -1088,6 +1214,43 @@ test "layout aborts children to fit main" {
     }
     try testing.expect(child_n < 3);
     try testing.expectEqual(@as(u16, 8), main_w.h + child_h);
+}
+
+test "create helpers attach typed objects" {
+    var scr = try Screen.init(testing.allocator, 40, 24);
+    defer scr.deinit();
+
+    const twnd = try scr.createText(null, null, 24);
+    scr.layout();
+    try testing.expect(twnd.asText() != null);
+    try testing.expect(twnd.asText().?.parent == twnd);
+
+    const prompt = try scr.createPrompt(twnd.id, twnd.id, twnd.id, 1, "File: ");
+    scr.layout();
+    const pw_obj = prompt.asPrompt() orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("File: ", pw_obj.prompt);
+    try testing.expectEqual(twnd.id, pw_obj.target);
+    try testing.expect(prompt.asMenu() == null);
+
+    const query = try scr.createQuery(prompt.id, twnd.id, twnd.id, 1, "Kill (y,n,^C)?", .capture);
+    scr.layout();
+    const qw_obj = query.asQuery() orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("Kill (y,n,^C)?", qw_obj.prompt);
+    try testing.expect(qw_obj.mode == .capture);
+    try testing.expectEqual(@as(u16, 1), qw_obj.org_h);
+
+    const items = [_][]const u8{ "alpha", "beta", "gamma" };
+    const menu_w = try scr.createMenu(query.id, twnd.id, twnd.id, 2, &items, 1);
+    scr.layout();
+    const menu_obj = menu_w.asMenu() orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), menu_obj.cursor);
+    try testing.expectEqualStrings("beta", menu_obj.selected().?);
+    try testing.expectEqual(@as(usize, 3), menu_obj.grid.nitems);
+
+    // Closing must free attached objects without leaking under GPA.
+    try scr.close(menu_w.id);
+    try scr.close(query.id);
+    try scr.close(prompt.id);
 }
 
 test "vtable kinds resolve" {

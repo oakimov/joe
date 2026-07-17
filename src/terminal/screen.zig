@@ -205,6 +205,9 @@ pub const Screen = struct {
     height: u16,
     cursor_x: u16 = 0,
     cursor_y: u16 = 0,
+    /// Last position stored by `saveCursor` (logical tracking for `restoreCursor`).
+    saved_cursor_x: ?u16 = null,
+    saved_cursor_y: ?u16 = null,
     current_attr: Attribute = .none,
     /// Flat row-major grid: index = y * width + x
     cells: []Cell,
@@ -289,6 +292,104 @@ pub const Screen = struct {
     pub fn setCursor(self: *Screen, x: u16, y: u16) void {
         self.cursor_x = @min(x, self.width -| 1);
         self.cursor_y = @min(y, self.height -| 1);
+    }
+
+    fn appendRelative(
+        self: *Screen,
+        count: u16,
+        format: *const fn (terminfo.TermInfo, u16) ?[]const u8,
+        ansi_letter: u8,
+    ) !void {
+        if (count == 0) return;
+        if (self.terminfo) |ti| {
+            if (format(ti, count)) |seq| {
+                if (seq.len != 0) {
+                    try self.out.appendSlice(self.allocator, seq);
+                    return;
+                }
+            }
+        }
+        if (count == 1) {
+            try self.out.print(self.allocator, "\x1b[{c}", .{ansi_letter});
+        } else {
+            try self.out.print(self.allocator, "\x1b[{d}{c}", .{ count, ansi_letter });
+        }
+    }
+
+    /// Move cursor up by `count` rows (clamped). Emits CUU (terminfo `cuu`/`cuu1`
+    /// or ANSI `CSI n A`).
+    pub fn cursorUp(self: *Screen, count: u16) !void {
+        if (count == 0 or self.cursor_y == 0) return;
+        const actual = @min(count, self.cursor_y);
+        self.cursor_y -= actual;
+        try self.appendRelative(actual, terminfo.TermInfo.formatCuu, 'A');
+    }
+
+    /// Move cursor down by `count` rows (clamped). Emits CUD (terminfo `cud`/`cud1`
+    /// or ANSI `CSI n B`).
+    pub fn cursorDown(self: *Screen, count: u16) !void {
+        if (count == 0) return;
+        const max_y = self.height -| 1;
+        if (self.cursor_y >= max_y) return;
+        const actual = @min(count, max_y - self.cursor_y);
+        self.cursor_y += actual;
+        try self.appendRelative(actual, terminfo.TermInfo.formatCud, 'B');
+    }
+
+    /// Move cursor forward/right by `count` columns (clamped). Emits CUF
+    /// (terminfo `cuf`/`cuf1` or ANSI `CSI n C`).
+    pub fn cursorForward(self: *Screen, count: u16) !void {
+        if (count == 0) return;
+        const max_x = self.width -| 1;
+        if (self.cursor_x >= max_x) return;
+        const actual = @min(count, max_x - self.cursor_x);
+        self.cursor_x += actual;
+        try self.appendRelative(actual, terminfo.TermInfo.formatCuf, 'C');
+    }
+
+    /// Move cursor back/left by `count` columns (clamped). Emits CUB
+    /// (terminfo `cub`/`cub1` or ANSI `CSI n D`).
+    pub fn cursorBack(self: *Screen, count: u16) !void {
+        if (count == 0 or self.cursor_x == 0) return;
+        const actual = @min(count, self.cursor_x);
+        self.cursor_x -= actual;
+        try self.appendRelative(actual, terminfo.TermInfo.formatCub, 'D');
+    }
+
+    /// Relative move by signed deltas. Emits CUU/CUD/CUF/CUB for the clamped
+    /// distance actually traveled (no-op axes are skipped).
+    pub fn moveBy(self: *Screen, dx: i32, dy: i32) !void {
+        if (dy < 0) {
+            try self.cursorUp(@intCast(-dy));
+        } else if (dy > 0) {
+            try self.cursorDown(@intCast(dy));
+        }
+        if (dx < 0) {
+            try self.cursorBack(@intCast(-dx));
+        } else if (dx > 0) {
+            try self.cursorForward(@intCast(dx));
+        }
+    }
+
+    /// Save cursor position (logical + emit terminfo `sc` or ANSI DECSC `ESC 7`).
+    pub fn saveCursor(self: *Screen) !void {
+        self.saved_cursor_x = self.cursor_x;
+        self.saved_cursor_y = self.cursor_y;
+        const seq: ?[]const u8 = if (self.terminfo) |ti| ti.caps.sc else null;
+        try self.appendSeqOrAnsi(seq, "\x1b7");
+    }
+
+    /// Restore cursor position (logical from last `saveCursor` when known +
+    /// emit terminfo `rc` or ANSI DECRC `ESC 8`).
+    pub fn restoreCursor(self: *Screen) !void {
+        if (self.saved_cursor_x) |x| {
+            if (self.saved_cursor_y) |y| {
+                self.cursor_x = @min(x, self.width -| 1);
+                self.cursor_y = @min(y, self.height -| 1);
+            }
+        }
+        const seq: ?[]const u8 = if (self.terminfo) |ti| ti.caps.rc else null;
+        try self.appendSeqOrAnsi(seq, "\x1b8");
     }
 
     pub fn writeChar(self: *Screen, x: u16, y: u16, cp: u21, attr: Attribute) void {
@@ -956,4 +1057,92 @@ test "Screen.insertChars count one emits bare CSI @" {
     try testing.expectEqual(@as(u21, 'A'), screen.cells[1].cp);
     try testing.expectEqual(@as(u21, 'B'), screen.cells[2].cp);
     try testing.expect(std.mem.indexOf(u8, screen.takeOut(), "\x1b[@") != null);
+}
+
+test "Screen relative cursor CUU/CUD/CUF/CUB ANSI fallbacks" {
+    var screen = try Screen.init(testing.allocator, 10, 8);
+    defer screen.deinit();
+    try testing.expect(screen.terminfo == null);
+
+    screen.setCursor(5, 4);
+    try screen.cursorUp(2);
+    try testing.expectEqual(@as(u16, 5), screen.cursor_x);
+    try testing.expectEqual(@as(u16, 2), screen.cursor_y);
+    try testing.expect(std.mem.indexOf(u8, screen.takeOut(), "\x1b[2A") != null);
+    screen.clearOut();
+
+    try screen.cursorDown(3);
+    try testing.expectEqual(@as(u16, 5), screen.cursor_y);
+    try testing.expect(std.mem.indexOf(u8, screen.takeOut(), "\x1b[3B") != null);
+    screen.clearOut();
+
+    try screen.cursorForward(2);
+    try testing.expectEqual(@as(u16, 7), screen.cursor_x);
+    try testing.expect(std.mem.indexOf(u8, screen.takeOut(), "\x1b[2C") != null);
+    screen.clearOut();
+
+    try screen.cursorBack(4);
+    try testing.expectEqual(@as(u16, 3), screen.cursor_x);
+    try testing.expect(std.mem.indexOf(u8, screen.takeOut(), "\x1b[4D") != null);
+    screen.clearOut();
+
+    // count==1 uses bare CSI letter
+    try screen.cursorUp(1);
+    try testing.expectEqual(@as(u16, 4), screen.cursor_y);
+    try testing.expect(std.mem.indexOf(u8, screen.takeOut(), "\x1b[A") != null);
+}
+
+test "Screen relative cursor clamps and skips zero moves" {
+    var screen = try Screen.init(testing.allocator, 5, 4);
+    defer screen.deinit();
+
+    screen.setCursor(0, 0);
+    try screen.cursorUp(3);
+    try testing.expectEqual(@as(u16, 0), screen.cursor_y);
+    try testing.expectEqual(@as(usize, 0), screen.takeOut().len);
+
+    screen.setCursor(4, 3);
+    try screen.cursorDown(9);
+    try testing.expectEqual(@as(u16, 3), screen.cursor_y);
+    try testing.expectEqual(@as(usize, 0), screen.takeOut().len);
+
+    try screen.cursorForward(9);
+    try testing.expectEqual(@as(u16, 4), screen.cursor_x);
+    try testing.expectEqual(@as(usize, 0), screen.takeOut().len);
+
+    screen.setCursor(1, 1);
+    try screen.cursorBack(5); // only 1 column available
+    try testing.expectEqual(@as(u16, 0), screen.cursor_x);
+    try testing.expect(std.mem.indexOf(u8, screen.takeOut(), "\x1b[D") != null);
+}
+
+test "Screen.moveBy combines axes" {
+    var screen = try Screen.init(testing.allocator, 10, 10);
+    defer screen.deinit();
+    screen.setCursor(4, 4);
+    try screen.moveBy(-2, 3);
+    try testing.expectEqual(@as(u16, 2), screen.cursor_x);
+    try testing.expectEqual(@as(u16, 7), screen.cursor_y);
+    const out = screen.takeOut();
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[3B") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[2D") != null);
+}
+
+test "Screen.saveCursor and restoreCursor ANSI DECSC/DECRC" {
+    var screen = try Screen.init(testing.allocator, 10, 6);
+    defer screen.deinit();
+    try testing.expect(screen.terminfo == null);
+
+    screen.setCursor(3, 2);
+    try screen.saveCursor();
+    try testing.expectEqual(@as(?u16, 3), screen.saved_cursor_x);
+    try testing.expectEqual(@as(?u16, 2), screen.saved_cursor_y);
+    try testing.expect(std.mem.indexOf(u8, screen.takeOut(), "\x1b7") != null);
+    screen.clearOut();
+
+    screen.setCursor(8, 5);
+    try screen.restoreCursor();
+    try testing.expectEqual(@as(u16, 3), screen.cursor_x);
+    try testing.expectEqual(@as(u16, 2), screen.cursor_y);
+    try testing.expect(std.mem.indexOf(u8, screen.takeOut(), "\x1b8") != null);
 }

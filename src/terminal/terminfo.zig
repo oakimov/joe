@@ -57,6 +57,18 @@ pub const Caps = struct {
     dch: ?[:0]const u8 = null,
     ich1: ?[:0]const u8 = null,
     dch1: ?[:0]const u8 = null,
+    /// Relative cursor motion (`cuu`/`cud`/`cuf`/`cub`) and single-step variants.
+    cuu: ?[:0]const u8 = null,
+    cud: ?[:0]const u8 = null,
+    cuf: ?[:0]const u8 = null,
+    cub: ?[:0]const u8 = null,
+    cuu1: ?[:0]const u8 = null,
+    cud1: ?[:0]const u8 = null,
+    cuf1: ?[:0]const u8 = null,
+    cub1: ?[:0]const u8 = null,
+    /// Save / restore cursor position (`sc`/`rc`).
+    sc: ?[:0]const u8 = null,
+    rc: ?[:0]const u8 = null,
 };
 
 pub const TermInfo = struct {
@@ -111,6 +123,16 @@ pub const TermInfo = struct {
             .dch = presentStr("dch"),
             .ich1 = presentStr("ich1"),
             .dch1 = presentStr("dch1"),
+            .cuu = presentStr("cuu"),
+            .cud = presentStr("cud"),
+            .cuf = presentStr("cuf"),
+            .cub = presentStr("cub"),
+            .cuu1 = presentStr("cuu1"),
+            .cud1 = presentStr("cud1"),
+            .cuf1 = presentStr("cuf1"),
+            .cub1 = presentStr("cub1"),
+            .sc = presentStr("sc"),
+            .rc = presentStr("rc"),
         };
     }
 
@@ -231,6 +253,54 @@ pub const TermInfo = struct {
         if (count == 1) return self.caps.dch1;
         return null;
     }
+
+    /// Format cursor-up-n (`cuu`). Falls back to `cuu1` for count==1.
+    /// Returns null when neither cap works — caller should emit ANSI `CSI n A`.
+    pub fn formatCuu(self: TermInfo, count: u16) ?[]const u8 {
+        if (count == 0) return "";
+        if (self.caps.cuu) |fmt| {
+            const p = c.tiparm(fmt.ptr, @as(c_int, count)) orelse return null;
+            return std.mem.span(p);
+        }
+        if (count == 1) return self.caps.cuu1;
+        return null;
+    }
+
+    /// Format cursor-down-n (`cud`). Falls back to `cud1` for count==1.
+    /// Returns null when neither cap works — caller should emit ANSI `CSI n B`.
+    pub fn formatCud(self: TermInfo, count: u16) ?[]const u8 {
+        if (count == 0) return "";
+        if (self.caps.cud) |fmt| {
+            const p = c.tiparm(fmt.ptr, @as(c_int, count)) orelse return null;
+            return std.mem.span(p);
+        }
+        if (count == 1) return self.caps.cud1;
+        return null;
+    }
+
+    /// Format cursor-forward-n (`cuf`). Falls back to `cuf1` for count==1.
+    /// Returns null when neither cap works — caller should emit ANSI `CSI n C`.
+    pub fn formatCuf(self: TermInfo, count: u16) ?[]const u8 {
+        if (count == 0) return "";
+        if (self.caps.cuf) |fmt| {
+            const p = c.tiparm(fmt.ptr, @as(c_int, count)) orelse return null;
+            return std.mem.span(p);
+        }
+        if (count == 1) return self.caps.cuf1;
+        return null;
+    }
+
+    /// Format cursor-back-n (`cub`). Falls back to `cub1` for count==1.
+    /// Returns null when neither cap works — caller should emit ANSI `CSI n D`.
+    pub fn formatCub(self: TermInfo, count: u16) ?[]const u8 {
+        if (count == 0) return "";
+        if (self.caps.cub) |fmt| {
+            const p = c.tiparm(fmt.ptr, @as(c_int, count)) orelse return null;
+            return std.mem.span(p);
+        }
+        if (count == 1) return self.caps.cub1;
+        return null;
+    }
 };
 
 test "StrCap cancelled sentinel" {
@@ -291,4 +361,19 @@ test "TermInfo.init against current TERM" {
     if (ti.caps.dch != null or ti.caps.dch1 != null) {
         _ = ti.formatDch(1);
     }
+    // Soft-check relative cursor motion / save-restore when caps exist.
+    if (ti.caps.cuu != null or ti.caps.cuu1 != null) {
+        _ = ti.formatCuu(1);
+    }
+    if (ti.caps.cud != null or ti.caps.cud1 != null) {
+        _ = ti.formatCud(1);
+    }
+    if (ti.caps.cuf != null or ti.caps.cuf1 != null) {
+        _ = ti.formatCuf(1);
+    }
+    if (ti.caps.cub != null or ti.caps.cub1 != null) {
+        _ = ti.formatCub(1);
+    }
+    _ = ti.caps.sc;
+    _ = ti.caps.rc;
 }

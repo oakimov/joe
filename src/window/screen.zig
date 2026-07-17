@@ -293,6 +293,43 @@ pub const Screen = struct {
         return fit_min;
     }
 
+    /// Minimum height of a whole family — JOE `getminh`.
+    fn minHeight(self: *Screen, w: *Window) u16 {
+        const topw = self.findTopOfFamily(w);
+        var h: u16 = 0;
+        const start = self.indexOf(topw.id) orelse return self.minHeightThis(w);
+        var i: usize = start;
+        while (i < self.order.items.len) : (i += 1) {
+            const cur = self.order.items[i];
+            if (cur.main != topw.main) break;
+            h += self.minHeightThis(cur);
+        }
+        return h;
+    }
+
+    fn byteCols(text: []const u8) usize {
+        return text.len;
+    }
+
+    /// Height for a new query child — JOE `mkqw` `break_height`.
+    fn queryCreateHeight(self: *const Screen, prompt_text: []const u8) u16 {
+        const ph = qw.promptHeight(prompt_text, self.width, byteCols);
+        const h: u16 = @intCast(@min(ph, std.math.maxInt(u16)));
+        return if (h < 1) 1 else h;
+    }
+
+    /// Height for a new menu child — JOE `mkmenu` (≤60% of main, ≤ `mlines`).
+    fn menuCreateHeight(self: *Screen, main_id: WindowId, items: []const []const u8) u16 {
+        const main_w = self.get(main_id) orelse return 1;
+        const main_h: u16 = if (main_w.h != 0) main_w.h else self.desiredHeight(main_w);
+        var h: u16 = @intCast((@as(u32, main_h) * 60) / 100);
+        if (h < 1) h = 1;
+        const lines = menu.linesFor(items, self.width, byteCols);
+        if (lines > 0 and lines < h) h = @intCast(lines);
+        if (h < 1) h = 1;
+        return h;
+    }
+
     /// Create a window after `after` (or at end if null). `target == null` starts a family.
     /// `org` donates `height` rows when non-null.
     pub fn createWindow(
@@ -392,40 +429,45 @@ pub const Screen = struct {
     }
 
     /// Create a query child and attach a `QueryWindow` — JOE `mkqw` family.
+    /// Height comes from prompt wrap at screen width (`break_height`).
     pub fn createQuery(
         self: *Screen,
         after: WindowId,
         target: WindowId,
         org: WindowId,
-        height: u16,
         prompt_text: []const u8,
         mode: qw.QueryMode,
     ) !*Window {
+        const height = self.queryCreateHeight(prompt_text);
         const w = try self.createWindow(&qw.vtable, after, target, org, height, null);
         errdefer self.abandonNewWindow(w);
         const obj = try self.allocator.create(qw.QueryWindow);
         errdefer self.allocator.destroy(obj);
         obj.* = try qw.QueryWindow.init(self.allocator, w, prompt_text, mode);
-        // Prefer booked window height when caller overrides wrap estimate.
+        obj.org_w = self.width;
         obj.org_h = height;
         w.object = obj;
         return w;
     }
 
     /// Create a menu child and attach a `MenuWindow` — JOE `mkmenu`.
+    /// Height is `min(60% of main, mlines)` at create time.
     pub fn createMenu(
         self: *Screen,
         after: WindowId,
         target: WindowId,
         org: WindowId,
-        height: u16,
         items: []const []const u8,
         cursor: usize,
     ) !*Window {
+        const twnd = self.get(target) orelse return error.UnknownWindow;
+        const height = self.menuCreateHeight(twnd.main, items);
         const w = try self.createWindow(&menu.vtable, after, target, org, height, null);
         errdefer self.abandonNewWindow(w);
         const obj = try self.allocator.create(menu.MenuWindow);
         obj.* = menu.MenuWindow.init(w, items, cursor);
+        // Window.h is 0 until layout; seed menu geometry with the booked height.
+        obj.resize(self.width, height);
         w.object = obj;
         return w;
     }
@@ -705,8 +747,8 @@ pub const Screen = struct {
         if (set < fit_height) set = fit_height;
         for (self.order.items) |w| {
             if (w.target != null) continue;
-            // Approximate getminh for lone mains (no children booked via family scan)
-            const fam_min = self.minHeightThis(w); // children would add; ok for equalize scaffold
+            // JOE `getminh`: main + children mins so equalize leaves room for prompts/menus.
+            const fam_min = self.minHeight(w);
             if (fam_min >= set) self.setHeight(w, fit_min) else self.setHeight(w, set - (fam_min - fit_min));
             w.org = null;
         }
@@ -719,15 +761,11 @@ pub const Screen = struct {
         const focus_main = focus.main;
         for (self.order.items) |w| {
             if (w.target != null) continue;
-            const fam_extra = self.minHeightThis(w) -| fit_min;
-            if (w.main == focus_main) {
-                self.setHeight(w, self.usableHeight() - fam_extra);
-            } else {
-                self.setHeight(w, self.usableHeight() - fam_extra); // JOE sets every main huge then fit drops others
-            }
+            // JOE sets every main to (h-wind)-(getminh-FITMIN); fit then keeps cursor family.
+            const fam_extra = self.minHeight(w) -| fit_min;
+            self.setHeight(w, self.usableHeight() - fam_extra);
             w.org = null;
         }
-        // JOE sets every main to (h-wind)-(getminh-FITMIN); fit then keeps cursor family.
         self.cur_id = focus_main;
         self.top_id = self.findTopOfFamily(self.get(focus_main).?).id;
         self.layout();
@@ -1232,25 +1270,85 @@ test "create helpers attach typed objects" {
     try testing.expectEqual(twnd.id, pw_obj.target);
     try testing.expect(prompt.asMenu() == null);
 
-    const query = try scr.createQuery(prompt.id, twnd.id, twnd.id, 1, "Kill (y,n,^C)?", .capture);
+    const query = try scr.createQuery(prompt.id, twnd.id, twnd.id, "Kill (y,n,^C)?", .capture);
     scr.layout();
     const qw_obj = query.asQuery() orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("Kill (y,n,^C)?", qw_obj.prompt);
     try testing.expect(qw_obj.mode == .capture);
     try testing.expectEqual(@as(u16, 1), qw_obj.org_h);
+    try testing.expectEqual(@as(u16, 1), query.h);
+    try testing.expectEqual(@as(u16, 1), query.fixed);
 
     const items = [_][]const u8{ "alpha", "beta", "gamma" };
-    const menu_w = try scr.createMenu(query.id, twnd.id, twnd.id, 2, &items, 1);
+    const menu_w = try scr.createMenu(query.id, twnd.id, twnd.id, &items, 1);
     scr.layout();
     const menu_obj = menu_w.asMenu() orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(usize, 1), menu_obj.cursor);
     try testing.expectEqualStrings("beta", menu_obj.selected().?);
     try testing.expectEqual(@as(usize, 3), menu_obj.grid.nitems);
+    try testing.expectEqual(@as(u16, 1), menu_w.h); // 3 short labels fit one row
 
     // Closing must free attached objects without leaking under GPA.
     try scr.close(menu_w.id);
     try scr.close(query.id);
     try scr.close(prompt.id);
+}
+
+test "showAll accounts for family child minima" {
+    var scr = try Screen.init(testing.allocator, 80, 24);
+    defer scr.deinit();
+
+    const a = try scr.createText(null, null, 12);
+    const b = try scr.createText(a.id, null, 12);
+    scr.layout();
+    _ = try scr.createPrompt(a.id, a.id, a.id, 1, "Name: ");
+    scr.layout();
+
+    // Family A min = FITMIN(main)+1(prompt)=3; family B min = 2.
+    // Equal share set=12 ⇒ A becomes 11, B becomes 12; prompt keeps 1.
+    scr.showAll();
+    try testing.expectEqual(@as(u16, 11), a.h);
+    try testing.expectEqual(@as(u16, 12), b.h);
+    try testing.expectEqual(@as(u16, 24), a.h + b.h + 1);
+}
+
+test "createQuery wraps prompt height like mkqw" {
+    var scr = try Screen.init(testing.allocator, 10, 24);
+    defer scr.deinit();
+
+    const twnd = try scr.createText(null, null, 24);
+    scr.layout();
+    const prompt = "hello world again"; // wraps to 3 lines at width 10
+    const query = try scr.createQuery(twnd.id, twnd.id, twnd.id, prompt, .capture);
+    try testing.expectEqual(@as(u16, 3), query.h);
+    try testing.expectEqual(@as(u16, 3), query.fixed);
+    const qw_obj = query.asQuery().?;
+    try testing.expectEqual(@as(u16, 3), qw_obj.org_h);
+    try testing.expectEqual(@as(u16, 10), qw_obj.org_w);
+}
+
+test "createMenu height uses mlines capped at 60 percent" {
+    var scr = try Screen.init(testing.allocator, 80, 20);
+    defer scr.deinit();
+
+    const twnd = try scr.createText(null, null, 20);
+    scr.layout();
+    try testing.expectEqual(@as(u16, 20), twnd.h);
+
+    // Wide labels ⇒ one per row ⇒ mlines=40, then capped at 60% of main (12).
+    var bufs: [40][64]u8 = undefined;
+    var labels: [40][]const u8 = undefined;
+    for (0..40) |i| {
+        labels[i] = std.fmt.bufPrint(&bufs[i], "item-{d:0>40}", .{i}) catch unreachable;
+    }
+    const menu_w = try scr.createMenu(twnd.id, twnd.id, twnd.id, labels[0..], 0);
+    try testing.expectEqual(@as(u16, 12), menu_w.h); // 60% of 20
+    try testing.expectEqual(@as(u16, 12), menu_w.fixed);
+    try testing.expectEqual(@as(u16, 12), menu_w.asMenu().?.h);
+
+    const few = [_][]const u8{ "a", "b", "c" };
+    const small = try scr.createMenu(menu_w.id, twnd.id, twnd.id, &few, 0);
+    try testing.expectEqual(@as(u16, 1), small.h);
 }
 
 test "vtable kinds resolve" {

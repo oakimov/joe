@@ -2,15 +2,14 @@
 //!
 //! Loads enough of JOE `.jsf` for `conf.jsf` plus C-like keyword/call/mark paths:
 //! color classes (`=Name [+Parent…]`), states (`:name Color [context]`),
-//! transitions (`*` / `"chars"` → target with `noeat` / `recolor=-N`),
-//! `buffer` + `strings`/`istrings` keyword tables, local `.subr`/`.end` with
-//! `call=.name()` / `return`, `reset`, `mark`/`markend`/`recolormark`, and
-//! `\i`/`\c` character classes.
+//! transitions (`*` / `"chars"` / `&` / `%` → target with `noeat` / `recolor=-N`),
+//! `buffer` + `strings`/`istrings` keyword tables (including `"&"` delim),
+//! `save_c`/`save_s`/`push_c`/`push_s`/`pop_c`/`pop_s` delimiter match buffer+stack,
+//! local `.subr`/`.end` with `call=.name()` / `return`, `reset`,
+//! `mark`/`markend`/`recolormark`, and `\i`/`\c` character classes.
 //!
-//! Supports mark/markend/recolormark (preprocessor-style regions).
-//! Still missing: delimiter stack/`%`/`&`, external-file `call=file.subr()`,
-//! `.ifdef` params, `hold`, lattr cache. Fills per-byte attrs for `lgen`.
-//! Not wired into live `joe`.
+//! Still missing: external-file `call=file.subr()`, `.ifdef` params, `hold`,
+//! lattr cache. Fills per-byte attrs for `lgen`. Not wired into live `joe`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -21,8 +20,49 @@ pub const Attribute = terminal.Attribute;
 pub const Color = terminal.Color;
 
 const max_call_depth = 8;
+const max_delim_depth = 8;
 const max_buf_chars = 23; // JOE buffers leading 23 characters
+const max_saved_chars = 24; // save_c uses 2; save_s copies keyword buffer
 const max_codepoint_starts = 4096;
+
+const DelimBuf = struct {
+    len: u8 = 0,
+    data: [max_saved_chars]u8 = [_]u8{0} ** max_saved_chars,
+
+    fn slice(self: *const DelimBuf) []const u8 {
+        return self.data[0..self.len];
+    }
+
+    fn setBytes(self: *DelimBuf, bytes: []const u8) void {
+        const n: u8 = @intCast(@min(bytes.len, max_saved_chars));
+        if (n > 0) @memcpy(self.data[0..n], bytes[0..n]);
+        self.len = n;
+    }
+
+    fn setSaveC(self: *DelimBuf, cp: u21) void {
+        // JOE: saved_s = [pair_close(c), c, 0]
+        const open: u8 = if (cp <= 0x7f) @intCast(cp) else '?';
+        const close: u8 = switch (open) {
+            '<' => '>',
+            '(' => ')',
+            '[' => ']',
+            '{' => '}',
+            '`' => '\'',
+            else => open,
+        };
+        self.data[0] = close;
+        self.data[1] = open;
+        self.len = 2;
+    }
+
+    fn eql(self: *const DelimBuf, bytes: []const u8) bool {
+        return std.mem.eql(u8, self.slice(), bytes);
+    }
+
+    fn eqlIgnoreCase(self: *const DelimBuf, bytes: []const u8) bool {
+        return std.ascii.eqlIgnoreCase(self.slice(), bytes);
+    }
+};
 
 pub const HighlightState = struct {
     /// Index into the active syntax piece's `states`, or `-1` when disabled.
@@ -31,6 +71,11 @@ pub const HighlightState = struct {
     syn_id: u8 = 0,
     stack_depth: u8 = 0,
     frames: [max_call_depth]CallFrame = .{CallFrame{}} ** max_call_depth,
+    /// Current delimiter match buffer (JOE `saved_s`).
+    saved: DelimBuf = .{},
+    /// Delimiter stack depth (JOE `delim_stack`).
+    delim_depth: u8 = 0,
+    delim_stack: [max_delim_depth]DelimBuf = .{DelimBuf{}} ** max_delim_depth,
 
     pub const initial: HighlightState = .{};
     pub const disabled: HighlightState = .{ .state = -1 };
@@ -62,11 +107,18 @@ const Command = struct {
     start_mark: bool = false, // mark
     stop_mark: bool = false, // markend
     recolor_mark: bool = false, // recolormark
+    save_c: bool = false,
+    save_s: bool = false,
+    push_c: bool = false,
+    push_s: bool = false,
+    pop: bool = false, // pop_c or pop_s (identical)
     /// Local subroutine to invoke (owned by root `Syntax.subrs`).
     call: ?*const Syntax = null,
     /// Set during load for `call=.name()`; resolved to `call` after all pieces load.
     call_name: ?[]const u8 = null,
     keywords: []const Keyword = &.{},
+    /// `strings`/`istrings` entry `"&"` — match buffer against delimiter `saved`.
+    strings_delim: ?*Command = null,
     icase: bool = false,
 };
 
@@ -89,6 +141,10 @@ const State = struct {
     color: Attribute,
     context: Context = .none,
     dflt: ?Command = null,
+    /// `&` — opposite/matching delimiter (`saved[0]` from `save_c`).
+    delim: ?Command = null,
+    /// `%` — same delimiter (`saved[1]` from `save_c`).
+    same_delim: ?Command = null,
     transitions: []Transition,
 };
 
@@ -202,18 +258,15 @@ pub const Syntax = struct {
                 const state = &active.states[st_idx];
                 paintBytes(attrs, i, take, state.color);
 
-                var cmd = findCmd(state, cp) orelse Command{ .new_state = st_idx };
+                var cmd = findCmd(state, cp, &hs.saved) orelse Command{ .new_state = st_idx };
 
-                // Keyword / strings lookup against current buffer (before adding `cp`).
+                // Keyword / strings / strings-"&" lookup against current buffer (before adding `cp`).
                 var recolor_keyword = false;
-                if (cmd.keywords.len > 0) {
-                    if (lookupKeyword(cmd.keywords, buf[0..buf_len], cmd.icase)) |kw| {
-                        cmd = kw.cmd;
-                        recolor_keyword = true;
-                        // Matched string always implies noeat (JOE).
-                        cmd.noeat = true;
-                        if (cmd.recolor == 0) cmd.recolor = -1;
-                    }
+                if (matchStringsOrDelim(&cmd, buf[0..buf_len], &hs.saved)) {
+                    recolor_keyword = true;
+                    // Matched string always implies noeat (JOE).
+                    cmd.noeat = true;
+                    if (cmd.recolor == 0) cmd.recolor = -1;
                 }
 
                 // Call / return / reset / plain goto.
@@ -239,6 +292,7 @@ pub const Syntax = struct {
                         active = self.piece(hs.syn_id);
                     }
                 } else if (cmd.reset) {
+                    // JOE reset: return to root idle; call stack cleared; delimiter kept.
                     hs.syn_id = 0;
                     hs.stack_depth = 0;
                     hs.state = 0;
@@ -282,6 +336,9 @@ pub const Syntax = struct {
                         }
                     }
                 }
+
+                // Delimiter push/save/pop (JOE order: push, save_s, save_c, pop).
+                applyDelimOps(&hs, cmd, buf[0..buf_len], cp);
 
                 if (cmd.buffer) {
                     buffering = true;
@@ -335,16 +392,13 @@ pub const Syntax = struct {
                 if (hs.state < 0 or hs.state >= active.states.len) return .disabled;
                 const st_idx: usize = @intCast(hs.state);
                 const state = &active.states[st_idx];
-                var cmd = findCmd(state, cp) orelse Command{ .new_state = st_idx };
+                var cmd = findCmd(state, cp, &hs.saved) orelse Command{ .new_state = st_idx };
 
                 var recolor_keyword = false;
-                if (cmd.keywords.len > 0) {
-                    if (lookupKeyword(cmd.keywords, buf[0..buf_len], cmd.icase)) |kw| {
-                        cmd = kw.cmd;
-                        recolor_keyword = true;
-                        cmd.noeat = true;
-                        if (cmd.recolor == 0) cmd.recolor = -1;
-                    }
+                if (matchStringsOrDelim(&cmd, buf[0..buf_len], &hs.saved)) {
+                    recolor_keyword = true;
+                    cmd.noeat = true;
+                    if (cmd.recolor == 0) cmd.recolor = -1;
                 }
 
                 if (cmd.call) |callee| {
@@ -365,7 +419,10 @@ pub const Syntax = struct {
                         hs.state = @intCast(cmd.new_state);
                     }
                 } else if (cmd.reset) {
-                    hs = .{};
+                    // Keep delimiter buffer/stack across reset (JOE).
+                    hs.syn_id = 0;
+                    hs.stack_depth = 0;
+                    hs.state = 0;
                     active = self;
                 } else {
                     if (cmd.new_state >= active.states.len) return .disabled;
@@ -402,6 +459,13 @@ pub const Syntax = struct {
                         var j = byte_from;
                         while (j < byte_to and j < attrs.len) : (j += 1) attrs[j] = new_color;
                     }
+                }
+
+                applyDelimOps(&hs, cmd, buf[0..buf_len], cp);
+
+                if (cmd.buffer) {
+                    buffering = true;
+                    buf_len = 0;
                 }
 
                 if (cmd.start_mark) {
@@ -481,13 +545,61 @@ fn recolorPast(
     }
 }
 
-fn findCmd(state: *const State, cp: u21) ?Command {
+fn findCmd(state: *const State, cp: u21, saved: *const DelimBuf) ?Command {
+    // JOE: & matches saved_s[0] when saved is a 2-slot save_c buffer.
+    if (state.delim) |d| {
+        if (saved.len == 2 and cp == saved.data[0]) return d;
+    }
+    // JOE: % matches saved_s[1] (the original open char).
+    if (state.same_delim) |d| {
+        if (saved.len == 2 and saved.data[0] != 0 and cp == saved.data[1]) return d;
+    }
     for (state.transitions) |tr| {
         for (tr.ranges) |r| {
             if (r.contains(cp)) return tr.cmd;
         }
     }
     return state.dflt;
+}
+
+fn matchStringsOrDelim(cmd: *Command, buf: []const u8, saved: *const DelimBuf) bool {
+    // strings `"&"` — buffer equals delimiter match buffer.
+    if (cmd.strings_delim) |dptr| {
+        const hit = saved.len > 0 and if (cmd.icase) saved.eqlIgnoreCase(buf) else saved.eql(buf);
+        if (hit) {
+            cmd.* = dptr.*;
+            return true;
+        }
+    }
+    if (cmd.keywords.len > 0) {
+        if (lookupKeyword(cmd.keywords, buf, cmd.icase)) |kw| {
+            cmd.* = kw.cmd;
+            return true;
+        }
+    }
+    return false;
+}
+
+fn applyDelimOps(hs: *HighlightState, cmd: Command, buf: []const u8, cp: u21) void {
+    // Push current saved BEFORE save (JOE order).
+    if (cmd.push_c or cmd.push_s) {
+        if (hs.delim_depth < max_delim_depth) {
+            hs.delim_stack[hs.delim_depth] = hs.saved;
+            hs.delim_depth += 1;
+        }
+    }
+    if (cmd.save_s or cmd.push_s) {
+        hs.saved.setBytes(buf);
+    }
+    if (cmd.save_c or cmd.push_c) {
+        hs.saved.setSaveC(cp);
+    }
+    if (cmd.pop) {
+        if (hs.delim_depth > 0) {
+            hs.delim_depth -= 1;
+            hs.saved = hs.delim_stack[hs.delim_depth];
+        }
+    }
 }
 
 fn defaultClassColor(name: []const u8) Attribute {
@@ -755,7 +867,32 @@ fn parseTransitionOptions(
             }
             continue;
         }
-        // Skip unknown option token (hold, save_*, push_*, pop_*, …).
+        if (std.mem.startsWith(u8, s[i..], "save_c")) {
+            cmd.save_c = true;
+            i += "save_c".len;
+            continue;
+        }
+        if (std.mem.startsWith(u8, s[i..], "save_s")) {
+            cmd.save_s = true;
+            i += "save_s".len;
+            continue;
+        }
+        if (std.mem.startsWith(u8, s[i..], "push_c")) {
+            cmd.push_c = true;
+            i += "push_c".len;
+            continue;
+        }
+        if (std.mem.startsWith(u8, s[i..], "push_s")) {
+            cmd.push_s = true;
+            i += "push_s".len;
+            continue;
+        }
+        if (std.mem.startsWith(u8, s[i..], "pop_c") or std.mem.startsWith(u8, s[i..], "pop_s")) {
+            cmd.pop = true;
+            i += 5; // pop_c / pop_s
+            continue;
+        }
+        // Skip unknown option token (hold, …).
         while (i < s.len and s[i] != ' ' and s[i] != '\t' and s[i] != '#' and s[i] != '\n' and s[i] != '\r') : (i += 1) {}
     }
     return i;
@@ -977,9 +1114,19 @@ fn loadPiece(ctx: *LoadCtx, want_subr: ?[]const u8) LoadError!*Syntax {
 
         var ranges: []Interval = &.{};
         var is_default = false;
+        var is_delim = false;
+        var is_same_delim = false;
         i = skipWs(tline, i);
         if (i < tline.len and tline[i] == '*') {
             is_default = true;
+            i += 1;
+        } else if (i < tline.len and tline[i] == '&') {
+            // Bare `&` — opposite/matching delimiter (saved[0] from save_c).
+            is_delim = true;
+            i += 1;
+        } else if (i < tline.len and tline[i] == '%') {
+            // Bare `%` — same delimiter (saved[1] from save_c).
+            is_same_delim = true;
             i += 1;
         } else if (i < tline.len and tline[i] == '"') {
             const cl = try parseCharList(arena, tline, i);
@@ -1009,7 +1156,7 @@ fn loadPiece(ctx: *LoadCtx, want_subr: ?[]const u8) LoadError!*Syntax {
                 const tr2 = std.mem.trim(u8, raw2, " \t\r");
                 if (tr2.len == 0 or tr2[0] == '#') continue;
                 if (std.mem.eql(u8, tr2, "done")) break;
-                // Keyword line: "word" target [options]
+                // Keyword line: "word" target [options]; `"&"` matches delimiter buffer.
                 const qs = parseQuotedString(tr2, 0) catch return error.BadSyntax;
                 const tgt = parseIdent(tr2, qs.next) orelse return error.BadSyntax;
                 const tidx = name_to_idx.get(tgt.name) orelse return error.UnknownState;
@@ -1018,16 +1165,26 @@ fn loadPiece(ctx: *LoadCtx, want_subr: ?[]const u8) LoadError!*Syntax {
                 // String match implies noeat.
                 kcmd.noeat = true;
                 if (kcmd.recolor == 0) kcmd.recolor = -1;
-                try kws.append(arena, .{
-                    .word = try arena.dupe(u8, qs.str),
-                    .cmd = kcmd,
-                });
+                if (std.mem.eql(u8, qs.str, "&")) {
+                    const dptr = try arena.create(Command);
+                    dptr.* = kcmd;
+                    cmd.strings_delim = dptr;
+                } else {
+                    try kws.append(arena, .{
+                        .word = try arena.dupe(u8, qs.str),
+                        .cmd = kcmd,
+                    });
+                }
             }
             cmd.keywords = try kws.toOwnedSlice(arena);
         }
 
         if (is_default) {
             states[st_idx].dflt = cmd;
+        } else if (is_delim) {
+            states[st_idx].delim = cmd;
+        } else if (is_same_delim) {
+            states[st_idx].same_delim = cmd;
         } else {
             try per_state_trans[st_idx].append(arena, .{ .ranges = ranges, .cmd = cmd });
         }
@@ -1190,11 +1347,17 @@ pub fn load(allocator: Allocator, name: []const u8, source: []const u8) LoadErro
 fn bindCalls(syn: *Syntax, cache: *std.StringHashMap(*Syntax)) !void {
     for (syn.states) |*st| {
         if (st.dflt) |*d| bindCmd(d, cache);
+        if (st.delim) |*d| bindCmd(d, cache);
+        if (st.same_delim) |*d| bindCmd(d, cache);
         for (st.transitions) |*tr| {
             bindCmd(&tr.cmd, cache);
             for (tr.cmd.keywords) |*kw| {
                 bindCmd(@constCast(&kw.cmd), cache);
             }
+            if (tr.cmd.strings_delim) |dptr| bindCmd(dptr, cache);
+        }
+        if (st.dflt) |*d| {
+            if (d.strings_delim) |dptr| bindCmd(dptr, cache);
         }
     }
 }
@@ -1578,3 +1741,117 @@ test "markend without keyword still recolormarks unknown directive" {
     try testing.expect(Color.eql(attrs[2].fg, .{ .indexed = 5 }));
 }
 
+
+test "save_c and & close matching quote" {
+    // Python-like: open quote push_c/save_c; & closes with pop.
+    const src =
+        \\=Idle
+        \\=String
+        \\:idle Idle
+        \\  *    idle
+        \\  "'\""    string    recolor=-1 push_c
+        \\:string String string
+        \\  *    string
+        \\  &    idle    pop_c
+    ;
+    var syn = try load(testing.allocator, "quot", src);
+    defer syn.deinit();
+
+    var attrs: [32]Attribute = undefined;
+    const line = "'hi'";
+    const st = syn.parseLine(line, .initial, attrs[0..line.len]);
+    try testing.expect(Color.eql(attrs[0].fg, .{ .indexed = 3 }));
+    try testing.expect(Color.eql(attrs[1].fg, .{ .indexed = 3 }));
+    try testing.expect(Color.eql(attrs[2].fg, .{ .indexed = 3 }));
+    try testing.expect(Color.eql(attrs[3].fg, .{ .indexed = 3 }));
+    try testing.expectEqual(@as(i32, 0), st.state);
+    try testing.expectEqual(@as(u8, 0), st.delim_depth);
+}
+
+test "save_c and % match same delimiter" {
+    // Angled brackets so & and % differ: save_c '<' → saved=['>', '<'].
+    // '<' matches % (same); '>' matches & (opposite).
+    const src =
+        \\=Idle
+        \\=Regex
+        \\:idle Idle
+        \\  *    idle
+        \\  "<"    inmatch    save_c recolor=-1
+        \\:inmatch Regex
+        \\  *    inmatch
+        \\  %    still
+        \\  &    idle
+        \\:still Regex
+        \\  *    still
+        \\  &    idle
+    ;
+    var syn = try load(testing.allocator, "re2", src);
+    defer syn.deinit();
+    try testing.expect(syn.states[1].same_delim != null);
+    try testing.expect(syn.states[1].delim != null);
+
+    var attrs: [32]Attribute = undefined;
+    // Stop after second '<' — must be in `still` (index 2) via %.
+    var st = syn.parseLine("<a<", .initial, attrs[0..3]);
+    try testing.expectEqual(@as(i32, 2), st.state);
+    st = syn.parseLine("<a<a>", .initial, attrs[0..5]);
+    try testing.expectEqual(@as(i32, 0), st.state);
+}
+
+test "push_c and pop_c nest delimiter buffers" {
+    const src =
+        \\=Idle
+        \\=String
+        \\:idle Idle
+        \\  *    idle
+        \\  "'\""    string    recolor=-1 push_c
+        \\:string String string
+        \\  *    string
+        \\  &    idle    pop_c
+    ;
+    var syn = try load(testing.allocator, "nest", src);
+    defer syn.deinit();
+
+    var attrs: [32]Attribute = undefined;
+    // Nested different quotes: "a'b'c"
+    const line = "\"a'b'c\"";
+    const st = syn.parseLine(line, .initial, attrs[0..line.len]);
+    try testing.expectEqual(@as(i32, 0), st.state);
+    // Outer " ... " should all be String; inner quotes also String (nested push).
+    try testing.expect(Color.eql(attrs[0].fg, .{ .indexed = 3 }));
+    try testing.expect(Color.eql(attrs[2].fg, .{ .indexed = 3 }));
+    try testing.expect(Color.eql(attrs[4].fg, .{ .indexed = 3 }));
+    try testing.expect(Color.eql(attrs[6].fg, .{ .indexed = 3 }));
+    try testing.expectEqual(@as(u8, 0), st.delim_depth);
+}
+
+test "save_s and strings & match delimiter buffer" {
+    // Line1 buffers a word and save_s it; line2 buffers again and strings `"&"` hits.
+    const src =
+        \\=Idle
+        \\=Type
+        \\:idle Idle
+        \\  *    idle
+        \\  "\i"    word    recolor=-1 buffer
+        \\:word Idle
+        \\  *    idle    noeat save_s strings
+        \\  "&"    type
+        \\done
+        \\  "\c"    word
+        \\:type Type
+        \\  *    idle    noeat
+    ;
+    var syn = try load(testing.allocator, "save_s", src);
+    defer syn.deinit();
+    try testing.expect(syn.states[1].dflt != null);
+    try testing.expect(syn.states[1].dflt.?.strings_delim != null);
+
+    var attrs: [32]Attribute = undefined;
+    var st = syn.parseLine("ab", .initial, attrs[0..2]);
+    try testing.expect(st.saved.eql("ab"));
+    // Second line: buffer "ab" again; on terminator, strings `"&"` matches saved.
+    st = syn.parseLine("ab", st, attrs[0..2]);
+    try testing.expect(attrs[0].bold);
+    try testing.expect(Color.eql(attrs[0].fg, .{ .indexed = 4 }));
+    try testing.expectEqual(@as(i32, 0), st.state);
+}

@@ -780,11 +780,11 @@ The build is always working — start with a binary that compiles and runs, then
 - At this point: multi-window editing works
 
 ### Phase 6: Rendering (4-6 weeks) — IN PROGRESS
-- 🚧 `src/render/{root,lgen,gap,attr,syntax}.zig` — `lgen*` + `GapBuffer`/`Point` + per-byte `attr_buf` apply + Zig-native JSF subset DFA (`load`/`parseLine`/`stateAfterLines`; `conf.jsf` + keywords/`buffer`/`strings` + local `.subr` `call=`/`return` + `reset` + `\i`/`\c`); `TextWindow.buffer`/`syntax`/`line_attrs` + `paintBody` auto-fill; `zig build render-test` **27/27**; `window-test` **88/88**; still no mark/delimiter/`%`/`&`/external-file call/`lgen_view`/hybrid-B
+- 🚧 `src/render/{root,lgen,gap,attr,syntax}.zig` — `lgen*` + `GapBuffer`/`Point` + per-byte `attr_buf` apply + Zig-native JSF subset DFA (`load`/`parseLine`/`stateAfterLines`; `conf.jsf` + keywords/`buffer`/`strings` + local `.subr` `call=`/`return` + `reset` + mark/recolormark + `\i`/`\c`); `TextWindow.buffer`/`syntax`/`line_attrs` + `paintBody` auto-fill; `zig build render-test` **29/29**; `window-test` **88/88**; still no delimiter/`%`/`&`/external-file call/`lgen_view`/hybrid-B
 - ✅ `lgen` syntax `attr_buf` consumption (native Attribute rows; hybrid packed-int conversion via `fromHybridRow`)
 - ✅ Live JSF subset DFA → `attr_buf` fill (native `render/syntax.zig`; hybrid `syntax.parse` bridge still optional)
-- ✅ JSF deepen: keywords/`buffer`/`strings` + local `.subr` `call=`/`return` + `reset` + `\i`/`\c` (c.jsf-shaped slice tests)
-- ⬜ JSF deepen next: mark/recolormark, delimiter stack/`%`/`&`, external-file `call=`, `.ifdef` params, lattr-style state cache
+- ✅ JSF deepen: keywords/`buffer`/`strings` + local `.subr` `call=`/`return` + `reset` + `\i`/`\c` + `mark`/`markend`/`recolormark`
+- ⬜ JSF deepen next: delimiter stack/`%`/`&`, external-file `call=`, `.ifdef` params, lattr-style state cache
 - ⬜ `lgen_view` (full markdown viewmode)
 - ✅ Screen buffer diff + dirty-cell-only flush — redesign `Screen.flush` cell-diff + EL + within-line ICH/DCH magic + IL/DL scroll magic + combining slots + gated hybrid `scrn` swap landed (**default on**)
 - ⬜ Viewmode: table borders, link URLs, delimiter hiding, cursor mapping

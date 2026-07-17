@@ -1,14 +1,16 @@
 //! Zig-native JSF subset DFA → per-byte `attr_buf` fill (Phase 6).
 //!
-//! Loads enough of JOE `.jsf` for `conf.jsf` plus C-like keyword/call paths:
+//! Loads enough of JOE `.jsf` for `conf.jsf` plus C-like keyword/call/mark paths:
 //! color classes (`=Name [+Parent…]`), states (`:name Color [context]`),
 //! transitions (`*` / `"chars"` → target with `noeat` / `recolor=-N`),
 //! `buffer` + `strings`/`istrings` keyword tables, local `.subr`/`.end` with
-//! `call=.name()` / `return`, `reset`, and `\i`/`\c` character classes.
+//! `call=.name()` / `return`, `reset`, `mark`/`markend`/`recolormark`, and
+//! `\i`/`\c` character classes.
 //!
-//! Still missing: mark/recolormark, delimiter stack/`%`/`&`, external-file
-//! `call=file.subr()`, `.ifdef` params, `hold`, lattr cache. Fills per-byte
-//! attrs for `lgen`. Not wired into live `joe`.
+//! Supports mark/markend/recolormark (preprocessor-style regions).
+//! Still missing: delimiter stack/`%`/`&`, external-file `call=file.subr()`,
+//! `.ifdef` params, `hold`, lattr cache. Fills per-byte attrs for `lgen`.
+//! Not wired into live `joe`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -57,6 +59,9 @@ const Command = struct {
     buffer: bool = false,
     rtn: bool = false,
     reset: bool = false,
+    start_mark: bool = false, // mark
+    stop_mark: bool = false, // markend
+    recolor_mark: bool = false, // recolormark
     /// Local subroutine to invoke (owned by root `Syntax.subrs`).
     call: ?*const Syntax = null,
     /// Set during load for `call=.name()`; resolved to `call` after all pieces load.
@@ -160,6 +165,10 @@ pub const Syntax = struct {
         var buf: [max_buf_chars + 1]u8 = undefined;
         var buf_len: usize = 0;
         var buffering = false;
+        // JOE mark offsets (codepoints back from current); line-local only.
+        var mark1: usize = 0;
+        var mark2: usize = 0;
+        var mark_en = false;
 
         var i: usize = 0;
         var cp_byte_start: [max_codepoint_starts]usize = undefined;
@@ -260,9 +269,33 @@ pub const Syntax = struct {
                     recolorPast(attrs, line, cp_byte_start[0..cp_count], cp_count, n, new_color);
                 }
 
+                if (cmd.recolor_mark and mark1 > mark2 and cp_count > 0) {
+                    // JOE: for x=-mark1; x<-mark2; ++x → codepoints [cp_count-mark1, cp_count-mark2).
+                    const from_cp = if (mark1 >= cp_count) 0 else cp_count - mark1;
+                    const to_cp = if (mark2 >= cp_count) cp_count else cp_count - mark2;
+                    if (from_cp < to_cp) {
+                        const byte_from = cp_byte_start[from_cp];
+                        const byte_to = if (to_cp < cp_count) cp_byte_start[to_cp] else i + take;
+                        var j = byte_from;
+                        while (j < byte_to and j < attrs.len) : (j += 1) {
+                            attrs[j] = new_color;
+                        }
+                    }
+                }
+
                 if (cmd.buffer) {
                     buffering = true;
                     buf_len = 0;
+                }
+
+                if (cmd.start_mark) {
+                    mark1 = 1;
+                    mark2 = 1;
+                    mark_en = true;
+                }
+                if (cmd.stop_mark) {
+                    mark_en = false;
+                    mark2 = 1;
                 }
 
                 if (cmd.noeat) {
@@ -283,11 +316,109 @@ pub const Syntax = struct {
                 }
             }
 
+            // Update mark pointers after eating this codepoint.
+            mark1 += 1;
+            if (!mark_en) mark2 += 1;
+
             i += take;
         }
 
-        // Implicit newline feed for state only.
-        hs = feedNewline(self, hs);
+        // Implicit `\n` feed: updates state and may recolor/markend (JOE parses through newline).
+        // Does not paint a new attr slot — line attrs exclude the newline byte.
+        {
+            const cp: u21 = '\n';
+            var iters: usize = 0;
+            var ate = false;
+            while (!ate) : (iters += 1) {
+                if (iters > 64) return .disabled;
+                active = self.piece(hs.syn_id);
+                if (hs.state < 0 or hs.state >= active.states.len) return .disabled;
+                const st_idx: usize = @intCast(hs.state);
+                const state = &active.states[st_idx];
+                var cmd = findCmd(state, cp) orelse Command{ .new_state = st_idx };
+
+                var recolor_keyword = false;
+                if (cmd.keywords.len > 0) {
+                    if (lookupKeyword(cmd.keywords, buf[0..buf_len], cmd.icase)) |kw| {
+                        cmd = kw.cmd;
+                        recolor_keyword = true;
+                        cmd.noeat = true;
+                        if (cmd.recolor == 0) cmd.recolor = -1;
+                    }
+                }
+
+                if (cmd.call) |callee| {
+                    if (hs.stack_depth >= max_call_depth) return .disabled;
+                    hs.frames[hs.stack_depth] = .{ .ret_state = @intCast(cmd.new_state), .ret_syn = hs.syn_id };
+                    hs.stack_depth += 1;
+                    hs.syn_id = self.synIdOf(callee) orelse return .disabled;
+                    hs.state = 0;
+                    active = callee;
+                } else if (cmd.rtn) {
+                    if (hs.stack_depth > 0) {
+                        hs.stack_depth -= 1;
+                        const fr = hs.frames[hs.stack_depth];
+                        hs.syn_id = fr.ret_syn;
+                        hs.state = fr.ret_state;
+                        active = self.piece(hs.syn_id);
+                    } else {
+                        hs.state = @intCast(cmd.new_state);
+                    }
+                } else if (cmd.reset) {
+                    hs = .{};
+                    active = self;
+                } else {
+                    if (cmd.new_state >= active.states.len) return .disabled;
+                    hs.state = @intCast(cmd.new_state);
+                }
+
+                if (hs.state < 0 or hs.state >= active.states.len) return .disabled;
+                const new_color = active.states[@intCast(hs.state)].color;
+
+                if (recolor_keyword and buf_len > 0 and cp_count > 0) {
+                    const n = buf_len;
+                    const end_cp = cp_count; // no current painted cp for newline
+                    const from_cp = if (n >= end_cp) 0 else end_cp - n;
+                    const byte_from = cp_byte_start[from_cp];
+                    const byte_to = line.len;
+                    var j = byte_from;
+                    while (j < byte_to and j < attrs.len) : (j += 1) attrs[j] = new_color;
+                }
+
+                if (cmd.recolor < 0 and cp_count > 0) {
+                    const n: usize = @intCast(-cmd.recolor);
+                    // recolorPast includes the last codepoint; for newline feed, last is final line cp.
+                    recolorPast(attrs, line, cp_byte_start[0..cp_count], cp_count, n, new_color);
+                }
+
+                if (cmd.recolor_mark and mark1 > mark2 and cp_count > 0) {
+                    // No current char slot: treat mark2 relative to one-past-last.
+                    // After all chars eaten, mark1/mark2 already advanced. Recolor [cp_count-mark1, cp_count-mark2).
+                    const from_cp = if (mark1 >= cp_count) 0 else cp_count - mark1;
+                    const to_cp = if (mark2 >= cp_count) cp_count else cp_count - mark2;
+                    if (from_cp < to_cp) {
+                        const byte_from = cp_byte_start[from_cp];
+                        const byte_to = if (to_cp < cp_count) cp_byte_start[to_cp] else line.len;
+                        var j = byte_from;
+                        while (j < byte_to and j < attrs.len) : (j += 1) attrs[j] = new_color;
+                    }
+                }
+
+                if (cmd.start_mark) {
+                    mark1 = 1;
+                    mark2 = 1;
+                    mark_en = true;
+                }
+                if (cmd.stop_mark) {
+                    mark_en = false;
+                    mark2 = 1;
+                }
+
+                if (cmd.noeat) continue;
+                ate = true;
+            }
+        }
+
         return hs;
     }
 
@@ -317,6 +448,7 @@ fn lookupKeyword(kws: []const Keyword, word: []const u8, icase: bool) ?Keyword {
     }
     return null;
 }
+
 
 fn paintBytes(attrs: []Attribute, start: usize, len: usize, color: Attribute) void {
     var j = start;
@@ -356,54 +488,6 @@ fn findCmd(state: *const State, cp: u21) ?Command {
         }
     }
     return state.dflt;
-}
-
-fn feedNewline(root: *const Syntax, start: HighlightState) HighlightState {
-    // Feed a synthetic `\n` through the DFA (state only; attrs ignored).
-    var hs = start;
-    var active = root.piece(hs.syn_id);
-    if (hs.state < 0 or hs.state >= active.states.len) return .disabled;
-
-    const cp: u21 = '\n';
-    var iters: usize = 0;
-    const max_iters = 64;
-    var ate = false;
-    while (!ate) : (iters += 1) {
-        if (iters > max_iters) return .disabled;
-        active = root.piece(hs.syn_id);
-        if (hs.state < 0 or hs.state >= active.states.len) return .disabled;
-        const st_idx: usize = @intCast(hs.state);
-        const state = &active.states[st_idx];
-        const cmd = findCmd(state, cp) orelse Command{ .new_state = st_idx };
-
-        if (cmd.call) |callee| {
-            if (hs.stack_depth >= max_call_depth) return .disabled;
-            hs.frames[hs.stack_depth] = .{
-                .ret_state = @intCast(cmd.new_state),
-                .ret_syn = hs.syn_id,
-            };
-            hs.stack_depth += 1;
-            hs.syn_id = root.synIdOf(callee) orelse return .disabled;
-            hs.state = 0;
-        } else if (cmd.rtn) {
-            if (hs.stack_depth > 0) {
-                hs.stack_depth -= 1;
-                const fr = hs.frames[hs.stack_depth];
-                hs.syn_id = fr.ret_syn;
-                hs.state = fr.ret_state;
-            } else {
-                hs.state = @intCast(cmd.new_state);
-            }
-        } else if (cmd.reset) {
-            hs = .{};
-        } else {
-            hs.state = @intCast(cmd.new_state);
-        }
-
-        if (cmd.noeat) continue;
-        ate = true;
-    }
-    return hs;
 }
 
 fn defaultClassColor(name: []const u8) Attribute {
@@ -626,6 +710,21 @@ fn parseTransitionOptions(
             i += "reset".len;
             continue;
         }
+        if (std.mem.startsWith(u8, s[i..], "recolormark")) {
+            cmd.recolor_mark = true;
+            i += "recolormark".len;
+            continue;
+        }
+        if (std.mem.startsWith(u8, s[i..], "markend")) {
+            cmd.stop_mark = true;
+            i += "markend".len;
+            continue;
+        }
+        if (std.mem.startsWith(u8, s[i..], "mark")) {
+            cmd.start_mark = true;
+            i += "mark".len;
+            continue;
+        }
         if (std.mem.startsWith(u8, s[i..], "istrings")) {
             cmd.icase = true;
             i += "istrings".len;
@@ -656,7 +755,7 @@ fn parseTransitionOptions(
             }
             continue;
         }
-        // Skip unknown option token (mark, markend, recolormark, hold, save_*, push_*, pop_*).
+        // Skip unknown option token (hold, save_*, push_*, pop_*, …).
         while (i < s.len and s[i] != ' ' and s[i] != '\t' and s[i] != '#' and s[i] != '\n' and s[i] != '\r') : (i += 1) {}
     }
     return i;
@@ -1395,5 +1494,87 @@ test "c.jsf-shaped slice: keywords plus local slash subr" {
     const slash = std.mem.indexOfScalar(u8, line, '/') orelse return error.TestUnexpectedResult;
     try testing.expect(attrs[slash].dim or Color.eql(attrs[slash].fg, .{ .indexed = 2 }));
     try testing.expect(attrs[slash + 1].dim or Color.eql(attrs[slash + 1].fg, .{ .indexed = 2 }));
+}
+
+test "mark+recolormark colors preprocessor directive" {
+    // Mirrors c.jsf :first/# → :pre → :preident + strings path (no call/ifdef).
+    const src =
+        \\=Idle
+        \\=Preproc
+        \\=Define
+        \\=Precond
+        \\:reset Idle
+        \\  *    first    noeat
+        \\  " \t"    reset
+        \\:first Idle
+        \\  *    idle    noeat
+        \\  "#"    pre    mark
+        \\:pre Preproc
+        \\  *    preproc    noeat
+        \\  " \t"    pre
+        \\  "a-z"    preident    recolor=-1 buffer
+        \\:preident Preproc
+        \\  *    preproc    noeat markend recolormark strings
+        \\  "define"    predef    markend recolormark
+        \\  "ifdef"    precond    markend recolormark
+        \\done
+        \\  "a-z"    preident
+        \\:predef Define
+        \\  *    predef
+        \\  "\n"    reset
+        \\:precond Precond
+        \\  *    preproc    noeat
+        \\:preproc Preproc
+        \\  *    preproc
+        \\  "\n"    reset
+        \\:idle Idle
+        \\  *    idle
+        \\  "\n"    reset
+    ;
+    var syn = try load(testing.allocator, "pre", src);
+    defer syn.deinit();
+
+    var attrs: [64]Attribute = undefined;
+    const line = "#define FOO";
+    _ = syn.parseLine(line, .initial, attrs[0..line.len]);
+    // Entire "#define" should be Define/Preproc colored (bold indexed 5).
+    try testing.expect(attrs[0].bold);
+    try testing.expect(Color.eql(attrs[0].fg, .{ .indexed = 5 }));
+    try testing.expect(Color.eql(attrs[6].fg, .{ .indexed = 5 })); // 'e' of define
+}
+
+test "markend without keyword still recolormarks unknown directive" {
+    const src =
+        \\=Idle
+        \\=Preproc
+        \\:first Idle
+        \\  *    idle    noeat
+        \\  "#"    pre    mark
+        \\:pre Preproc
+        \\  *    preproc    noeat
+        \\  "a-z"    preident    recolor=-1 buffer
+        \\:preident Preproc
+        \\  *    preproc    noeat markend recolormark strings
+        \\  "define"    predef    markend recolormark
+        \\done
+        \\  "a-z"    preident
+        \\:predef Preproc
+        \\  *    preproc    noeat
+        \\:preproc Preproc
+        \\  *    preproc
+        \\  "\n"    idle
+        \\:idle Idle
+        \\  *    idle
+    ;
+    var syn = try load(testing.allocator, "pre2", src);
+    defer syn.deinit();
+
+    var attrs: [32]Attribute = undefined;
+    const line = "#pragma";
+    _ = syn.parseLine(line, .initial, attrs[0..line.len]);
+    // Unknown directive: mark region recolored with Preproc on default strings miss.
+    try testing.expect(attrs[0].bold);
+    try testing.expect(Color.eql(attrs[0].fg, .{ .indexed = 5 }));
+    try testing.expect(Color.eql(attrs[2].fg, .{ .indexed = 5 }));
 }
 

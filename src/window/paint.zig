@@ -212,6 +212,31 @@ pub fn paintLinum(term: *TermScreen, x: u16, y: i16, lincols: u16, line_1based: 
     }
 }
 
+/// Highlight state at the start of `line_idx` by parsing prior lines.
+fn syntaxStateAtLine(t: *const tw.TextWindow, syn: *const render.Syntax, line_idx: u64) render.HighlightState {
+    var st = syn.initialState();
+    if (line_idx == 0) return st;
+    var walk_attrs: [4096]Attribute = undefined;
+    var scratch: [4096]u8 = undefined;
+    var prior: u64 = 0;
+    while (prior < line_idx) : (prior += 1) {
+        const prev: []const u8 = blk: {
+            if (t.buffer) |buf| {
+                const n = buf.copyLine(prior, &scratch);
+                break :blk scratch[0..n];
+            }
+            break :blk t.bodyLine(prior) orelse "";
+        };
+        if (prev.len > walk_attrs.len) {
+            st = syn.parseLine(prev[0..walk_attrs.len], st, walk_attrs[0..]);
+        } else {
+            st = syn.parseLine(prev, st, walk_attrs[0..prev.len]);
+        }
+        if (st.isDisabled()) return st;
+    }
+    return st;
+}
+
 /// Text-body paint (bwgen-shaped): optional linums + `render.lgen*`.
 /// Prefers live `TextWindow.buffer` (`lgenPoint` walk); falls back to stub
 /// `body_lines` (`lgenLine`). No syntax/viewmode/mark yet. `offset` is a
@@ -241,17 +266,41 @@ pub fn paintBody(term: *TermScreen, t: *const tw.TextWindow, attr: Attribute) vo
             continue;
         }
 
+        var attr_row_buf: [4096]Attribute = undefined;
+        var line_scratch: [4096]u8 = undefined;
+        const line_text: ?[]const u8 = blk: {
+            if (t.buffer) |buf| {
+                const n = buf.copyLine(line_idx, &line_scratch);
+                break :blk line_scratch[0..n];
+            }
+            break :blk t.bodyLine(line_idx);
+        };
+
+        var attrs: ?[]const Attribute = t.lineAttrRow(line_idx);
+        if (attrs == null) {
+            if (t.syntax) |syn| {
+                if (line_text) |lt| {
+                    const st = syntaxStateAtLine(t, syn, line_idx);
+                    if (!st.isDisabled()) {
+                        const use_len = @min(lt.len, attr_row_buf.len);
+                        _ = syn.parseLine(lt[0..use_len], st, attr_row_buf[0..use_len]);
+                        attrs = attr_row_buf[0..use_len];
+                    }
+                }
+            }
+        }
+
         const opts: render.Options = .{
             .tab = t.tab,
             .offset = t.offset,
-            .attrs = t.lineAttrRow(line_idx),
+            .attrs = attrs,
         };
         if (t.buffer) |buf| {
-            var p = render.Point.bof(buf);
-            p.gotoLine(line_idx);
-            _ = render.lgenPoint(term, t.x, sy, t.w, &p, opts, attr);
+            var pt = render.Point.bof(buf);
+            pt.gotoLine(line_idx);
+            _ = render.lgenPoint(term, t.x, sy, t.w, &pt, opts, attr);
         } else {
-            const text = t.bodyLine(line_idx) orelse {
+            const text = line_text orelse {
                 clearWinEol(term, t.x, row_y, t.w, attr);
                 continue;
             };
@@ -786,6 +835,42 @@ test "paintBody applies line_attrs from syntax attr_buf rows" {
     try testing.expect(terminal.Color.eql(cellAt(&term, t.x, @intCast(t.y)).attr.fg, .{ .indexed = 2 }));
     try testing.expectEqual(@as(u21, 'b'), cellAt(&term, t.x + 1, @intCast(t.y)).cp);
     try testing.expect(cellAt(&term, t.x + 1, @intCast(t.y)).attr.bold);
+}
+
+
+test "paintBody fills attrs from live Syntax JSF" {
+    const src =
+        \\=Idle
+        \\=Comment
+        \\:idle Idle
+        \\  *    idle
+        \\  "#"    comment    recolor=-1
+        \\:comment Comment comment
+        \\  *    comment
+        \\  "\n"    idle
+    ;
+    var syn = try render.loadSyntax(testing.allocator, "mini", src);
+    defer syn.deinit();
+
+    var scr = try screen.Screen.init(testing.allocator, 20, 5);
+    defer scr.deinit();
+    const win = try scr.createText(null, null, 4);
+    scr.layout();
+    const t = win.asText().?;
+    const lines = [_][]const u8{"# hi", "x"};
+    t.body_lines = &lines;
+    t.syntax = &syn;
+
+    var term = try TermScreen.init(testing.allocator, 20, 5);
+    defer term.deinit();
+    paintBody(&term, t, .none);
+
+    // '#' and following comment chars should not be plain .none — comment color applied.
+    const c0 = cellAt(&term, t.x, @intCast(t.y));
+    try testing.expectEqual(@as(u21, '#'), c0.cp);
+    try testing.expect(c0.attr.dim or terminal.Color.eql(c0.attr.fg, .{ .indexed = 2 }));
+    const c1 = cellAt(&term, t.x, @intCast(t.y + 1));
+    try testing.expectEqual(@as(u21, 'x'), c1.cp);
 }
 
 test "paintBody clears content when no stub lines" {

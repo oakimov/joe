@@ -116,7 +116,22 @@ pub const GapBuffer = struct {
         self.gap_end += take;
     }
 
-    /// Copy logical contents into a new slice (caller frees).
+    /// Copy bytes of 0-based `line` into `out` (no trailing newline). Returns length.
+    pub fn copyLine(self: *const GapBuffer, line: u64, out: []u8) usize {
+        var p = Point.bof(@constCast(self));
+        p.gotoLine(line);
+        var n: usize = 0;
+        while (p.peekb()) |b| {
+            if (b == '\n' or b == '\r') break;
+            if (n >= out.len) break;
+            out[n] = b;
+            n += 1;
+            p.byte += 1;
+        }
+        return n;
+    }
+
+        /// Copy logical contents into a new slice (caller frees).
     pub fn snapshot(self: *const GapBuffer, allocator: Allocator) ![]u8 {
         const out = try allocator.alloc(u8, self.len());
         var i: usize = 0;

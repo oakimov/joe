@@ -55,7 +55,11 @@ pub const TextWindow = struct {
     buffer: ?*render.GapBuffer = null,
     /// Optional per-line per-byte syntax attrs (JOE `attr_buf` rows).
     /// Index matches buffer/`body_lines` line index. Borrowed; tests-only.
+    /// When set, takes precedence over live `syntax` fill.
     line_attrs: ?[]const []const terminal.Attribute = null,
+    /// Optional Zig-native JSF syntax (Phase 6). When set and `line_attrs` is
+    /// null, `paintBody` runs `syntax.parseLine` to fill attrs.
+    syntax: ?*render.Syntax = null,
     /// First visible buffer line — JOE `bw->top->line`.
     top_line: u64 = 0,
     /// Horizontal scroll in display columns — JOE `bw->offset`.

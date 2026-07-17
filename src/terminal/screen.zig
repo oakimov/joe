@@ -145,6 +145,27 @@ fn isCombining(cp: u21) bool {
         or (cp >= 0xE0100 and cp <= 0xE01EF);
 }
 
+fn decimalDigits(n: u16) usize {
+    if (n >= 10000) return 5;
+    if (n >= 1000) return 4;
+    if (n >= 100) return 3;
+    if (n >= 10) return 2;
+    return 1;
+}
+
+/// Byte length of ANSI CUU/CUD/CUF/CUB for `count` (matches `appendRelative` fallback).
+fn ansiRelativeLen(count: u16) usize {
+    if (count == 0) return 0;
+    if (count == 1) return 3; // CSI X
+    return 2 + decimalDigits(count) + 1; // CSI n X
+}
+
+/// Byte length of ANSI CUP for 0-based `(x, y)` (matches `appendCup` fallback).
+fn ansiCupLen(x: u16, y: u16) usize {
+    // CSI {y+1} ; {x+1} H
+    return 2 + decimalDigits(y + 1) + 1 + decimalDigits(x + 1) + 1;
+}
+
 fn isWide(cp: u21) bool {
     // Compact East Asian Wide / Fullwidth / emoji presentation ranges.
     return (cp >= 0x1100 and cp <= 0x115F) // Hangul Jamo
@@ -368,6 +389,139 @@ pub const Screen = struct {
             try self.cursorBack(@intCast(-dx));
         } else if (dx > 0) {
             try self.cursorForward(@intCast(dx));
+        }
+    }
+
+    fn relativeAxisCost(
+        self: *const Screen,
+        count: u16,
+        format: *const fn (terminfo.TermInfo, u16) ?[]const u8,
+    ) usize {
+        if (count == 0) return 0;
+        if (self.terminfo) |ti| {
+            if (format(ti, count)) |seq| {
+                if (seq.len != 0) return seq.len;
+            }
+        }
+        return ansiRelativeLen(count);
+    }
+
+    /// Cost of CUU/CUD + CUF/CUB from `(from_x, from_y)` to `(to_x, to_y)`.
+    /// Mirrors JOE `relcost` for the simple relative-motion subset (no tabs).
+    fn relativeMoveCost(self: *const Screen, from_x: u16, from_y: u16, to_x: u16, to_y: u16) usize {
+        var cost: usize = 0;
+        if (to_y > from_y) {
+            cost += self.relativeAxisCost(to_y - from_y, terminfo.TermInfo.formatCud);
+        } else if (to_y < from_y) {
+            cost += self.relativeAxisCost(from_y - to_y, terminfo.TermInfo.formatCuu);
+        }
+        if (to_x > from_x) {
+            cost += self.relativeAxisCost(to_x - from_x, terminfo.TermInfo.formatCuf);
+        } else if (to_x < from_x) {
+            cost += self.relativeAxisCost(from_x - to_x, terminfo.TermInfo.formatCub);
+        }
+        return cost;
+    }
+
+    fn cupMoveCost(self: *const Screen, x: u16, y: u16) usize {
+        if (self.terminfo) |ti| {
+            if (ti.formatCup(x, y)) |seq| {
+                if (seq.len != 0) return seq.len;
+            }
+        }
+        return ansiCupLen(x, y);
+    }
+
+    /// Home sequence cost/emit helper: prefer terminfo `cup(0,0)`, else ANSI `CSI H`.
+    fn homeMoveCost(self: *const Screen) usize {
+        if (self.terminfo) |ti| {
+            if (ti.formatCup(0, 0)) |seq| {
+                if (seq.len != 0) return seq.len;
+            }
+        }
+        return 3; // \x1b[H
+    }
+
+    fn appendHome(self: *Screen) !void {
+        if (self.terminfo) |ti| {
+            if (ti.formatCup(0, 0)) |seq| {
+                if (seq.len != 0) {
+                    try self.out.appendSlice(self.allocator, seq);
+                    self.cursor_x = 0;
+                    self.cursor_y = 0;
+                    return;
+                }
+            }
+        }
+        try self.out.appendSlice(self.allocator, "\x1b[H");
+        self.cursor_x = 0;
+        self.cursor_y = 0;
+    }
+
+    /// Move cursor to `(x, y)`, choosing the cheapest among relative CU*/CUP/
+    /// CR+relative / home+relative (JOE `cposs`/`relcost` style, simplified).
+    /// Updates logical cursor and emits escape sequences into `out`.
+    pub fn moveTo(self: *Screen, x: u16, y: u16) !void {
+        const tx = @min(x, self.width -| 1);
+        const ty = @min(y, self.height -| 1);
+        if (tx == self.cursor_x and ty == self.cursor_y) return;
+
+        const rel_cost = self.relativeMoveCost(self.cursor_x, self.cursor_y, tx, ty);
+        const cup_cost = self.cupMoveCost(tx, ty);
+
+        // CR returns to column 0 on the current row, then relative the rest.
+        const cr_cost: usize = if (self.cursor_x == 0)
+            std.math.maxInt(usize)
+        else
+            1 + self.relativeMoveCost(0, self.cursor_y, tx, ty);
+
+        // Home to (0,0), then relative — wins for destinations near the origin.
+        const home_cost: usize = if (self.cursor_x == 0 and self.cursor_y == 0)
+            std.math.maxInt(usize)
+        else
+            self.homeMoveCost() + self.relativeMoveCost(0, 0, tx, ty);
+
+        const Way = enum { relative, cup, cr_relative, home_relative };
+        var best_cost = rel_cost;
+        var best: Way = .relative;
+        // Strict `<` keeps relative on ties (JOE `cposs` behavior).
+        if (cup_cost < best_cost) {
+            best_cost = cup_cost;
+            best = .cup;
+        }
+        if (cr_cost < best_cost) {
+            best_cost = cr_cost;
+            best = .cr_relative;
+        }
+        if (home_cost < best_cost) {
+            best_cost = home_cost;
+            best = .home_relative;
+        }
+
+        switch (best) {
+            .cup => {
+                try self.appendCup(tx, ty);
+                self.cursor_x = tx;
+                self.cursor_y = ty;
+            },
+            .cr_relative => {
+                try self.out.append(self.allocator, '\r');
+                self.cursor_x = 0;
+                const dx: i32 = @as(i32, @intCast(tx)) - @as(i32, @intCast(self.cursor_x));
+                const dy: i32 = @as(i32, @intCast(ty)) - @as(i32, @intCast(self.cursor_y));
+                try self.moveBy(dx, dy);
+            },
+            .home_relative => {
+                try self.appendHome();
+                const dx: i32 = @as(i32, @intCast(tx)) - @as(i32, @intCast(self.cursor_x));
+                const dy: i32 = @as(i32, @intCast(ty)) - @as(i32, @intCast(self.cursor_y));
+                try self.moveBy(dx, dy);
+            },
+            .relative => {
+                const dx: i32 = @as(i32, @intCast(tx)) - @as(i32, @intCast(self.cursor_x));
+                const dy: i32 = @as(i32, @intCast(ty)) - @as(i32, @intCast(self.cursor_y));
+                try self.moveBy(dx, dy);
+            },
         }
     }
 
@@ -1145,4 +1299,80 @@ test "Screen.saveCursor and restoreCursor ANSI DECSC/DECRC" {
     try testing.expectEqual(@as(u16, 3), screen.cursor_x);
     try testing.expectEqual(@as(u16, 2), screen.cursor_y);
     try testing.expect(std.mem.indexOf(u8, screen.takeOut(), "\x1b8") != null);
+}
+
+test "Screen.moveTo prefers relative for nearby cells" {
+    var screen = try Screen.init(testing.allocator, 80, 24);
+    defer screen.deinit();
+    try testing.expect(screen.terminfo == null);
+
+    screen.setCursor(5, 5);
+    try screen.moveTo(6, 5); // CUF1 = 3 bytes vs CUP "\x1b[6;7H" = 6
+    try testing.expectEqual(@as(u16, 6), screen.cursor_x);
+    try testing.expectEqual(@as(u16, 5), screen.cursor_y);
+    try testing.expectEqualStrings("\x1b[C", screen.takeOut());
+    screen.clearOut();
+
+    try screen.moveTo(6, 3); // CUU2
+    try testing.expectEqual(@as(u16, 3), screen.cursor_y);
+    try testing.expectEqualStrings("\x1b[2A", screen.takeOut());
+}
+
+test "Screen.moveTo prefers CUP for distant targets" {
+    var screen = try Screen.init(testing.allocator, 80, 24);
+    defer screen.deinit();
+
+    screen.setCursor(0, 0);
+    try screen.moveTo(40, 20);
+    // relative: CSI 20 B (5) + CSI 40 C (5) = 10; CUP "\x1b[21;41H" = 8
+    try testing.expectEqual(@as(u16, 40), screen.cursor_x);
+    try testing.expectEqual(@as(u16, 20), screen.cursor_y);
+    try testing.expectEqualStrings("\x1b[21;41H", screen.takeOut());
+}
+
+test "Screen.moveTo prefers CR when returning near column zero" {
+    var screen = try Screen.init(testing.allocator, 80, 24);
+    defer screen.deinit();
+
+    screen.setCursor(50, 5);
+    try screen.moveTo(0, 5);
+    // CUB50 = 5 bytes; CR = 1
+    try testing.expectEqual(@as(u16, 0), screen.cursor_x);
+    try testing.expectEqual(@as(u16, 5), screen.cursor_y);
+    try testing.expectEqualStrings("\r", screen.takeOut());
+}
+
+test "Screen.moveTo prefers home near origin" {
+    var screen = try Screen.init(testing.allocator, 80, 24);
+    defer screen.deinit();
+
+    screen.setCursor(10, 10);
+    try screen.moveTo(0, 0);
+    // relative CUU10+CUB10 = 10; CUP "\x1b[1;1H" = 6; home "\x1b[H" = 3
+    try testing.expectEqual(@as(u16, 0), screen.cursor_x);
+    try testing.expectEqual(@as(u16, 0), screen.cursor_y);
+    try testing.expectEqualStrings("\x1b[H", screen.takeOut());
+}
+
+test "Screen.moveTo no-ops when already there and clamps" {
+    var screen = try Screen.init(testing.allocator, 10, 8);
+    defer screen.deinit();
+
+    screen.setCursor(3, 2);
+    try screen.moveTo(3, 2);
+    try testing.expectEqual(@as(usize, 0), screen.takeOut().len);
+
+    try screen.moveTo(100, 100);
+    try testing.expectEqual(@as(u16, 9), screen.cursor_x);
+    try testing.expectEqual(@as(u16, 7), screen.cursor_y);
+    try testing.expect(screen.takeOut().len > 0);
+}
+
+test "ansi cursor cost helpers" {
+    try testing.expectEqual(@as(usize, 0), ansiRelativeLen(0));
+    try testing.expectEqual(@as(usize, 3), ansiRelativeLen(1));
+    try testing.expectEqual(@as(usize, 4), ansiRelativeLen(2));
+    try testing.expectEqual(@as(usize, 5), ansiRelativeLen(20));
+    try testing.expectEqual(@as(usize, 6), ansiCupLen(0, 0)); // \x1b[1;1H
+    try testing.expectEqual(@as(usize, 8), ansiCupLen(40, 20)); // \x1b[21;41H
 }

@@ -13,6 +13,7 @@
 //! Table region detect uses `zig_bw_table_detect` → `table.layoutAt` (fills C widths/aligns).
 //! Cursor follow/scroll uses `zig_bw_bwfllwt` / `zig_bw_bwfllwh` (C scroll helpers).
 //! Post-edit window scroll uses `zig_bw_bwins` / `zig_bw_bwdel`.
+//! `lgen_view` inline Feature 1.4/1.5/1.6 + col_map uses `zig_bw_view_inline`.
 //! Feature 2.1 residual simple pipe substitute uses `zig_bw_table_simple`.
 //! Non-UTF-8 (byte) charmaps paint via `lgenLine` byte-mode.
 //! Default off until soak. Falls back to C when the gate is off.
@@ -43,6 +44,10 @@ const NO_MORE_DATA: c_int = -256;
 const max_line_bytes: usize = 256 * 1024;
 const INVERSE: c_int = 64;
 const UNDERLINE: c_int = 128;
+const FG_SHIFT: c_int = 21;
+const FG_NOT_DEFAULT: c_int = 256 << FG_SHIFT;
+const FG_MASK: c_int = 1023 << FG_SHIFT;
+const FG_BLUE: c_int = FG_NOT_DEFAULT | (4 << FG_SHIFT);
 
 const SCRN = opaque {};
 const P = opaque {};
@@ -588,6 +593,116 @@ pub export fn zig_bw_bwdel(
             zig_c_bw_nscrlup(t, @intCast(win_y + l + flg - top_line), win_y + win_h, @intCast(n));
         } else {
             zig_c_bw_nscrlup(t, win_y, win_y + win_h, @intCast(l + n - top_line));
+        }
+    }
+    return 0;
+}
+
+/// Path A `lgen_view` inline chrome: emphasis / inline code / links / col_map.
+/// Preserves any C hide/subst already set (task lists / simple table pipes).
+/// Fills URL + col_map buffers and mutates hybrid `attr_buf` for link styling.
+/// Returns `0` on success, `-1` to fall back to C.
+pub export fn zig_bw_view_inline(
+    line_ptr: ?[*]const u8,
+    line_len: c_int,
+    hide: ?[*]u8,
+    hide_len: c_int,
+    subst: ?[*]c_int,
+    subst_len: c_int,
+    urls: ?[*]?[*:0]u8,
+    urls_len: c_int,
+    col_map: ?[*]i64,
+    col_map_len: c_int,
+    atr: ?[*]c_int,
+    atr_len: c_int,
+    tab: c_int,
+) c_int {
+    if (zig_bw_lgen_enabled == 0) return -1;
+    if (line_ptr == null or hide == null or subst == null or col_map == null) return -1;
+    if (line_len < 0) return -1;
+    const n: usize = @intCast(line_len);
+    const clear_n: usize = if (n == 0) 1 else n;
+    if (hide_len < @as(c_int, @intCast(clear_n))) return -1;
+    if (subst_len < @as(c_int, @intCast(clear_n))) return -1;
+    if (col_map_len < @as(c_int, @intCast(clear_n))) return -1;
+    if (urls != null and urls_len < @as(c_int, @intCast(clear_n))) return -1;
+
+    const line = line_ptr.?[0..n];
+    const alloc = std.heap.c_allocator;
+
+    const saved_hide = alloc.alloc(u8, clear_n) catch return -1;
+    defer alloc.free(saved_hide);
+    const saved_subst = alloc.alloc(c_int, clear_n) catch return -1;
+    defer alloc.free(saved_subst);
+    @memcpy(saved_hide[0..clear_n], hide.?[0..clear_n]);
+    @memcpy(saved_subst[0..clear_n], subst.?[0..clear_n]);
+
+    const hide_slice = hide.?[0..clear_n];
+    const subst_scratch = alloc.alloc(u21, clear_n) catch return -1;
+    defer alloc.free(subst_scratch);
+    const url_scratch = alloc.alloc(?[]const u8, clear_n) catch return -1;
+    defer alloc.free(url_scratch);
+    const col_scratch = alloc.alloc(u64, clear_n) catch return -1;
+    defer alloc.free(col_scratch);
+    const attrs = alloc.alloc(Attribute, if (n == 0) 1 else n) catch return -1;
+    defer alloc.free(attrs);
+    @memset(attrs, .{});
+
+    var tables = ViewTables.init(alloc);
+    tables.bindScratch(hide_slice, subst_scratch, url_scratch, col_scratch, n);
+
+    // Restore C pre-state (task / Feature 2.1 simple borders) after bindScratch clear.
+    @memcpy(hide_slice, saved_hide);
+    var si: usize = 0;
+    while (si < clear_n) : (si += 1) {
+        if (saved_subst[si] != 0) subst_scratch[si] = @intCast(saved_subst[si]);
+    }
+
+    const tab_u: u16 = if (tab <= 0) 8 else @intCast(tab);
+    const attr_arg: ?[]Attribute = if (n == 0) null else attrs[0..n];
+    render.analyzeLineInline(&tables, line, attr_arg, tab_u);
+
+    // Copy substitutes + col_map back to C.
+    si = 0;
+    while (si < clear_n) : (si += 1) {
+        subst.?[si] = @intCast(subst_scratch[si]);
+        col_map.?[si] = @intCast(col_scratch[si]);
+    }
+
+    // Link styling → hybrid attr_buf (byte-indexed, matching C).
+    if (atr != null and atr_len > 0 and n > 0) {
+        const alen: usize = @intCast(atr_len);
+        var ai: usize = 0;
+        while (ai < n and ai < alen and ai < attrs.len) : (ai += 1) {
+            if (!attrs[ai].underline) continue;
+            atr.?[ai] |= UNDERLINE;
+            if ((atr.?[ai] & FG_MASK) == 0) atr.?[ai] |= FG_BLUE;
+        }
+    }
+
+    // URLs: strdup unique borrowed slices into C-owned pointers (joe_free-compatible).
+    if (urls != null and n > 0) {
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const u = url_scratch[i] orelse continue;
+            // Reuse pointer if an earlier slot already strdup'd the same slice.
+            var reused: ?[*:0]u8 = null;
+            var j: usize = 0;
+            while (j < i) : (j += 1) {
+                const prev = url_scratch[j] orelse continue;
+                if (prev.ptr == u.ptr and prev.len == u.len) {
+                    reused = urls.?[j];
+                    break;
+                }
+            }
+            if (reused) |p| {
+                urls.?[i] = p;
+                continue;
+            }
+            const dup = alloc.alloc(u8, u.len + 1) catch return -1;
+            @memcpy(dup[0..u.len], u);
+            dup[u.len] = 0;
+            urls.?[i] = dup[0..u.len :0].ptr;
         }
     }
     return 0;

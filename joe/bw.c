@@ -57,6 +57,11 @@ extern int zig_bw_bwins(SCRN *t, int *updtab, ptrdiff_t *sary, ptrdiff_t li,
 extern int zig_bw_bwdel(SCRN *t, int *updtab,
 	ptrdiff_t y, ptrdiff_t h, off_t top_line, off_t eof_line,
 	off_t l, off_t n, int flg, int do_highlight);
+/* Path A: gated Zig lgen_view inline Feature 1.4/1.5/1.6 + col_map. */
+extern int zig_bw_view_inline(const unsigned char *line, int line_len,
+	char *hide, int hide_len, int *subst, int subst_len,
+	char **urls, int urls_len, off_t *col_map, int col_map_len,
+	int *atr, int atr_len, int tab);
 /* Path A Feature 2.1: gated Zig simple pipe substitute into vm_subst[]. */
 extern int zig_bw_table_simple(const unsigned char *line, int line_len, int row_type,
 	int *vm_subst, int vm_subst_len);
@@ -2094,6 +2099,53 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 					for (k = 0; k < line_len && k < attr_size; k++)
 						attr_buf[k] |= BOLD;
 				}
+			}
+		}
+	}
+
+	/* Path A: Zig inline view chrome (emphasis / code / links / col_map). */
+	if (zig_bw_lgen_enabled) {
+		int need = line_len > 0 ? line_len : 1;
+		/* Ensure link URL array is sized */
+		if (!viewmode_link_url || viewmode_link_url_size < need) {
+			viewmode_free_link_urls();
+			char **nl = (char **)joe_realloc(viewmode_link_url, (ptrdiff_t)need * (ptrdiff_t)sizeof(char *));
+			if (!nl) {
+				/* OOM — fall back to C */
+			} else {
+				viewmode_link_url = nl;
+				if (viewmode_link_url_size < need) {
+					memset(viewmode_link_url + viewmode_link_url_size, 0,
+					       (size_t)(need - viewmode_link_url_size) * sizeof(char *));
+				}
+				viewmode_link_url_size = need;
+			}
+		} else {
+			viewmode_free_link_urls();
+			memset(viewmode_link_url, 0, (size_t)need * sizeof(char *));
+		}
+		/* Ensure column map is sized */
+		if (!viewmode_col_map || viewmode_col_map_size < need) {
+			off_t *nm = (off_t *)joe_realloc(viewmode_col_map, (ptrdiff_t)need * (ptrdiff_t)sizeof(off_t));
+			if (nm) {
+				viewmode_col_map = nm;
+				viewmode_col_map_size = need;
+			}
+		}
+		if (viewmode_link_url && viewmode_link_url_size >= need
+		    && viewmode_col_map && viewmode_col_map_size >= need
+		    && viewmode_hide && viewmode_hide_size >= need
+		    && viewmode_substitute && viewmode_substitute_size >= need) {
+			int tab = bw->o.tab;
+			if (tab <= 0) tab = 8;
+			if (zig_bw_view_inline(line, line_len,
+				viewmode_hide, viewmode_hide_size,
+				viewmode_substitute, viewmode_substitute_size,
+				viewmode_link_url, viewmode_link_url_size,
+				viewmode_col_map, viewmode_col_map_size,
+				attr_buf, attr_size, tab) >= 0) {
+				viewmode_col_map_line = bw->top->line + y - bw->y;
+				goto done;
 			}
 		}
 	}

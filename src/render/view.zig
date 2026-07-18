@@ -249,6 +249,16 @@ pub fn analyzeLine(tables: *ViewTables, line: []const u8, attrs: ?[]Attribute) !
     buildColMap(tables, line, 8);
 }
 
+/// Feature 1.4/1.5/1.6 + col_map only (JOE post-table inline chrome).
+/// Assumes line-start features (heading/fence/blockquote/HR/task) and tables
+/// were already handled by the caller when relevant.
+pub fn analyzeLineInline(tables: *ViewTables, line: []const u8, attrs: ?[]Attribute, tab: u16) void {
+    applyEmphasis(tables, line);
+    applyInlineCode(tables, line);
+    applyLinks(tables, line, attrs);
+    buildColMap(tables, line, if (tab == 0) 8 else tab);
+}
+
 fn markCodeSpans(in_code: []u8, line: []const u8) void {
     @memset(in_code, 0);
     var i: usize = 0;
@@ -282,7 +292,14 @@ fn markCodeSpans(in_code: []u8, line: []const u8) void {
 fn applyEmphasis(tables: *ViewTables, line: []const u8) void {
     if (line.len == 0) return;
     var in_code_buf: [4096]u8 = undefined;
-    const in_code = if (line.len <= in_code_buf.len) in_code_buf[0..line.len] else return;
+    var heap_code: ?[]u8 = null;
+    defer if (heap_code) |h| tables.allocator.free(h);
+    const in_code: []u8 = blk: {
+        if (line.len <= in_code_buf.len) break :blk in_code_buf[0..line.len];
+        const h = tables.allocator.alloc(u8, line.len) catch return;
+        heap_code = h;
+        break :blk h;
+    };
     markCodeSpans(in_code, line);
 
     var j: usize = 0;

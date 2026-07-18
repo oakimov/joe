@@ -1,6 +1,6 @@
 //! Gated live bridge: JOE `lgen_core` / Feature 2.2 table rows / `gennum` → Zig paint.
 //!
-//! When `JOE_ZIG_BW_LGEN` / `zig_bw_lgen_enabled` is on, plain buffer lines
+//! Path A is always on: plain buffer lines
 //! (including linear/square mark inverse + viewmode hide/substitute/link tables +
 //! `-visiblews` glyphs + `-ansi` ESC hiding) paint through the Phase 6 renderer
 //! and emit via hybrid `outatr` (works with screen-swap shadow + classic tty
@@ -23,11 +23,11 @@
 //! Thin `lgen_view` chrome orchestration uses `zig_bw_lgen_view` (composes the
 //! Feature 1.x/2.x sequence).
 //! Thin `lgen_view` entry uses `zig_bw_lgen_view_entry` (prelude + dispatcher +
-//! paint cleanup; Zig owns viewmode static storage under the gate via
+//! paint cleanup; Zig owns viewmode static storage via
 //! `zig_bw_vm_*` prepare/getters/after/cleanup/display_col; C Feature fallback
-//! body + `zig_c_bw_view_col_map*` cursor helper retained when gate off /
-//! Path A returns `-1`; `defatr` computed in Zig; dead prepare/hide/subst/
-//! urls/table/after bridges removed).
+//! body + C Feature/col_map bridges removed; Path A
+//! `-1`; `defatr` computed in Zig; dead prepare/hide/subst/urls/table/after
+//! bridges removed).
 //! Lifecycle uses `zig_bw_bwmove` / `zig_bw_bwresz` / `zig_bw_bwmk` / `zig_bw_bwrm` /
 //! `zig_bw_orphit` / `zig_bw_calclincols` (C fallback retained).
 //! Non-paint helpers use `zig_bw_get_file_pos` / `zig_bw_set_file_pos` /
@@ -36,7 +36,7 @@
 //! `zig_bw_init_visiblews` (C fallback retained).
 //! Feature 2.1 residual simple pipe substitute uses `zig_bw_table_simple`.
 //! Non-UTF-8 (byte) charmaps paint via `lgenLine` byte-mode.
-//! Default off until soak. Falls back to C when the gate is off.
+//! Falls back to C only when a Zig export returns `-1` (OOM / oversize / hard fail).
 //!
 //! Hybrid `syntax.parse` fills `attr_buf` **per character** (`pgetc`); native
 //! `lgenLine` expects **per-byte** attrs — this bridge expands before paint.
@@ -91,8 +91,6 @@ const HighlightState = extern struct {
     saved_s: ?*const c_int = null,
     state: isize = 0,
 };
-
-pub export var zig_bw_lgen_enabled: c_int = 0;
 
 extern var attr_buf: [*c]c_int;
 extern var attr_size: c_int;
@@ -155,13 +153,6 @@ extern var opt_mid: c_int;
 extern var opt_left: c_int;
 extern var opt_right: c_int;
 
-/// Apply env gate (called from `ttopnn` alongside screen-swap).
-pub export fn zig_bw_lgen_apply_env() void {
-    if (std.c.getenv("JOE_ZIG_BW_LGEN")) |v| {
-        zig_bw_lgen_enabled = if (v[0] == '1' or v[0] == 'y' or v[0] == 'Y') 1 else 0;
-    }
-}
-
 /// JOE `gennum` line-number gutter → hybrid `outatr`.
 ///
 /// Formats like C / `window.paint.paintLinum`: `" {d: >21} "` then trailing
@@ -180,7 +171,6 @@ pub export fn zig_bw_gennum(
     atr: c_int,
     charmap: ?*Charmap,
 ) c_int {
-    if (zig_bw_lgen_enabled == 0) return -1;
     if (t == null or screen == null or attr_row == null) return -1;
     if (lincols <= 0 or lincols > 64) return -1;
 
@@ -235,7 +225,6 @@ pub export fn zig_bw_table_detect(
     out_aligns: ?[*]c_int,
     out_cap: c_int,
 ) c_int {
-    if (zig_bw_lgen_enabled == 0) return -1;
     if (anchor == null or out_start == null or out_end == null or out_sep == null) return -1;
     if (out_ncols == null or out_widths == null or out_aligns == null) return -1;
     if (buf_line < 0 or out_cap <= 0) return -1;
@@ -349,7 +338,6 @@ pub export fn zig_bw_bwfllwt(
     curlin: ?*i64,
     hiline: c_int,
 ) c_int {
-    if (zig_bw_lgen_enabled == 0) return -1;
     if (top == null or cursor == null or t == null or updtab == null) return -1;
     if (offset == null or curlin == null) return -1;
     if (win_h <= 0 or win_w <= 0) return -1;
@@ -464,7 +452,6 @@ pub export fn zig_bw_bwfllwh(
     win_w: isize,
     offset: ?*i64,
 ) c_int {
-    if (zig_bw_lgen_enabled == 0) return -1;
     if (top == null or cursor == null or t == null or updtab == null or offset == null) return -1;
     if (win_h <= 0 or win_w <= 0) return -1;
 
@@ -539,7 +526,6 @@ pub export fn zig_bw_bwins(
     flg: c_int,
     do_highlight: c_int,
 ) c_int {
-    if (zig_bw_lgen_enabled == 0) return -1;
     if (t == null or updtab == null or win_h <= 0) return -1;
 
     if (do_highlight != 0) {
@@ -584,7 +570,6 @@ pub export fn zig_bw_bwdel(
     flg: c_int,
     do_highlight: c_int,
 ) c_int {
-    if (zig_bw_lgen_enabled == 0) return -1;
     if (t == null or updtab == null or win_h <= 0) return -1;
 
     if (do_highlight != 0) {
@@ -634,7 +619,6 @@ pub export fn zig_bw_view_table_hl(
     atr_len: c_int,
     in_table_region: c_int,
 ) c_int {
-    if (zig_bw_lgen_enabled == 0) return -1;
     if (line_ptr == null or atr == null or line_len < 0 or atr_len <= 0) return -1;
     if (in_table_region != 0) return 0;
 
@@ -681,7 +665,6 @@ pub export fn zig_bw_view_line_start(
     col_map_len: c_int,
     tab: c_int,
 ) c_int {
-    if (zig_bw_lgen_enabled == 0) return -1;
     if (line_ptr == null or hide == null or subst == null or col_map == null) return -1;
     if (line_len < 0) return -1;
     const n: usize = @intCast(line_len);
@@ -737,7 +720,6 @@ pub export fn zig_bw_view_inline(
     atr_len: c_int,
     tab: c_int,
 ) c_int {
-    if (zig_bw_lgen_enabled == 0) return -1;
     if (line_ptr == null or hide == null or subst == null or col_map == null) return -1;
     if (line_len < 0) return -1;
     const n: usize = @intCast(line_len);
@@ -847,7 +829,6 @@ pub export fn zig_bw_view_finish(
     cursor: ?*P,
     skip_hidden: c_int,
 ) c_int {
-    if (zig_bw_lgen_enabled == 0) return -1;
     if (line_ptr == null or hide == null or subst == null or col_map == null or col_map_line == null) return -1;
     if (cursor == null or line_len < 0) return -1;
     const n: usize = @intCast(line_len);
@@ -924,7 +905,7 @@ pub export fn zig_bw_view_finish(
     return 0;
 }
 
-/// Thin `lgen_view` chrome dispatcher (JOE_ZIG_BW_LGEN).
+/// Thin `lgen_view` chrome dispatcher (Path A).
 ///
 /// Prefers being called from `zig_bw_lgen_view_entry` (prelude + paint cleanup).
 /// This owns Feature 1.x/2.x chrome sequencing: line-start → table detect/row
@@ -973,7 +954,6 @@ pub export fn zig_bw_lgen_view(
     palette_len: c_int,
     utf8: c_int,
 ) c_int {
-    if (zig_bw_lgen_enabled == 0) return -1;
     if (line_ptr == null or hide == null or subst == null or col_map == null or col_map_line == null) return -1;
     if (cursor == null or p == null) return -1;
     if (table_region_start == null or table_region_end == null or table_separator_line == null) return -1;
@@ -1192,8 +1172,8 @@ extern fn joe_realloc(p: ?*anyopaque, n: isize) ?*anyopaque;
 extern fn joe_free(p: ?*anyopaque) void;
 extern var square: c_int;
 
-// Zig-owned viewmode statics under JOE_ZIG_BW_LGEN. C keeps parallel Feature
-// statics directly (no Zig bridges) for gate-off / Path A `-1`; only
+// Zig-owned viewmode statics for Path A. C keeps parallel Feature
+// statics directly (no Zig bridges) for Path A `-1`; only
 // `zig_c_bw_view_{defatr,col_map*}` remain as cursor/attr helpers.
 var vm_hide: ?[*]u8 = null;
 var vm_hide_size: c_int = 0;
@@ -1232,7 +1212,7 @@ fn vmFreeLinkUrls() void {
 }
 
 /// Ensure Zig viewmode side tables can hold `need` bytes; reset per-line state.
-/// Sets `vm_ready` so paint prefers these tables under the gate.
+/// Sets `vm_ready` so paint prefers these tables for Path A.
 pub export fn zig_bw_vm_prepare(bw: ?*BW, need: c_int) c_int {
     if (bw == null or need <= 0 or need > viewmode_max_line_bytes) return -1;
     const need_usz: usize = @intCast(need);
@@ -1441,10 +1421,6 @@ extern fn zig_c_bw_get_top_line(bw: ?*BW) i64;
 extern fn zig_c_bw_get_tab(bw: ?*BW) c_int;
 extern fn zig_c_bw_get_syntax(bw: ?*BW) ?*HighSyntax;
 extern fn zig_c_bw_get_charmap(bw: ?*BW) ?*Charmap;
-// Feature 1.10 cursor fallback when Zig vm map misses (gate-off / entry `-1`).
-extern fn zig_c_bw_view_col_map() ?[*]i64;
-extern fn zig_c_bw_view_col_map_size() c_int;
-extern fn zig_c_bw_view_col_map_line_ptr() ?*i64;
 extern fn zig_c_bw_get_palette(t: ?*SCRN, out_len: ?*c_int) ?[*]c_int;
 
 extern fn zig_c_bw_get_visiblews(bw: ?*BW) c_int;
@@ -1529,11 +1505,10 @@ fn paintViewBodyWithVm(
     );
 }
 
-/// Thin `lgen_view` entry (JOE_ZIG_BW_LGEN): prelude + dispatcher + paint cleanup.
+/// Thin `lgen_view` entry (Path A): prelude + dispatcher + paint cleanup.
 ///
-/// Zig owns viewmode static storage (`zig_bw_vm_*`) under the gate. C keeps the
-/// Feature fallback body (+ parallel statics; live Zig bridge is only
-/// `zig_c_bw_view_col_map*`) when this returns `-1`.
+/// Zig owns viewmode static storage (`zig_bw_vm_*`) for Path A. C keeps the
+/// C Feature fallback removed; hard-fails in C if this returns `-1`.
 /// Markdown syntax gating stays in C.
 ///
 /// Returns paint result (`>= 0`) or `-1` to fall back to C `lgen_view`.
@@ -1551,7 +1526,6 @@ pub export fn zig_bw_lgen_view_entry(
     st: HighlightState,
     bw: ?*BW,
 ) c_int {
-    if (zig_bw_lgen_enabled == 0) return -1;
     if (t == null or screen == null or attr_row == null or p == null or bw == null) return -1;
 
     const syntax = zig_c_bw_get_syntax(bw) orelse return -1;
@@ -1719,7 +1693,6 @@ pub export fn zig_bw_table_simple(
     out_subst: ?[*]c_int,
     out_subst_len: c_int,
 ) c_int {
-    if (zig_bw_lgen_enabled == 0) return -1;
     if (line == null or line_len < 0) return -1;
     if (out_subst == null or out_subst_len < line_len) return -1;
 
@@ -1796,7 +1769,6 @@ pub export fn zig_bw_bwgen(
     fromline: i64,
     toline: i64,
 ) c_int {
-    if (zig_bw_lgen_enabled == 0) return -1;
     if (w == null or t == null or scrn == null or attr_base == null or updtab == null) return -1;
     if (top == null or cursor == null) return -1;
     if (scr_w <= 0 or win_h < 0 or win_w < 0) return -1;
@@ -1940,26 +1912,17 @@ fn applyBwgenViewCursor(w: ?*BW) void {
     zig_c_bw_p_goto_bol(tmp);
     const cursor_offset = zig_c_bw_pbyte(cursor) - zig_c_bw_pbyte(tmp);
 
-    // Prefer Zig-owned map under the gate; fall back to C Feature statics.
-    var xcol = zig_bw_vm_display_col(buf_line, cursor_offset);
-    if (xcol < 0) {
-        const col_map = zig_c_bw_view_col_map() orelse return;
-        const col_map_size = zig_c_bw_view_col_map_size();
-        if (col_map_size <= 0) return;
-        const map_line_ptr = zig_c_bw_view_col_map_line_ptr() orelse return;
-        if (map_line_ptr.* != buf_line) return;
-        if (cursor_offset < 0 or cursor_offset >= col_map_size) return;
-        xcol = col_map[@intCast(cursor_offset)];
-    }
+    const xcol = zig_bw_vm_display_col(buf_line, cursor_offset);
+    if (xcol < 0) return;
     zig_c_bw_set_cursor_xcol(w, xcol);
 }
 
-/// Thin `bwgen` entry (JOE_ZIG_BW_LGEN): lattr/viewmode/mark setup + paint loops +
+/// Thin `bwgen` entry (Path A): lattr/viewmode/mark setup + paint loops +
 /// Feature 1.10 cursor. C keeps the full `bwgen` fallback body.
 ///
 /// Returns `0` on success, `-1` to fall back to C `bwgen`.
 pub export fn zig_bw_bwgen_entry(w: ?*BW, linums: c_int, linchg: c_int) c_int {
-    if (zig_bw_lgen_enabled == 0 or w == null) return -1;
+    if (w == null) return -1;
 
     var from: i64 = 0;
     var to: i64 = 0;
@@ -2040,7 +2003,6 @@ pub export fn zig_bw_bwgenh(
     bg_curlinum_atr: c_int,
     bg_cursor_atr: c_int,
 ) c_int {
-    if (zig_bw_lgen_enabled == 0) return -1;
     if (t == null or scrn == null or attr_base == null or top == null) return -1;
     if (scr_w <= 0 or win_h < 0 or win_w < 0) return -1;
 
@@ -2145,10 +2107,10 @@ pub export fn zig_bw_bwgenh(
 }
 
 extern fn zig_c_bw_bwgenh_setup(w: ?*BW, from: ?*i64, to: ?*i64) c_int;
-/// Thin `bwgenh` entry (JOE_ZIG_BW_LGEN): mark setup + hex paint.
+/// Thin `bwgenh` entry (Path A): mark setup + hex paint.
 /// C keeps the full `bwgenh` fallback body. Returns `0` or `-1` fallback.
 pub export fn zig_bw_bwgenh_entry(w: ?*BW) c_int {
-    if (zig_bw_lgen_enabled == 0 or w == null) return -1;
+    if (w == null) return -1;
 
     var from: i64 = 0;
     var to: i64 = 0;
@@ -2208,7 +2170,6 @@ pub export fn zig_bw_table_row(
     col_map: ?[*]i64,
     col_map_size: c_int,
 ) c_int {
-    if (zig_bw_lgen_enabled == 0) return -1;
     if (t == null or screen == null or attr_row == null) return -1;
     if (line == null or line_len < 0) return -1;
     if (x1 <= x0) return -1;
@@ -2357,7 +2318,6 @@ pub export fn zig_bw_lgen(
     do_square: c_int,
     ansi: c_int,
 ) c_int {
-    if (zig_bw_lgen_enabled == 0) return -1;
     if (t == null or screen == null or attr_row == null or p == null) return -1;
     if (x1 <= x0) return -1;
     if (charmap == null) return -1;
@@ -3042,10 +3002,6 @@ fn utf8CharCount(line: []const u8) usize {
     return n;
 }
 
-test "gate defaults off" {
-    try std.testing.expectEqual(@as(c_int, 0), zig_bw_lgen_enabled);
-}
-
 test "expandCharAttrsToBytes maps UTF-8 multi-byte to shared atr" {
     const line = "a\u{00e9}b"; // a, é (2 bytes), b
     var char_attrs = [_]Attribute{
@@ -3180,14 +3136,14 @@ extern fn zig_c_bw_rm_release(w: ?*BW) void;
 
 /// Path A lifecycle: set BW origin. Returns `0` on success, `-1` to fall back.
 pub export fn zig_bw_bwmove(w: ?*BW, x: isize, y: isize) c_int {
-    if (zig_bw_lgen_enabled == 0 or w == null) return -1;
+    if (w == null) return -1;
     zig_c_bw_set_pos(w, x, y);
     return 0;
 }
 
 /// Path A lifecycle: resize BW (+ dirty new rows + VT master resize).
 pub export fn zig_bw_bwresz(w: ?*BW, wi: isize, he: isize) c_int {
-    if (zig_bw_lgen_enabled == 0 or w == null) return -1;
+    if (w == null) return -1;
     const old_h = zig_c_bw_get_h(w);
     zig_c_bw_dirty_grown_rows(w, old_h, he);
     zig_c_bw_set_size(w, wi, he);
@@ -3197,7 +3153,6 @@ pub export fn zig_bw_bwresz(w: ?*BW, wi: isize, he: isize) c_int {
 
 /// Path A lifecycle: allocate + init BW. On success writes `*out_bw` and returns `0`.
 pub export fn zig_bw_bwmk(window: ?*W, b: ?*B, prompt: c_int, out_bw: ?*?*BW) c_int {
-    if (zig_bw_lgen_enabled == 0) return -1;
     if (window == null or b == null or out_bw == null) return -1;
     const w = zig_c_bw_alloc() orelse return -1;
     if (zig_c_bw_mk_init(w, window, b, prompt) < 0) {
@@ -3210,14 +3165,14 @@ pub export fn zig_bw_bwmk(window: ?*W, b: ?*B, prompt: c_int, out_bw: ?*?*BW) c_
 
 /// Path A lifecycle: orphan buffer before `bwrm` when needed.
 pub export fn zig_bw_orphit(bw: ?*BW) c_int {
-    if (zig_bw_lgen_enabled == 0 or bw == null) return -1;
+    if (bw == null) return -1;
     zig_c_bw_orphit_impl(bw);
     return 0;
 }
 
 /// Path A lifecycle: destroy BW (errbuf orphan, save pos, release).
 pub export fn zig_bw_bwrm(w: ?*BW) c_int {
-    if (zig_bw_lgen_enabled == 0 or w == null) return -1;
+    if (w == null) return -1;
     if (zig_c_bw_is_sole_errbuf(w) != 0) {
         // Use impl directly to avoid re-entering gated `orphit`.
         zig_c_bw_orphit_impl(w);
@@ -3230,7 +3185,7 @@ pub export fn zig_bw_bwrm(w: ?*BW) c_int {
 /// Path A lifecycle: line-number gutter width (`linums` digit width + 2).
 /// Returns width (`>= 0`), or `-1` to fall back to C.
 pub export fn zig_bw_calclincols(bw: ?*BW) c_int {
-    if (zig_bw_lgen_enabled == 0 or bw == null) return -1;
+    if (bw == null) return -1;
     if (zig_c_bw_get_linums(bw) == 0) return 0;
     const lines = zig_c_bw_b_eof_line(bw) + 1;
     var width: c_int = 0;
@@ -3273,42 +3228,41 @@ extern fn zig_c_bw_from_uni(cp: c_int) c_int;
 
 /// Path A non-paint: get restored file position. Writes `*out` and returns `0`, or `-1` fallback.
 pub export fn zig_bw_get_file_pos(name: ?[*:0]const u8, out: ?*i64) c_int {
-    if (zig_bw_lgen_enabled == 0 or out == null) return -1;
+    if (out == null) return -1;
     out.?.* = zig_c_bw_file_pos_get(name);
     return 0;
 }
 
 /// Path A non-paint: set restored file position.
 pub export fn zig_bw_set_file_pos(name: ?[*:0]const u8, pos: i64) c_int {
-    if (zig_bw_lgen_enabled == 0) return -1;
     zig_c_bw_file_pos_set(name, pos);
     return 0;
 }
 
 /// Path A non-paint: save file-pos database.
 pub export fn zig_bw_save_file_pos(f: ?*FILE) c_int {
-    if (zig_bw_lgen_enabled == 0 or f == null) return -1;
+    if (f == null) return -1;
     zig_c_bw_file_pos_save(f);
     return 0;
 }
 
 /// Path A non-paint: load file-pos database.
 pub export fn zig_bw_load_file_pos(f: ?*FILE) c_int {
-    if (zig_bw_lgen_enabled == 0 or f == null) return -1;
+    if (f == null) return -1;
     zig_c_bw_file_pos_load(f);
     return 0;
 }
 
 /// Path A non-paint: snapshot positions for all TW windows + orphans.
 pub export fn zig_bw_set_file_pos_all(t: ?*Screen) c_int {
-    if (zig_bw_lgen_enabled == 0 or t == null) return -1;
+    if (t == null) return -1;
     zig_c_bw_file_pos_all(t);
     return 0;
 }
 
 /// Path A non-paint: VT/TW master BW for buffer `b`. Writes `*out` (may be null).
 pub export fn zig_bw_vtmaster(t: ?*Screen, b: ?*B, out: ?*?*BW) c_int {
-    if (zig_bw_lgen_enabled == 0 or t == null or b == null or out == null) return -1;
+    if (t == null or b == null or out == null) return -1;
     out.?.* = zig_c_bw_vtmaster_impl(t, b);
     return 0;
 }
@@ -3316,7 +3270,7 @@ pub export fn zig_bw_vtmaster(t: ?*Screen, b: ?*B, out: ?*?*BW) c_int {
 /// Path A non-paint: status-line command. Writes command rc to `*out_rc`.
 pub export fn zig_bw_ustat(w: ?*W, k: c_int, out_rc: ?*c_int) c_int {
     _ = k;
-    if (zig_bw_lgen_enabled == 0 or w == null or out_rc == null) return -1;
+    if (w == null or out_rc == null) return -1;
     out_rc.?.* = zig_c_bw_ustat_impl(w);
     return 0;
 }
@@ -3324,7 +3278,7 @@ pub export fn zig_bw_ustat(w: ?*W, k: c_int, out_rc: ?*c_int) c_int {
 /// Path A non-paint: crawl right (horizontal scroll/cursor).
 pub export fn zig_bw_ucrawlr(w: ?*W, k: c_int, out_rc: ?*c_int) c_int {
     _ = k;
-    if (zig_bw_lgen_enabled == 0 or w == null or out_rc == null) return -1;
+    if (w == null or out_rc == null) return -1;
     var bw: ?*BW = null;
     if (zig_c_bw_wind_bw(w, &bw) < 0) {
         out_rc.?.* = -1;
@@ -3351,7 +3305,7 @@ pub export fn zig_bw_ucrawlr(w: ?*W, k: c_int, out_rc: ?*c_int) c_int {
 /// Path A non-paint: crawl left (horizontal scroll/cursor).
 pub export fn zig_bw_ucrawll(w: ?*W, k: c_int, out_rc: ?*c_int) c_int {
     _ = k;
-    if (zig_bw_lgen_enabled == 0 or w == null or out_rc == null) return -1;
+    if (w == null or out_rc == null) return -1;
     var bw: ?*BW = null;
     if (zig_c_bw_wind_bw(w, &bw) < 0) {
         out_rc.?.* = -1;
@@ -3398,7 +3352,6 @@ pub export fn zig_bw_ucrawll(w: ?*W, k: c_int, out_rc: ?*c_int) c_int {
 
 /// Path A non-paint: choose visible-whitespace glyphs for locale.
 pub export fn zig_bw_init_visiblews() c_int {
-    if (zig_bw_lgen_enabled == 0) return -1;
     const spaces = [_]c_int{ 0xb7, 0x2291, '.', 0 };
     const tabs = [_]c_int{ 0x2192, 0x203a, 0xbb, 0x25ba, '>', 0 };
     const rtns = [_]c_int{ 0x21b5, 0x21b2, '$', 0 };

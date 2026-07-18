@@ -23,7 +23,9 @@
 //! Thin `lgen_view` chrome orchestration uses `zig_bw_lgen_view` (composes the
 //! Feature 1.x/2.x sequence).
 //! Thin `lgen_view` entry uses `zig_bw_lgen_view_entry` (prelude + dispatcher +
-//! paint cleanup; C keeps viewmode static storage helpers + Feature fallback).
+//! paint cleanup; Zig owns viewmode static storage under the gate via
+//! `zig_bw_vm_*` prepare/getters/after/cleanup/display_col; C Feature fallback
+//! + `zig_c_bw_view_*` retained when gate off / Path A returns `-1`).
 //! Lifecycle uses `zig_bw_bwmove` / `zig_bw_bwresz` / `zig_bw_bwmk` / `zig_bw_bwrm` /
 //! `zig_bw_orphit` / `zig_bw_calclincols` (C fallback retained).
 //! Non-paint helpers use `zig_bw_get_file_pos` / `zig_bw_set_file_pos` /
@@ -1181,10 +1183,241 @@ pub export fn zig_bw_lgen_view(
 }
 
 const viewmode_max_line_bytes: c_int = 1024 * 1024;
+const vm_max_table_cols: usize = 64;
 
 extern fn joe_malloc(n: isize) ?*anyopaque;
 extern fn joe_realloc(p: ?*anyopaque, n: isize) ?*anyopaque;
 extern fn joe_free(p: ?*anyopaque) void;
+extern var square: c_int;
+
+// Zig-owned viewmode statics under JOE_ZIG_BW_LGEN. C keeps parallel statics
+// (`zig_c_bw_view_*`) for Feature fallback when the gate is off or Path A
+// returns `-1`.
+var vm_hide: ?[*]u8 = null;
+var vm_hide_size: c_int = 0;
+var vm_subst: ?[*]c_int = null;
+var vm_subst_size: c_int = 0;
+var vm_urls: ?[*]?[*:0]u8 = null;
+var vm_urls_size: c_int = 0;
+var vm_col_map: ?[*]i64 = null;
+var vm_col_map_size: c_int = 0;
+var vm_col_map_line: i64 = -1;
+var vm_table_region_start: i64 = -1;
+var vm_table_region_end: i64 = -1;
+var vm_table_separator_line: i64 = -1;
+var vm_table_cached_for_line: i64 = -1;
+var vm_table_no_region_line: i64 = -1;
+var vm_table_col_count: c_int = 0;
+var vm_table_col_width: [vm_max_table_cols]c_int = [_]c_int{0} ** vm_max_table_cols;
+var vm_table_col_align: [vm_max_table_cols]c_int = [_]c_int{0} ** vm_max_table_cols;
+var vm_ready: c_int = 0;
+var vm_last_bw: ?*BW = null;
+
+fn vmFreeLinkUrls() void {
+    const urls = vm_urls orelse return;
+    if (vm_urls_size <= 0) return;
+    const n: usize = @intCast(vm_urls_size);
+    var m: usize = 0;
+    while (m < n) : (m += 1) {
+        const p = urls[m] orelse continue;
+        joe_free(p);
+        var i = m + 1;
+        while (i < n) : (i += 1) {
+            if (urls[i] == p) urls[i] = null;
+        }
+        urls[m] = null;
+    }
+}
+
+/// Ensure Zig viewmode side tables can hold `need` bytes; reset per-line state.
+/// Sets `vm_ready` so paint prefers these tables under the gate.
+pub export fn zig_bw_vm_prepare(bw: ?*BW, need: c_int) c_int {
+    if (bw == null or need <= 0 or need > viewmode_max_line_bytes) return -1;
+    const need_usz: usize = @intCast(need);
+
+    if (vm_last_bw != bw) {
+        vm_table_region_start = -1;
+        vm_table_region_end = -1;
+        vm_table_separator_line = -1;
+        vm_table_cached_for_line = -1;
+        vm_table_no_region_line = -1;
+        vm_table_col_count = 0;
+        vm_col_map_line = -1;
+        vm_last_bw = bw;
+    }
+
+    if (vm_hide == null or vm_hide_size < need) {
+        if (vm_hide) |h| joe_free(h);
+        vm_hide = @ptrCast(@alignCast(joe_malloc(need) orelse {
+            vm_hide_size = 0;
+            return -1;
+        }));
+        vm_hide_size = need;
+    }
+    @memset(vm_hide.?[0..need_usz], 0);
+
+    if (vm_subst == null or vm_subst_size < need) {
+        if (vm_subst) |s| joe_free(s);
+        const bytes: isize = @intCast(need_usz * @sizeOf(c_int));
+        vm_subst = @ptrCast(@alignCast(joe_malloc(bytes) orelse {
+            vm_subst_size = 0;
+            return -1;
+        }));
+        vm_subst_size = need;
+    }
+    @memset(vm_subst.?[0..need_usz], 0);
+
+    if (vm_col_map == null or vm_col_map_size < need) {
+        const bytes: isize = @intCast(need_usz * @sizeOf(i64));
+        const nm = joe_realloc(@ptrCast(vm_col_map), bytes) orelse {
+            if (vm_col_map) |cm| joe_free(cm);
+            vm_col_map = null;
+            vm_col_map_size = 0;
+            vm_col_map_line = -1;
+            return -1;
+        };
+        vm_col_map = @ptrCast(@alignCast(nm));
+        vm_col_map_size = need;
+    }
+
+    if (vm_urls == null or vm_urls_size < need) {
+        vmFreeLinkUrls();
+        const bytes: isize = @intCast(need_usz * @sizeOf(?[*:0]u8));
+        const nl = joe_realloc(@ptrCast(vm_urls), bytes) orelse return -1;
+        const urls: [*]?[*:0]u8 = @ptrCast(@alignCast(nl));
+        const old: usize = if (vm_urls_size > 0) @intCast(vm_urls_size) else 0;
+        if (old < need_usz) @memset(urls[old..need_usz], null);
+        vm_urls = urls;
+        vm_urls_size = need;
+    } else {
+        vmFreeLinkUrls();
+        @memset(vm_urls.?[0..need_usz], null);
+    }
+
+    vm_ready = 1;
+    return 0;
+}
+
+pub export fn zig_bw_vm_hide() ?[*]u8 {
+    return vm_hide;
+}
+pub export fn zig_bw_vm_hide_size() c_int {
+    return vm_hide_size;
+}
+pub export fn zig_bw_vm_subst() ?[*]c_int {
+    return vm_subst;
+}
+pub export fn zig_bw_vm_subst_size() c_int {
+    return vm_subst_size;
+}
+pub export fn zig_bw_vm_urls() ?[*]?[*:0]u8 {
+    return vm_urls;
+}
+pub export fn zig_bw_vm_urls_size() c_int {
+    return vm_urls_size;
+}
+pub export fn zig_bw_vm_col_map() ?[*]i64 {
+    return vm_col_map;
+}
+pub export fn zig_bw_vm_col_map_size() c_int {
+    return vm_col_map_size;
+}
+pub export fn zig_bw_vm_col_map_line_ptr() ?*i64 {
+    return &vm_col_map_line;
+}
+pub export fn zig_bw_vm_trs_ptr() ?*i64 {
+    return &vm_table_region_start;
+}
+pub export fn zig_bw_vm_tre_ptr() ?*i64 {
+    return &vm_table_region_end;
+}
+pub export fn zig_bw_vm_tsl_ptr() ?*i64 {
+    return &vm_table_separator_line;
+}
+pub export fn zig_bw_vm_tcfl_ptr() ?*i64 {
+    return &vm_table_cached_for_line;
+}
+pub export fn zig_bw_vm_tnrl_ptr() ?*i64 {
+    return &vm_table_no_region_line;
+}
+pub export fn zig_bw_vm_tcc_ptr() ?*c_int {
+    return &vm_table_col_count;
+}
+pub export fn zig_bw_vm_tcw() ?[*]c_int {
+    return &vm_table_col_width;
+}
+pub export fn zig_bw_vm_tca() ?[*]c_int {
+    return &vm_table_col_align;
+}
+pub export fn zig_bw_vm_tcap() c_int {
+    return @intCast(vm_max_table_cols);
+}
+pub export fn zig_bw_vm_ready() c_int {
+    return vm_ready;
+}
+
+/// Clear per-line Zig viewmode tables after paint (keep allocations).
+pub export fn zig_bw_vm_after(line_len: c_int) void {
+    const n: usize = @intCast(if (line_len > 0) line_len else 1);
+    if (vm_hide) |h| {
+        const cap: usize = if (vm_hide_size > 0) @intCast(vm_hide_size) else 0;
+        const clear_n = @min(n, cap);
+        if (clear_n > 0) @memset(h[0..clear_n], 0);
+    }
+    if (vm_subst) |s| {
+        const cap: usize = if (vm_subst_size > 0) @intCast(vm_subst_size) else 0;
+        const clear_n = @min(n, cap);
+        if (clear_n > 0) @memset(s[0..clear_n], 0);
+    }
+    vmFreeLinkUrls();
+    vm_ready = 0;
+}
+
+/// Feature 1.10: display column for buffer offset from Zig-owned col_map.
+/// Returns `-1` when map is missing / stale / out of range.
+pub export fn zig_bw_vm_display_col(buf_line: i64, buf_offset: i64) i64 {
+    const col_map = vm_col_map orelse return -1;
+    if (vm_col_map_line != buf_line) return -1;
+    if (buf_offset < 0 or buf_offset >= vm_col_map_size) return -1;
+    return col_map[@intCast(buf_offset)];
+}
+
+/// Free all Zig-owned viewmode statics (atexit / process cleanup).
+pub export fn zig_bw_vm_cleanup() void {
+    if (vm_hide) |h| {
+        joe_free(h);
+        vm_hide = null;
+    }
+    vm_hide_size = 0;
+    if (vm_subst) |s| {
+        joe_free(s);
+        vm_subst = null;
+    }
+    vm_subst_size = 0;
+    if (vm_col_map) |cm| {
+        joe_free(cm);
+        vm_col_map = null;
+    }
+    vm_col_map_size = 0;
+    vm_col_map_line = -1;
+    if (vm_urls != null) {
+        vmFreeLinkUrls();
+        joe_free(@ptrCast(vm_urls));
+        vm_urls = null;
+        vm_urls_size = 0;
+    }
+    vm_table_region_start = -1;
+    vm_table_region_end = -1;
+    vm_table_separator_line = -1;
+    vm_table_cached_for_line = -1;
+    vm_table_no_region_line = -1;
+    vm_table_col_count = 0;
+    @memset(&vm_table_col_width, 0);
+    @memset(&vm_table_col_align, 0);
+    vm_ready = 0;
+    vm_last_bw = null;
+}
+
 extern fn zig_c_bw_lgen_core(
     t: ?*SCRN,
     y: isize,
@@ -1243,10 +1476,71 @@ extern fn zig_c_bw_view_tcap() c_int;
 extern fn zig_c_bw_view_after(line_len: c_int) void;
 extern fn zig_c_bw_get_palette(t: ?*SCRN, out_len: ?*c_int) ?[*]c_int;
 
+extern fn zig_c_bw_get_visiblews(bw: ?*BW) c_int;
+extern fn zig_c_bw_get_ansi(bw: ?*BW) c_int;
+
+/// Paint preparsed viewmode line via Zig tables + `zig_bw_lgen` (skip C statics).
+fn paintViewBodyWithVm(
+    t: ?*SCRN,
+    y: isize,
+    screen: ?[*][COMPOSE]c_int,
+    attr_row: ?[*]c_int,
+    x: isize,
+    w: isize,
+    p: ?*P,
+    scr: i64,
+    from: i64,
+    to: i64,
+    st: HighlightState,
+    bw: ?*BW,
+) c_int {
+    const syntax = zig_c_bw_get_syntax(bw) orelse return -1;
+    const charmap = zig_c_bw_get_charmap(bw) orelse return -1;
+    const tab = zig_c_bw_get_tab(bw);
+    const top_line = zig_c_bw_get_top_line(bw);
+    const win_y = zig_c_bw_get_y(bw);
+    const buf_line = top_line + y - win_y;
+    const defatr = zig_c_bw_view_defatr(bw, buf_line);
+    var pal_len: c_int = 0;
+    const palette = zig_c_bw_get_palette(t, &pal_len);
+    const line_byte = zig_c_bw_pbyte(p);
+    return zig_bw_lgen(
+        t,
+        y,
+        screen,
+        attr_row,
+        x,
+        w,
+        p,
+        scr,
+        syntax,
+        st,
+        charmap,
+        tab,
+        defatr,
+        palette,
+        pal_len,
+        from,
+        to,
+        line_byte,
+        1, // preparsed / viewmode_skip_parse
+        zig_bw_vm_hide(),
+        zig_bw_vm_hide_size(),
+        zig_bw_vm_subst(),
+        zig_bw_vm_subst_size(),
+        zig_bw_vm_urls(),
+        zig_bw_vm_urls_size(),
+        zig_c_bw_get_visiblews(bw),
+        square,
+        zig_c_bw_get_ansi(bw),
+    );
+}
+
 /// Thin `lgen_view` entry (JOE_ZIG_BW_LGEN): prelude + dispatcher + paint cleanup.
 ///
-/// C keeps viewmode static storage (`zig_c_bw_view_*`) and the full Feature
-/// fallback body when this returns `-1`. Markdown syntax gating stays in C.
+/// Zig owns viewmode static storage (`zig_bw_vm_*`) under the gate. C keeps the
+/// Feature fallback body (+ `zig_c_bw_view_*` statics) when this returns `-1`.
+/// Markdown syntax gating stays in C.
 ///
 /// Returns paint result (`>= 0`) or `-1` to fall back to C `lgen_view`.
 pub export fn zig_bw_lgen_view_entry(
@@ -1331,33 +1625,34 @@ pub export fn zig_bw_lgen_view_entry(
     }
 
     const need: c_int = if (line_len > 0) line_len else 1;
-    if (zig_c_bw_view_prepare(bw, need) < 0) return -1;
+    if (zig_bw_vm_prepare(bw, need) < 0) return -1;
 
     if (line_truncated) {
-        zig_c_bw_view_after(line_len);
-        return zig_c_bw_view_paint_body(t, y, screen, attr_row, x, w, p, scr, from, to, st, bw);
+        const result = paintViewBodyWithVm(t, y, screen, attr_row, x, w, p, scr, from, to, st, bw);
+        zig_bw_vm_after(line_len);
+        return result;
     }
 
     if (attr_buf == null or attr_size <= 0) return -1;
 
-    const hide = zig_c_bw_view_hide() orelse return -1;
-    const hide_size = zig_c_bw_view_hide_size();
-    const subst = zig_c_bw_view_subst() orelse return -1;
-    const subst_size = zig_c_bw_view_subst_size();
-    const urls = zig_c_bw_view_urls() orelse return -1;
-    const urls_size = zig_c_bw_view_urls_size();
-    const col_map = zig_c_bw_view_col_map() orelse return -1;
-    const col_map_size = zig_c_bw_view_col_map_size();
-    const col_map_line = zig_c_bw_view_col_map_line_ptr() orelse return -1;
-    const trs = zig_c_bw_view_trs_ptr() orelse return -1;
-    const tre = zig_c_bw_view_tre_ptr() orelse return -1;
-    const tsl = zig_c_bw_view_tsl_ptr() orelse return -1;
-    const tcfl = zig_c_bw_view_tcfl_ptr() orelse return -1;
-    const tnrl = zig_c_bw_view_tnrl_ptr() orelse return -1;
-    const tcc = zig_c_bw_view_tcc_ptr() orelse return -1;
-    const tcw = zig_c_bw_view_tcw() orelse return -1;
-    const tca = zig_c_bw_view_tca() orelse return -1;
-    const tcap = zig_c_bw_view_tcap();
+    const hide = zig_bw_vm_hide() orelse return -1;
+    const hide_size = zig_bw_vm_hide_size();
+    const subst = zig_bw_vm_subst() orelse return -1;
+    const subst_size = zig_bw_vm_subst_size();
+    const urls = zig_bw_vm_urls() orelse return -1;
+    const urls_size = zig_bw_vm_urls_size();
+    const col_map = zig_bw_vm_col_map() orelse return -1;
+    const col_map_size = zig_bw_vm_col_map_size();
+    const col_map_line = zig_bw_vm_col_map_line_ptr() orelse return -1;
+    const trs = zig_bw_vm_trs_ptr() orelse return -1;
+    const tre = zig_bw_vm_tre_ptr() orelse return -1;
+    const tsl = zig_bw_vm_tsl_ptr() orelse return -1;
+    const tcfl = zig_bw_vm_tcfl_ptr() orelse return -1;
+    const tnrl = zig_bw_vm_tnrl_ptr() orelse return -1;
+    const tcc = zig_bw_vm_tcc_ptr() orelse return -1;
+    const tcw = zig_bw_vm_tcw() orelse return -1;
+    const tca = zig_bw_vm_tca() orelse return -1;
+    const tcap = zig_bw_vm_tcap();
 
     var pal_len: c_int = 0;
     const palette = zig_c_bw_get_palette(t, &pal_len);
@@ -1405,15 +1700,18 @@ pub export fn zig_bw_lgen_view_entry(
         pal_len,
         utf8,
     );
-    if (z < 0) return -1;
+    if (z < 0) {
+        zig_bw_vm_after(line_len);
+        return -1;
+    }
 
     if (z == 1) {
         _ = pnextl(p);
-        zig_c_bw_view_after(line_len);
+        zig_bw_vm_after(line_len);
         return 0;
     }
-    const result = zig_c_bw_view_paint_body(t, y, screen, attr_row, x, w, p, scr, from, to, st, bw);
-    zig_c_bw_view_after(line_len);
+    const result = paintViewBodyWithVm(t, y, screen, attr_row, x, w, p, scr, from, to, st, bw);
+    zig_bw_vm_after(line_len);
     return result;
 }
 
@@ -1424,12 +1722,12 @@ pub export fn zig_bw_table_simple(
     line: ?[*]const u8,
     line_len: c_int,
     row_type: c_int,
-    vm_subst: ?[*]c_int,
-    vm_subst_len: c_int,
+    out_subst: ?[*]c_int,
+    out_subst_len: c_int,
 ) c_int {
     if (zig_bw_lgen_enabled == 0) return -1;
     if (line == null or line_len < 0) return -1;
-    if (vm_subst == null or vm_subst_len < line_len) return -1;
+    if (out_subst == null or out_subst_len < line_len) return -1;
 
     // Match live C residual: only separator mutates; others succeed as no-op.
     if (row_type != 2) return 0; // TABLE_ROW_SEPARATOR == 2
@@ -1444,7 +1742,7 @@ pub export fn zig_bw_table_simple(
 
     var i: usize = 0;
     while (i < n) : (i += 1) {
-        if (subst[i] != 0) vm_subst.?[i] = @intCast(subst[i]);
+        if (subst[i] != 0) out_subst.?[i] = @intCast(subst[i]);
     }
     return 0;
 }
@@ -1640,21 +1938,26 @@ extern fn zig_c_bw_set_cursor_xcol(w: ?*BW, xcol: i64) void;
 
 fn applyBwgenViewCursor(w: ?*BW) void {
     if (zig_c_bw_get_viewmode(w) == 0) return;
-    const col_map = zig_c_bw_view_col_map() orelse return;
-    const col_map_size = zig_c_bw_view_col_map_size();
-    if (col_map_size <= 0) return;
-    const map_line_ptr = zig_c_bw_view_col_map_line_ptr() orelse return;
     const cursor = zig_c_bw_get_cursor(w) orelse return;
     const buf_line = zig_c_bw_pline_no(cursor);
-    if (map_line_ptr.* != buf_line) return;
 
     const tmp = pdup(cursor, "zig_bw_bwgen_entry_cursor") orelse return;
     defer prm(tmp);
     zig_c_bw_p_goto_bol(tmp);
     const cursor_offset = zig_c_bw_pbyte(cursor) - zig_c_bw_pbyte(tmp);
-    if (cursor_offset >= 0 and cursor_offset < col_map_size) {
-        zig_c_bw_set_cursor_xcol(w, col_map[@intCast(cursor_offset)]);
+
+    // Prefer Zig-owned map under the gate; fall back to C Feature statics.
+    var xcol = zig_bw_vm_display_col(buf_line, cursor_offset);
+    if (xcol < 0) {
+        const col_map = zig_c_bw_view_col_map() orelse return;
+        const col_map_size = zig_c_bw_view_col_map_size();
+        if (col_map_size <= 0) return;
+        const map_line_ptr = zig_c_bw_view_col_map_line_ptr() orelse return;
+        if (map_line_ptr.* != buf_line) return;
+        if (cursor_offset < 0 or cursor_offset >= col_map_size) return;
+        xcol = col_map[@intCast(cursor_offset)];
     }
+    zig_c_bw_set_cursor_xcol(w, xcol);
 }
 
 /// Thin `bwgen` entry (JOE_ZIG_BW_LGEN): lattr/viewmode/mark setup + paint loops +
@@ -2056,14 +2359,14 @@ pub export fn zig_bw_lgen(
     to: i64,
     line_byte: i64,
     viewmode: c_int,
-    vm_hide: ?[*]u8,
-    vm_hide_len: c_int,
-    vm_subst: ?[*]c_int,
-    vm_subst_len: c_int,
-    vm_urls: ?[*]?[*:0]u8,
-    vm_urls_len: c_int,
+    in_hide: ?[*]u8,
+    in_hide_len: c_int,
+    in_subst: ?[*]c_int,
+    in_subst_len: c_int,
+    in_urls: ?[*]?[*:0]u8,
+    in_urls_len: c_int,
     visiblews: c_int,
-    square: c_int,
+    do_square: c_int,
     ansi: c_int,
 ) c_int {
     if (zig_bw_lgen_enabled == 0) return -1;
@@ -2162,8 +2465,8 @@ pub export fn zig_bw_lgen(
 
     // Linear mark inverse on raw bytes (ESC bytes count in buffer offsets).
     // Square marks wait until after ansi strip (display columns skip ESC).
-    // `bwgen` already scopes square to mark lines (passes from=to=0 off-line).
-    if (from != to and content.len > 0 and square == 0) {
+    // `bwgen` already scopes square marks to mark lines (passes from=to=0 off-line).
+    if (from != to and content.len > 0 and do_square == 0) {
         if (attrs_owned == null) {
             const byte_attrs = alloc.alloc(Attribute, content.len) catch return -1;
             @memset(byte_attrs, .none);
@@ -2188,12 +2491,12 @@ pub export fn zig_bw_lgen(
         const n = content.len;
 
         const hide_slice: []u8 = blk: {
-            if (vm_hide != null and vm_hide_len > 0) {
-                const hn = @min(n, @as(usize, @intCast(vm_hide_len)));
-                if (hn == n) break :blk vm_hide.?[0..hn];
+            if (in_hide != null and in_hide_len > 0) {
+                const hn = @min(n, @as(usize, @intCast(in_hide_len)));
+                if (hn == n) break :blk in_hide.?[0..hn];
                 const padded = alloc.alloc(u8, n) catch return -1;
                 @memset(padded, 0);
-                @memcpy(padded[0..hn], vm_hide.?[0..hn]);
+                @memcpy(padded[0..hn], in_hide.?[0..hn]);
                 hide_owned = padded;
                 break :blk padded;
             }
@@ -2205,11 +2508,11 @@ pub export fn zig_bw_lgen(
 
         const subst = alloc.alloc(u21, n) catch return -1;
         @memset(subst, 0);
-        if (vm_subst != null and vm_subst_len > 0) {
-            const sn = @min(n, @as(usize, @intCast(vm_subst_len)));
+        if (in_subst != null and in_subst_len > 0) {
+            const sn = @min(n, @as(usize, @intCast(in_subst_len)));
             var i: usize = 0;
             while (i < sn) : (i += 1) {
-                const v = vm_subst.?[i];
+                const v = in_subst.?[i];
                 if (v > 0) subst[i] = @intCast(v);
             }
         }
@@ -2217,11 +2520,11 @@ pub export fn zig_bw_lgen(
 
         const links = alloc.alloc(?[]const u8, n) catch return -1;
         @memset(links, null);
-        if (vm_urls != null and vm_urls_len > 0) {
-            const un = @min(n, @as(usize, @intCast(vm_urls_len)));
+        if (in_urls != null and in_urls_len > 0) {
+            const un = @min(n, @as(usize, @intCast(in_urls_len)));
             var i: usize = 0;
             while (i < un) : (i += 1) {
-                if (vm_urls.?[i]) |up| links[i] = std.mem.span(up);
+                if (in_urls.?[i]) |up| links[i] = std.mem.span(up);
             }
         }
         links_owned = links;
@@ -2285,7 +2588,7 @@ pub export fn zig_bw_lgen(
     }
 
     // Square mark inverse on display columns (post-ansi-strip).
-    if (from != to and paint_content.len > 0 and square != 0) {
+    if (from != to and paint_content.len > 0 and do_square != 0) {
         const mutable: []Attribute = blk: {
             if (ansi_attrs_owned) |a| break :blk a;
             if (attrs_owned) |a| break :blk a;

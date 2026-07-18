@@ -93,6 +93,9 @@ extern int zig_bw_lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *a
 extern int zig_bw_lgen_view_entry(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
 	ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,
 	HIGHLIGHT_STATE st, BW *bw);
+/* Path A: Zig-owned viewmode statics under JOE_ZIG_BW_LGEN. */
+extern off_t zig_bw_vm_display_col(off_t buf_line, off_t buf_offset);
+extern void zig_bw_vm_cleanup(void);
 /* Path A: gated lifecycle helpers. */
 extern int zig_bw_bwmove(BW *w, ptrdiff_t x, ptrdiff_t y);
 extern int zig_bw_bwresz(BW *w, ptrdiff_t wi, ptrdiff_t he);
@@ -695,6 +698,12 @@ static BW *viewmode_last_bw = NULL;
  * Returns -1 if not in view mode or map not available. */
 off_t viewmode_display_col(off_t buf_line, off_t buf_offset)
 {
+	/* Prefer Zig-owned col_map under the gate; C Feature statics as fallback. */
+	if (zig_bw_lgen_enabled) {
+		off_t z = zig_bw_vm_display_col(buf_line, buf_offset);
+		if (z >= 0)
+			return z;
+	}
 	if (viewmode_col_map && viewmode_col_map_line == buf_line &&
 	    buf_offset >= 0 && buf_offset < viewmode_col_map_size) {
 		return viewmode_col_map[buf_offset];
@@ -730,6 +739,8 @@ static void viewmode_free_link_urls(void)
 /* Cleanup view mode static globals on exit */
 void viewmode_cleanup(void)
 {
+	/* Always free Zig-owned tables (safe/idempotent when unused). */
+	zig_bw_vm_cleanup();
 	if (viewmode_hide) {
 		joe_free(viewmode_hide);
 		viewmode_hide = NULL;
@@ -3580,6 +3591,16 @@ int zig_c_bw_get_viewmode(BW *w)
 	return (w && w->o.viewmode) ? 1 : 0;
 }
 
+int zig_c_bw_get_visiblews(BW *w)
+{
+	return (w && w->o.visiblews) ? 1 : 0;
+}
+
+int zig_c_bw_get_ansi(BW *w)
+{
+	return (w && w->o.ansi) ? 1 : 0;
+}
+
 void bwgen(BW *w, int linums, int linchg)
 {
 	int (*screen)[COMPOSE];
@@ -3726,21 +3747,26 @@ void bwgen(BW *w, int linums, int linchg)
 		prm(p);
 
 bwgen_viewmode_cursor:
-	/* Feature 1.10: Update cursor position for view mode after rendering */
-	if (w->o.viewmode && viewmode_col_map && viewmode_col_map_size > 0) {
+	/* Feature 1.10: Update cursor position for view mode after rendering.
+	 * Prefer Zig-owned col_map under the gate; C Feature statics as fallback. */
+	if (w->o.viewmode) {
 		off_t buf_line = w->cursor->line;
-		if (viewmode_col_map_line == buf_line) {
-			/* Compute buffer byte offset relative to BOL */
-			P *cur_tmp = pdup(w->cursor, "bwgen_cursor");
-			p_goto_bol(cur_tmp);
-			off_t cursor_offset = w->cursor->byte - cur_tmp->byte;
-			prm(cur_tmp);
+		P *cur_tmp = pdup(w->cursor, "bwgen_cursor");
+		p_goto_bol(cur_tmp);
+		off_t cursor_offset = w->cursor->byte - cur_tmp->byte;
+		prm(cur_tmp);
 
-			/* Look up display column from map */
-			if (cursor_offset >= 0 && cursor_offset < viewmode_col_map_size) {
-				w->cursor->xcol = viewmode_col_map[cursor_offset];
-				w->cursor->valcol = 1;
-			}
+		off_t xcol = -1;
+		if (zig_bw_lgen_enabled)
+			xcol = zig_bw_vm_display_col(buf_line, cursor_offset);
+		if (xcol < 0
+		    && viewmode_col_map && viewmode_col_map_size > 0
+		    && viewmode_col_map_line == buf_line
+		    && cursor_offset >= 0 && cursor_offset < viewmode_col_map_size)
+			xcol = viewmode_col_map[cursor_offset];
+		if (xcol >= 0) {
+			w->cursor->xcol = xcol;
+			w->cursor->valcol = 1;
 		}
 	}
 }

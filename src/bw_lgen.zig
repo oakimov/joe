@@ -1400,20 +1400,6 @@ pub export fn zig_bw_vm_cleanup() void {
     vm_last_bw = null;
 }
 
-extern fn zig_c_bw_lgen_core(
-    t: ?*SCRN,
-    y: isize,
-    screen: ?[*][COMPOSE]c_int,
-    attr_row: ?[*]c_int,
-    x: isize,
-    w: isize,
-    p: ?*P,
-    scr: i64,
-    from: i64,
-    to: i64,
-    st: HighlightState,
-    bw: ?*BW,
-) c_int;
 extern fn zig_c_bw_get_top(bw: ?*BW) ?*P;
 extern fn zig_c_bw_get_cursor(bw: ?*BW) ?*P;
 extern fn zig_c_bw_get_y(bw: ?*BW) isize;
@@ -1448,8 +1434,8 @@ fn viewDefatr(bw: ?*BW, buf_line: i64) c_int {
     return bg_text;
 }
 
-/// Paint preparsed viewmode line via Zig tables + `zig_bw_lgen` (skip C statics).
-fn paintViewBodyWithVm(
+/// Paint a line via `zig_bw_lgen` (raw or preparsed viewmode tables).
+fn paintBodyWithLgen(
     t: ?*SCRN,
     y: isize,
     screen: ?[*][COMPOSE]c_int,
@@ -1462,6 +1448,7 @@ fn paintViewBodyWithVm(
     to: i64,
     st: HighlightState,
     bw: ?*BW,
+    preparsed: bool,
 ) c_int {
     const syntax = zig_c_bw_get_syntax(bw) orelse return -1;
     const charmap = zig_c_bw_get_charmap(bw) orelse return -1;
@@ -1473,6 +1460,38 @@ fn paintViewBodyWithVm(
     var pal_len: c_int = 0;
     const palette = zig_c_bw_get_palette(t, &pal_len);
     const line_byte = zig_c_bw_pbyte(p);
+    if (preparsed) {
+        return zig_bw_lgen(
+            t,
+            y,
+            screen,
+            attr_row,
+            x,
+            w,
+            p,
+            scr,
+            syntax,
+            st,
+            charmap,
+            tab,
+            defatr,
+            palette,
+            pal_len,
+            from,
+            to,
+            line_byte,
+            1, // preparsed / viewmode_skip_parse
+            zig_bw_vm_hide(),
+            zig_bw_vm_hide_size(),
+            zig_bw_vm_subst(),
+            zig_bw_vm_subst_size(),
+            zig_bw_vm_urls(),
+            zig_bw_vm_urls_size(),
+            zig_c_bw_get_visiblews(bw),
+            square,
+            zig_c_bw_get_ansi(bw),
+        );
+    }
     return zig_bw_lgen(
         t,
         y,
@@ -1492,17 +1511,35 @@ fn paintViewBodyWithVm(
         from,
         to,
         line_byte,
-        1, // preparsed / viewmode_skip_parse
-        zig_bw_vm_hide(),
-        zig_bw_vm_hide_size(),
-        zig_bw_vm_subst(),
-        zig_bw_vm_subst_size(),
-        zig_bw_vm_urls(),
-        zig_bw_vm_urls_size(),
+        0,
+        null,
+        0,
+        null,
+        0,
+        null,
+        0,
         zig_c_bw_get_visiblews(bw),
         square,
         zig_c_bw_get_ansi(bw),
     );
+}
+
+/// Paint preparsed viewmode line via Zig tables + `zig_bw_lgen`.
+fn paintViewBodyWithVm(
+    t: ?*SCRN,
+    y: isize,
+    screen: ?[*][COMPOSE]c_int,
+    attr_row: ?[*]c_int,
+    x: isize,
+    w: isize,
+    p: ?*P,
+    scr: i64,
+    from: i64,
+    to: i64,
+    st: HighlightState,
+    bw: ?*BW,
+) c_int {
+    return paintBodyWithLgen(t, y, screen, attr_row, x, w, p, scr, from, to, st, bw, true);
 }
 
 /// Thin `lgen_view` entry (Path A): prelude + dispatcher + paint cleanup.
@@ -1535,7 +1572,7 @@ pub export fn zig_bw_lgen_view_entry(
     const win_y = zig_c_bw_get_y(bw);
     const tab = zig_c_bw_get_tab(bw);
 
-    // Pathological line length: match C early bail to `lgen_core`.
+    // Pathological line length: skip viewmode transforms; paint raw via Zig.
     {
         const lp = pdup(p, "zig_bw_lgen_view_entry_len") orelse return -1;
         defer prm(lp);
@@ -1546,7 +1583,7 @@ pub export fn zig_bw_lgen_view_entry(
             if (ch == NO_MORE_DATA or ch == '\n') break;
             ll += 1;
             if (ll > viewmode_max_line_bytes) {
-                return zig_c_bw_lgen_core(t, y, screen, attr_row, x, w, p, scr, from, to, st, bw);
+                return paintBodyWithLgen(t, y, screen, attr_row, x, w, p, scr, from, to, st, bw, false);
             }
         }
     }
@@ -2287,7 +2324,7 @@ pub export fn zig_bw_table_row(
 
 /// Returns:
 /// - `0`/`1` — same meaning as C `lgen_core` (`updtab` done flag from `eraeol`)
-/// - `-1` — caller should fall back to C `lgen_core`
+/// - `-1` — hard failure (C aborts)
 pub export fn zig_bw_lgen(
     t: ?*SCRN,
     y: isize,

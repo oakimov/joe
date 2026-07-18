@@ -8,8 +8,7 @@
 #include "types.h"
 #include <limits.h>
 
-/* Path A: Zig-native lgen_core body paint (always on).
- * Falls back to C when Zig returns -1 (OOM / oversize / hard fail). */
+/* Path A: Zig-native lgen_core body paint (always on; abort on -1). */
 extern int zig_bw_lgen(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
 	ptrdiff_t x0, ptrdiff_t x1, P *p, off_t scr, struct high_syntax *syntax,
 	HIGHLIGHT_STATE st, struct charmap *charmap, int tab, int defatr,
@@ -27,45 +26,44 @@ extern int zig_bw_bwgen(BW *w, SCRN *t, int (*scrn)[COMPOSE], int *attr_base,
 	ptrdiff_t mid_y, P *top, P *cursor, off_t top_line, off_t offset,
 	int linums, int linchg, int dosquare,
 	off_t from, off_t to, off_t fromline, off_t toline);
-/* Path A: gated thin bwgen entry (lattr/viewmode/mark setup + loops + cursor). */
+/* Path A: thin bwgen entry (lattr/viewmode/mark setup + loops + cursor). */
 extern int zig_bw_bwgen_entry(BW *w, int linums, int linchg);
-/* Path A: gated Zig bwgenh hex dump paint (mark setup stays in C). */
+/* Path A: Zig bwgenh hex dump paint (mark setup stays in C). */
 extern int zig_bw_bwgenh(SCRN *t, int (*scrn)[COMPOSE], int *attr_base,
 	ptrdiff_t scr_w, ptrdiff_t win_y, ptrdiff_t win_h, ptrdiff_t win_w,
 	off_t offset, P *top, off_t cursor_byte, int hiline,
 	off_t from, off_t to, int bg_text_atr, int bg_linum_atr,
 	int bg_curlinum_atr, int bg_cursor_atr);
-/* Path A: gated thin bwgenh entry (mark setup + hex paint). */
+/* Path A: thin bwgenh entry (mark setup + hex paint). */
 extern int zig_bw_bwgenh_entry(BW *w);
-/* Path A: gated Zig cursor follow (text + hex). */
+/* Path A: Zig cursor follow (text + hex). */
 extern int zig_bw_bwfllwt(P *top, P *cursor, SCRN *t, int *updtab,
 	ptrdiff_t y, ptrdiff_t h, ptrdiff_t w,
 	off_t *offset, off_t *curlin, int hiline);
 extern int zig_bw_bwfllwh(P *top, P *cursor, SCRN *t, int *updtab,
 	ptrdiff_t y, ptrdiff_t h, ptrdiff_t w, off_t *offset);
-/* Path A: gated Zig post-edit window scroll. */
+/* Path A: Zig post-edit window scroll. */
 extern int zig_bw_bwins(SCRN *t, int *updtab, ptrdiff_t *sary, ptrdiff_t li,
 	ptrdiff_t y, ptrdiff_t h, off_t top_line, off_t eof_line,
 	off_t l, off_t n, int flg, int do_highlight);
 extern int zig_bw_bwdel(SCRN *t, int *updtab,
 	ptrdiff_t y, ptrdiff_t h, off_t top_line, off_t eof_line,
 	off_t l, off_t n, int flg, int do_highlight);
-/* Path A: gated thin lgen_view entry (prelude + dispatcher + paint cleanup).
- * Piecemeal Feature helpers live only in Zig now; C keeps pure Feature fallback. */
+/* Path A: thin lgen_view entry (prelude + dispatcher + paint cleanup). */
 extern int zig_bw_lgen_view_entry(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
 	ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,
 	HIGHLIGHT_STATE st, BW *bw);
 /* Path A: Zig-owned viewmode statics for Path A. */
 extern off_t zig_bw_vm_display_col(off_t buf_line, off_t buf_offset);
 extern void zig_bw_vm_cleanup(void);
-/* Path A: gated lifecycle helpers. */
+/* Path A: lifecycle helpers. */
 extern int zig_bw_bwmove(BW *w, ptrdiff_t x, ptrdiff_t y);
 extern int zig_bw_bwresz(BW *w, ptrdiff_t wi, ptrdiff_t he);
 extern int zig_bw_bwmk(W *window, B *b, int prompt, BW **out_bw);
 extern int zig_bw_bwrm(BW *w);
 extern int zig_bw_orphit(BW *bw);
 extern int zig_bw_calclincols(BW *bw);
-/* Path A: gated non-paint helpers. */
+/* Path A: non-paint helpers. */
 extern int zig_bw_get_file_pos(const char *name, off_t *out);
 extern int zig_bw_set_file_pos(const char *name, off_t pos);
 extern int zig_bw_save_file_pos(FILE *f);
@@ -220,170 +218,17 @@ void bwdel(BW *w, off_t l, off_t n, int flg)
 }
 
 
-struct ansi_sm
-{
-	int state;
-};
-
-static int ansi_decode(struct ansi_sm *sm, int bc)
-{
-	if (sm->state) {
-		if ((bc >= 'a' && bc <= 'z') || (bc >= 'A' && bc <= 'Z'))
-			sm->state = 0;
-		return -1;
-	} else if (bc == '\033') {
-		sm->state = 1;
-		return -1;
-	} else
-		return bc;
-}
-
-static void ansi_init(struct ansi_sm *sm)
-{
-	sm->state = 0;
-}
-
-#define SELECT_IF(c)	{ if (c) { ca = selectatr; cm = selectmask; } else { ca = 0; cm = -1; } }
-
-/* Sanitize a string for terminal output: replace control characters
- * (0x00-0x1F, 0x7F) with '?'.  Returns a static buffer that is reused. */
-static const char *sanitize_for_terminal(const char *s)
-{
-	static char buf[256];
-	if (!s) return "(null)";
-	size_t len = strlen(s);
-	if (len >= sizeof(buf)) len = sizeof(buf) - 1;
-	size_t i;
-	for (i = 0; i < len; i++) {
-		unsigned char c = (unsigned char)s[i];
-		buf[i] = (c <= 0x1F || c == 0x7F) ? '?' : (char)c;
-	}
-	buf[len] = '\0';
-	return buf;
-}
-
-static struct state_debug_data out_osc8(const struct state_debug_data *oldstate, const struct state_debug_data *newstate, int opt)
-{
-	static const struct state_debug_data empty = {};
-
-	opt &= 3;
-
-	if (!oldstate) oldstate = &empty;
-	if (!newstate) newstate = &empty;
-
-	switch (opt) {
-		case 1:
-			if (oldstate->name == newstate->name)
-				return *oldstate;
-
-			if (oldstate->name >= 0)
-				ttputs("\x1B]8;;\x1B\\");
-
-			if (newstate && newstate->name >= 0) {
-				ttputs("\x1B]8;id=");
-				ttputs(sanitize_for_terminal(state_names[newstate->name]));
-				ttputs(";");
-				ttputs(sanitize_for_terminal(state_names[newstate->name]));
-				ttputs("\x1B\\");
-			}
-			break;
-		case 2:
-			if (oldstate->recolor == newstate->recolor)
-				return *oldstate;
-
-			if (oldstate->recolor)
-				ttputs("\x1B]8;;\x1B\\");
-
-			if (newstate && newstate->name >= 0) {
-				ttputs("\x1B]8;id=");
-				ttputs(newstate->recolor ? sanitize_for_terminal(state_names[newstate->recolor]) : "(idle)");
-				ttputs(";");
-				ttputs(newstate->recolor ? sanitize_for_terminal(state_names[newstate->recolor]) : "(idle)");
-				ttputs("\x1B\\");
-			}
-			break;
-		case 3:
-			if (oldstate->name == newstate->name && oldstate->recolor == newstate->recolor)
-				return *oldstate;
-
-			if (oldstate->name >= 0 || oldstate->recolor >= 0)
-				ttputs("\x1B]8;;\x1B\\");
-
-			if (newstate && newstate->name >= 0) {
-				ttputs("\x1B]8;id=");
-				ttputs(sanitize_for_terminal(state_names[newstate->name]));
-				ttputs(";");
-				ttputs(sanitize_for_terminal(state_names[newstate->name]));
-				if (newstate->recolor && newstate->recolor != newstate->name) {
-					/* ugh, only ASCII for OSC-8 pop-up text */
-					ttputs("->");
-					ttputs(sanitize_for_terminal(state_names[newstate->recolor]));
-				}
-				ttputs("\x1B\\");
-			}
-	}
-
-	return newstate ? *newstate : empty;
-}
-
-static void end_osc8(const struct state_debug_data *oldstate, int opt)
-{
-	if ((opt & 1 && oldstate->name >= 0) || (opt & 2 && oldstate->recolor >= 0))
-		ttputs("\x1B]8;;\x1B\\");
-}
-#define OUT_osc8(bw,os,ns) ((bw)->b->o.syntax_debug ? out_osc8(&(os), &(ns), (bw)->b->o.syntax_debug) : (os))
-#define END_osc8(bw,old) end_osc8(&(old), (bw)->b->o.syntax_debug)
-
-static void end_osc8_link(const char *old_url)
-{
-	if (old_url)
-		ttputs("\x1B]8;;\x1B\\");
-}
-
-static const char *out_osc8_link(const char *old_url, const char *new_url)
-{
-	if (old_url == new_url)
-		return old_url;
-
-	if (old_url)
-		ttputs("\x1B]8;;\x1B\\");
-
-	if (new_url) {
-		ttputs("\x1B]8;;");
-		/* Sanitize URL: strip all control characters to prevent terminal injection */
-		const char *p;
-		for (p = new_url; *p; p++) {
-			unsigned char ch = (unsigned char)*p;
-			if (ch < 0x20 || ch == 0x7F || (ch >= 0x80 && ch <= 0x9F))
-				continue;
-			ttputc(*p);
-		}
-		ttputs("\x1B\\");
-	}
-
-	return new_url;
-}
 
 /* Update a single line */
 
 static int lgen_core(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,HIGHLIGHT_STATE st,BW *bw);
 static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,HIGHLIGHT_STATE st,BW *bw);
 
-/* Path A owns viewmode tables in Zig (`zig_bw_vm_*`). C Feature chrome deleted.
- * Stubs remain so legacy `lgen_core` viewmode_skip_parse branches compile;
- * they stay NULL/0 because Feature fallback is gone. */
-static int viewmode_skip_parse = 0;
+/* Path A owns viewmode tables in Zig (`zig_bw_vm_*`). */
 
-/* Caps used by C `lgen_core` / `zig_c_bw_read_line` to avoid OOM on huge lines. */
+/* Caps used by `zig_c_bw_read_line` to avoid OOM on huge lines. */
 #define VIEWMODE_MAX_LINE_BYTES (1024 * 1024)
 #define VIEWMODE_TABLE_SCAN_MAX_BYTES (16 * 1024)
-
-static char *viewmode_hide = NULL;
-static int viewmode_hide_size = 0;
-static int *viewmode_substitute = NULL;
-static int viewmode_substitute_size = 0;
-static char **viewmode_link_url = NULL;
-static int viewmode_link_url_size = 0;
 
 off_t viewmode_display_col(off_t buf_line, off_t buf_offset)
 {
@@ -393,12 +238,6 @@ off_t viewmode_display_col(off_t buf_line, off_t buf_offset)
 void viewmode_cleanup(void)
 {
 	zig_bw_vm_cleanup();
-	(void)viewmode_hide;
-	(void)viewmode_hide_size;
-	(void)viewmode_substitute;
-	(void)viewmode_substitute_size;
-	(void)viewmode_link_url;
-	(void)viewmode_link_url_size;
 }
 
 
@@ -412,18 +251,8 @@ static int lgen(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, ptrdiff
 }
 
 static int lgen_core(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,HIGHLIGHT_STATE st,BW *bw)
-
-
-            			/* Screen line address */
-      				/* Window */
-     				/* Buffer pointer */
-         			/* Starting column to display */
-              			/* Range for marked block */
 {
-	/* Path A: Zig-native paint for UTF-8 and byte charmaps (+ linear/square
-	 * marks + viewmode tables + visiblews + ansi ESC hide). Feature 2.2 padded
-	 * table rows skip lgen_core (painted in Zig entry / C Feature fallback in
-	 * lgen_view). dspasis lives in outatr. */
+	/* Path A always-on: Zig-native body paint. */
 	if (p && p->b && p->b->o.charmap) {
 		int defatr = (bw->o.hiline && bw->cursor->line == y - bw->y + bw->top->line)
 			? (bg_text & curlinmask) | bg_curlin
@@ -431,462 +260,13 @@ static int lgen_core(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 		int z = zig_bw_lgen(t, y, screen, attr, x, w, p, scr,
 			bw->o.syntax, st, p->b->o.charmap, p->b->o.tab, BG_COLOR(defatr),
 			t->palette, t->palette ? 256 : 0, from, to, p->byte,
-			viewmode_skip_parse,
-			viewmode_skip_parse ? viewmode_hide : NULL, viewmode_hide_size,
-			viewmode_skip_parse ? viewmode_substitute : NULL, viewmode_substitute_size,
-			viewmode_skip_parse ? viewmode_link_url : NULL, viewmode_link_url_size,
+			0, NULL, 0, NULL, 0, NULL, 0,
 			bw->o.visiblews, square, bw->o.ansi);
 		if (z >= 0)
 			return z;
 	}
-
-	int ansi = bw->o.ansi;
-	ptrdiff_t ox = x;
-	int tach;
-	int done = 1;
-	off_t col = 0;
-	off_t byte = p->byte;
-	char *bp;	/* Buffer pointer, 0 if not set */
-	ptrdiff_t amnt;		/* Amount left in this segment of the buffer */
-	int c;
-	off_t ta;
-	char bc;
-	int ungetit = NO_MORE_DATA;
-	int sub_c = 0;		/* Unicode substitution for view mode */
-
-	struct utf8_sm utf8_sm;
-	struct ansi_sm ansi_sm;
-
-	const attr_data *syn = NULL;
-	const struct state_debug_data *syndebug = NULL;
-	struct state_debug_data atr_state = {};
-	struct state_debug_data old_atr_state = {};
-        P *tmp;
-        int idx=0;
-	int highlight = (st.state != -1);
-        int defatr = (bw->o.hiline && bw->cursor->line == y - bw->y + bw->top->line) ? (bg_text & curlinmask) | bg_curlin : bg_text;
-        int atr = BG_COLOR(defatr);
-        int ca = 0;		/* Additional attributes for current character */
-        int cm = -1;		/* Attribute mask for current character */
-        const char *current_link_url = NULL;	/* OSC 8 link tracking for view mode */
-
-	utf8_init(&utf8_sm);
-	ansi_init(&ansi_sm);
-
-	if (highlight) {
-		if (!viewmode_skip_parse) {
-			/* Avoid unbounded per-line allocations in the highlighter:
-			 * a single huge line can otherwise OOM via attr_buf growth. */
-			P *lp = pdup(p, "lgen_len");
-			p_goto_bol(lp);
-			int ll = 0;
-			int ch;
-			while ((ch = pgetb(lp)) != NO_MORE_DATA && ch != '\n') {
-				if (++ll > VIEWMODE_MAX_LINE_BYTES) {
-					highlight = 0;
-					break;
-				}
-			}
-			prm(lp);
-			if (!highlight)
-				goto no_parse;
-			tmp=pdup(p, "lgen");
-			p_goto_bol(tmp);
-			parse(bw->o.syntax,tmp,st,p->b->o.charmap);
-			prm(tmp);
-		}
-no_parse:
-		syn = attr_buf;
-		syndebug = syndebug_buf;
-	}
-
-/* Initialize bp and amnt from p */
-	if (p->ofst >= p->hdr->hole) {
-		bp = p->ptr + p->hdr->ehole + p->ofst - p->hdr->hole;
-		amnt = SEGSIZ - p->hdr->ehole - (p->ofst - p->hdr->hole);
-	} else {
-		bp = p->ptr + p->ofst;
-		amnt = p->hdr->hole - p->ofst;
-	}
-
-	if (col == scr)
-		goto loop;
-      lp:			/* Display next character */
-	if (amnt)
-		do {
-			if (ungetit == NO_MORE_DATA)
-				bc = *bp++;
-			else {
-				bc = TO_CHAR_OK(ungetit);
-				ungetit = NO_MORE_DATA;
-			}
-			sub_c = 0;
-			if (highlight) {
-				atr = syn[idx] & ~CONTEXT_MASK;
-				if (syndebug)
-					atr_state = syndebug[idx];
-				++idx;
-				if (viewmode_skip_parse && viewmode_hide && idx <= viewmode_hide_size && viewmode_hide[idx - 1])
-					bc = ' ';
-				if (viewmode_skip_parse && viewmode_substitute && idx <= viewmode_substitute_size && viewmode_substitute[idx - 1])
-					sub_c = viewmode_substitute[idx - 1];
-				if (viewmode_skip_parse && viewmode_link_url && idx <= viewmode_link_url_size && viewmode_link_url[idx - 1])
-					current_link_url = out_osc8_link(current_link_url, viewmode_link_url[idx - 1]);
-				else if (viewmode_skip_parse && current_link_url)
-					current_link_url = out_osc8_link(current_link_url, NULL);
-				if (!(atr & BG_MASK))
-					atr |= defatr & BG_MASK;
-				if (!(atr & FG_MASK))
-					atr |= defatr & FG_MASK;
-			}
-			if (p->b->o.crlf && bc == '\r') {
-				++byte;
-				if (!--amnt) {
-				      pppl:
-					if (bp == p->ptr + SEGSIZ) {
-						if (pnext(p)) {
-							bp = p->ptr;
-							amnt = p->hdr->hole;
-						} else
-							goto nnnl;
-					} else {
-						bp = p->ptr + p->hdr->ehole;
-						amnt = SEGSIZ - p->hdr->ehole;
-						if (!amnt)
-							goto pppl;
-					}
-				}
-				if (*bp == '\n') {
-					++bp;
-					++byte;
-					++amnt;
-					goto eobl;
-				}
-			      nnnl:
-				--byte;
-				++amnt;
-			}
-			if (square)
-				if (bc == '\t') {
-					off_t tcol = col + p->b->o.tab - col % p->b->o.tab;
-
-					SELECT_IF(tcol > from && tcol <= to);
-				} else {
-					SELECT_IF(col >= from && col < to);
-				}
-			else
-				SELECT_IF(byte >= from && byte < to);
-			++byte;
-			if (bc == '\t') {
-				ta = p->b->o.tab - col % p->b->o.tab;
-				if (ta + col > scr) {
-					ta -= scr - col;
-					tach = ' ';
-					goto dota;
-				}
-				if ((col += ta) == scr) {
-					--amnt;
-					goto loop;
-				}
-			} else if (bc == '\n')
-				goto eobl;
-			else {
-				int wid = 1;
-				if (p->b->o.charmap->type) {
-					c = utf8_decode(&utf8_sm,bc);
-
-					if (c>=0) { /* Normal decoded character */
-						if (sub_c > 0)
-							c = sub_c;
-						if (ansi) {
-							c = ansi_decode(&ansi_sm, c);
-							if (c >= 0) /* Not ansi */
-								wid = joe_wcwidth(1, c);
-							else { /* Skip ANSI character */
-								wid = 0;
-								++idx;
-							}
-						} else
-							wid = joe_wcwidth(1,c);
-					} else if(c == UTF8_ACCEPTED) /* Character taken */
-						wid = -1;
-					else if(c == UTF8_INCOMPLETE) { /* Incomplete sequence (FIXME: do something better here) */
-						wid = 1;
-						ungetit = c;
-						++amnt;
-						--byte;
-					}
-					else if(c == UTF8_BAD) /* Control character 128-191, 254, 255 */
-						wid = 1;
-				} else {
-					if (ansi) {
-						c = ansi_decode(&ansi_sm, bc);
-						if (c>=0) { /* Not ANSI */
-							if (sub_c > 0)
-								c = sub_c;
-							wid = 1;
-						} else {
-							wid = 0;
-							++idx;
-						}
-					} else {
-						if (sub_c > 0)
-							c = sub_c;
-						wid = 1;
-					}
-				}
-
-				if(wid>0) {
-					col += wid;
-					if (col == scr) {
-						--amnt;
-						goto loop;
-					} else if (col > scr) {
-						ta = col - scr;
-						tach = '<';
-						goto dota;
-					}
-				} else
-					--idx;	/* Get highlighting character again.. */
-			}
-		} while (--amnt);
-	if (bp == p->ptr + SEGSIZ) {
-		if (pnext(p)) {
-			bp = p->ptr;
-			amnt = p->hdr->hole;
-			goto lp;
-		}
-	} else {
-		bp = p->ptr + p->hdr->ehole;
-		amnt = SEGSIZ - p->hdr->ehole;
-		goto lp;
-	}
-	goto eof;
-
-      loop:			/* Display next character */
-	if (amnt)
-		do {
-			if (ungetit == NO_MORE_DATA)
-				bc = *bp++;
-			else {
-				bc = TO_CHAR_OK(ungetit);
-				ungetit = NO_MORE_DATA;
-			}
-			sub_c = 0;
-			if (highlight) {
-				atr = syn[idx] & ~CONTEXT_MASK;
-				if (syndebug)
-					atr_state = syndebug[idx];
-				++idx;
-				if (viewmode_skip_parse && viewmode_hide && idx <= viewmode_hide_size && viewmode_hide[idx - 1])
-					bc = ' ';
-				if (viewmode_skip_parse && viewmode_substitute && idx <= viewmode_substitute_size && viewmode_substitute[idx - 1])
-					sub_c = viewmode_substitute[idx - 1];
-				if (viewmode_skip_parse && viewmode_link_url && idx <= viewmode_link_url_size && viewmode_link_url[idx - 1])
-					current_link_url = out_osc8_link(current_link_url, viewmode_link_url[idx - 1]);
-				else if (viewmode_skip_parse && current_link_url)
-					current_link_url = out_osc8_link(current_link_url, NULL);
-				if (!(atr & BG_MASK))
-					atr |= defatr & BG_MASK;
-				if (!(atr & FG_MASK))
-					atr |= defatr & FG_MASK;
-			}
-			if (p->b->o.crlf && bc == '\r') {
-				++byte;
-				if (!--amnt) {
-				      ppl:
-					if (bp == p->ptr + SEGSIZ) {
-						if (pnext(p)) {
-							bp = p->ptr;
-							amnt = p->hdr->hole;
-						} else
-							goto nnl;
-					} else {
-						bp = p->ptr + p->hdr->ehole;
-						amnt = SEGSIZ - p->hdr->ehole;
-						if (!amnt)
-							goto ppl;
-					}
-				}
-				if (*bp == '\n') {
-					if (bw->o.visiblews && x < w) {
-						outatr(utf8_map, t, screen + x, attr + x, x, y, vrtn, (((atr & vwsmask) | (vwsatr & ~vwsmask)) & cm) | ca);
-						old_atr_state = OUT_osc8(bw, old_atr_state, atr_state);
-						++x;
-					}
-
-					++bp;
-					++byte;
-					++amnt;
-					goto eobl;
-				}
-			      nnl:
-				--byte;
-				++amnt;
-			}
-			if (square) {
-				if (bc == '\t') {
-					off_t tcol = scr + x - ox + p->b->o.tab - (scr + x - ox) % p->b->o.tab;
-					SELECT_IF(tcol > from && tcol <= to);
-				} else {
-					SELECT_IF(scr + x - ox >= from && scr + x - ox < to);
-				}
-			} else {
-				SELECT_IF(byte >= from && byte < to);
-			}
-			++byte;
-			if (bc == '\t') {
-				ta = p->b->o.tab - (x - ox + scr) % p->b->o.tab;
-				tach = ' ';
-				if (ta > 0 && x < w && bw->o.visiblews) {
-					outatr(utf8_map, t, screen + x, attr + x, x, y, vtab, (((atr & vwsmask) | (vwsatr & ~vwsmask)) & cm) | ca);
-					old_atr_state = OUT_osc8(bw, old_atr_state, atr_state);
-					++x;
-					--ta;
-				}
-			      dota:
-			      	while (x < w && ta--) {
-					outatr(bw->b->o.charmap, t, screen + x, attr + x, x, y, tach, (atr & cm) | ca);
-					old_atr_state = OUT_osc8(bw, old_atr_state, atr_state);
-					++x;
-				}
-				if (ifhave)
-					goto bye;
-				if (x > w)
-					goto eosl;
-			} else if (bc == '\n') {
-				if (bw->o.visiblews && x < w) {
-					outatr(utf8_map, t, screen + x, attr + x, x, y, vrtn, (((atr & vwsmask) | (vwsatr & ~vwsmask)) & cm) | ca);
-					old_atr_state = OUT_osc8(bw, old_atr_state, atr_state);
-					++x;
-				}
-				goto eobl;
-			} else if (bc == ' ' && bw->o.visiblews && x < w) {
-				outatr(utf8_map, t, screen + x, attr + x, x, y, vspace, (((atr & vwsmask) | (vwsatr & ~vwsmask)) & cm) | ca);
-				old_atr_state = OUT_osc8(bw, old_atr_state, atr_state);
-				++x;
-			} else {
-				int wid = -1;
-				int utf8_char;
-				if (p->b->o.charmap->type) { /* UTF-8 */
-
-					utf8_char = utf8_decode(&utf8_sm,bc);
-
-					if (utf8_char >= 0) { /* Normal decoded character */
-						if (sub_c > 0)
-							utf8_char = sub_c;
-						if (ansi) {
-							utf8_char = ansi_decode(&ansi_sm, utf8_char);
-							if (utf8_char >= 0) {
-								wid = joe_wcwidth(1, utf8_char);
-							} else {
-								wid = -1;
-								++idx;
-							}
-						} else
-							wid = joe_wcwidth(1,utf8_char);
-					} else if(utf8_char == UTF8_ACCEPTED) { /* Character taken */
-						wid = -1;
-					} else if(utf8_char == UTF8_INCOMPLETE) { /* Incomplete sequence (FIXME: do something better here) */
-						ungetit = bc;
-						++amnt;
-						--byte;
-						utf8_char = 'X';
-						wid = 1;
-					} else if(utf8_char == UTF8_BAD) { /* Invalid UTF-8 start character 128-191, 254, 255 */
-						/* Show as control character */
-						wid = 1;
-						utf8_char = 'X';
-					}
-				} else { /* Regular */
-					if (ansi) {
-						utf8_char = ansi_decode(&ansi_sm, bc);
-						if (utf8_char >= 0) { /* Not ANSI */
-							if (sub_c > 0)
-								utf8_char = sub_c;
-							wid = 1;
-						} else {
-							wid = -1;
-							++idx;
-						}
-					} else {
-						utf8_char = (unsigned char)bc;
-						if (sub_c > 0)
-							utf8_char = sub_c;
-						wid = 1;
-					}
-				}
-
-				if(wid >= 0) {
-					if (x + wid > w) {
-						/* If character hits right most column, don't display it */
-						while (x < w) {
-							outatr(bw->b->o.charmap, t, screen + x, attr + x, x, y, '>', (atr & cm) | ca);
-							old_atr_state = OUT_osc8(bw, old_atr_state, atr_state);
-							x++;
-						}
-						goto eosl;
-					} else {
-						outatr(bw->b->o.charmap, t, screen + x, attr + x, x, y, utf8_char, (atr & cm) | ca);
-						old_atr_state = OUT_osc8(bw, old_atr_state, atr_state);
-						x += wid;
-					}
-				} else
-					--idx;
-
-				if (ifhave)
-					goto bye;
-				if (x > w)
-					goto eosl;
-			}
-		} while (--amnt);
-	if (bp == p->ptr + SEGSIZ) {
-		if (pnext(p)) {
-			bp = p->ptr;
-			amnt = p->hdr->hole;
-			goto loop;
-		}
-	} else {
-		bp = p->ptr + p->hdr->ehole;
-		amnt = SEGSIZ - p->hdr->ehole;
-		goto loop;
-	}
-	goto eof;
-
-       eobl:			/* End of buffer line found.  Erase to end of screen line */
-	++p->line;
-       eof:
-	outatr_complete(t);
-	END_osc8(bw, old_atr_state);
-	end_osc8_link(current_link_url);
-	if (x < w)
-		done = eraeol(t, x, y, BG_COLOR(defatr));
-	else
-		done = 0;
-
-/* Set p to bp/amnt */
-       bye:
-	outatr_complete(t);
-	END_osc8(bw, old_atr_state);
-	end_osc8_link(current_link_url);
-	if (bp - p->ptr <= p->hdr->hole)
-		p->ofst = (short)(bp - p->ptr);
-	else
-		p->ofst = (short)(bp - p->ptr - (p->hdr->ehole - p->hdr->hole));
-	p->byte = byte;
-	return done;
-
-       eosl:
-	outatr_complete(t);
-	END_osc8(bw, old_atr_state);
-	end_osc8_link(current_link_url);
-	if (bp - p->ptr <= p->hdr->hole)
-		p->ofst = (short)(bp - p->ptr);
-	else
-		p->ofst = (short)(bp - p->ptr - (p->hdr->ehole - p->hdr->hole));
-	p->byte = byte;
-	pnextl(p);
-	return 0;
+	fprintf(stderr, "Path A: zig_bw_lgen -1\n");
+	abort();
 }
 
 
@@ -907,12 +287,10 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 
 static void gennum(BW *w, int (*screen)[COMPOSE], int *attr, SCRN *t, ptrdiff_t y, int *comp)
 {
-	char buf[24];
-	ptrdiff_t z, x;
 	off_t lin = w->top->line + y - w->y;
 	int atr = (w->o.hiline && lin == w->cursor->line) ? bg_curlinum : bg_linum;
 
-	/* Path A: Zig-native line-number gutter (Path A). */
+	/* Path A always-on: Zig-native line-number gutter. */
 	if (w->lincols > 0) {
 		int have_number = (lin <= w->b->eof->line);
 		off_t line_1based = have_number ? (lin + 1) : 0;
@@ -922,23 +300,8 @@ static void gennum(BW *w, int (*screen)[COMPOSE], int *attr, SCRN *t, ptrdiff_t 
 		if (zret >= 0)
 			return;
 	}
-
-	if (lin <= w->b->eof->line)
-#ifdef HAVE_LONG_LONG
-		joe_snprintf_1(buf, SIZEOF(buf), " %21lld ", (long long)(w->top->line + y - w->y + 1));
-#else
-		joe_snprintf_1(buf, SIZEOF(buf), " %21ld ", (long)(w->top->line + y - w->y + 1));
-#endif
-	else {
-		for (x = 0; x != SIZEOF(buf) - 1; ++x)
-			buf[x] = ' ';
-		buf[x] = 0;
-	}
-	for (z = SIZEOF(buf) - w->lincols - 1, x = 0; buf[z]; ++z, ++x) {
-		outatr(w->b->o.charmap, t, screen + x, attr + x, x, y, buf[z], BG_COLOR(atr));
-		comp[x] = buf[z];
-	}
-	outatr_complete(t);
+	fprintf(stderr, "Path A: zig_bw_gennum -1\n");
+	abort();
 }
 
 /* Path A helpers for zig_bw_bwgenh_entry (mark setup + color/hiline). */
@@ -1134,16 +497,7 @@ HIGHLIGHT_STATE zig_c_bw_get_highlight_state(BW *w, P *p, off_t line)
 }
 
 /* Path A helpers for zig_bw_lgen_view_entry / bwgen entry.
- * Zig owns viewmode tables for Path A (`zig_bw_vm_*`). Dead prepare/hide/
- * subst/urls/table-ptr/after/defatr bridges removed; C Feature fallback still
- * owns its parallel statics directly. Kept: lgen_core + col_map cursor
- * fallback for gate-off / Path A `-1`. */
-int zig_c_bw_lgen_core(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
-	ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,
-	HIGHLIGHT_STATE st, BW *bw)
-{
-	return lgen_core(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
-}
+ * Zig owns viewmode tables (`zig_bw_vm_*`). `lgen_core` is Zig-entry-only. */
 
 P *zig_c_bw_get_top(BW *bw)
 {

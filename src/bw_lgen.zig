@@ -16,6 +16,7 @@
 //! `lgen_view` line-start Feature 1.3/1.5/1.7/1.8 uses `zig_bw_view_line_start`.
 //! `lgen_view` inline Feature 1.4/1.5/1.6 + col_map uses `zig_bw_view_inline`.
 //! Feature 1.9 single-line table dim/bold uses `zig_bw_view_table_hl`.
+//! Feature 1.10 col_map ensure + cursor xcol uses `zig_bw_view_finish`.
 //! Feature 2.1 residual simple pipe substitute uses `zig_bw_table_simple`.
 //! Non-UTF-8 (byte) charmaps paint via `lgenLine` byte-mode.
 //! Default off until soak. Falls back to C when the gate is off.
@@ -117,6 +118,7 @@ extern fn zig_c_bw_eof_line(p: ?*P) i64;
 extern fn zig_c_bw_read_line(anchor: ?*P, line: i64, buf: ?[*]u8, buf_cap: c_int) c_int;
 extern fn zig_c_bw_pline_no(p: ?*P) i64;
 extern fn zig_c_bw_pxcol(p: ?*P) i64;
+extern fn zig_c_bw_set_xcol(p: ?*P, xcol: i64) void;
 extern fn zig_c_bw_bof(p: ?*P) ?*P;
 extern fn zig_c_bw_pisbol(p: ?*P) c_int;
 extern fn zig_c_bw_p_goto_bol(p: ?*P) void;
@@ -801,6 +803,102 @@ pub export fn zig_bw_view_inline(
             dup[u.len] = 0;
             urls.?[i] = dup[0..u.len :0].ptr;
         }
+    }
+    return 0;
+}
+
+
+/// Path A Feature 1.10 epilogue: ensure `col_map` for `buf_line`, then update cursor xcol.
+/// When `skip_hidden != 0` and cursor sits on a hidden byte, advance to next visible (lgen_view).
+/// Returns `0` on success, `-1` to fall back to C.
+pub export fn zig_bw_view_finish(
+    line_ptr: ?[*]const u8,
+    line_len: c_int,
+    hide: ?[*]u8,
+    hide_len: c_int,
+    subst: ?[*]c_int,
+    subst_len: c_int,
+    col_map: ?[*]i64,
+    col_map_len: c_int,
+    col_map_line: ?*i64,
+    buf_line: i64,
+    tab: c_int,
+    cursor: ?*P,
+    skip_hidden: c_int,
+) c_int {
+    if (zig_bw_lgen_enabled == 0) return -1;
+    if (line_ptr == null or hide == null or subst == null or col_map == null or col_map_line == null) return -1;
+    if (cursor == null or line_len < 0) return -1;
+    const n: usize = @intCast(line_len);
+    const clear_n: usize = if (n == 0) 1 else n;
+    if (hide_len < @as(c_int, @intCast(clear_n))) return -1;
+    if (subst_len < @as(c_int, @intCast(clear_n))) return -1;
+    if (col_map_len < @as(c_int, @intCast(clear_n))) return -1;
+
+    const line = line_ptr.?[0..n];
+    const alloc = std.heap.c_allocator;
+    const tab_u: u16 = if (tab <= 0) 8 else @intCast(tab);
+
+    if (col_map_line.?.* != buf_line) {
+        const hide_slice = hide.?[0..clear_n];
+        const subst_scratch = alloc.alloc(u21, clear_n) catch return -1;
+        defer alloc.free(subst_scratch);
+        const url_scratch = alloc.alloc(?[]const u8, clear_n) catch return -1;
+        defer alloc.free(url_scratch);
+        const col_scratch = alloc.alloc(u64, clear_n) catch return -1;
+        defer alloc.free(col_scratch);
+
+        const saved_hide = alloc.alloc(u8, clear_n) catch return -1;
+        defer alloc.free(saved_hide);
+        @memcpy(saved_hide, hide_slice);
+
+        var si: usize = 0;
+        while (si < clear_n) : (si += 1) {
+            subst_scratch[si] = if (subst.?[si] > 0) @intCast(subst.?[si]) else 0;
+        }
+
+        var tables = ViewTables.init(alloc);
+        tables.bindScratch(hide_slice, subst_scratch, url_scratch, col_scratch, n);
+        @memcpy(hide_slice, saved_hide);
+        si = 0;
+        while (si < clear_n) : (si += 1) {
+            if (subst.?[si] > 0) subst_scratch[si] = @intCast(subst.?[si]);
+        }
+        render.buildColMap(&tables, line, tab_u);
+        si = 0;
+        while (si < clear_n) : (si += 1) {
+            col_map.?[si] = @intCast(col_scratch[si]);
+        }
+        col_map_line.?.* = buf_line;
+    }
+
+    // Cursor update when this painted line is the cursor line.
+    if (zig_c_bw_pline_no(cursor) != buf_line) return 0;
+    if (col_map_line.?.* != buf_line or col_map_len <= 0) return 0;
+
+    const bol = pdup(cursor, "zig_bw_view_finish") orelse return -1;
+    zig_c_bw_p_goto_bol(bol);
+    var cursor_offset: i64 = zig_c_bw_pbyte(cursor) - zig_c_bw_pbyte(bol);
+    prm(bol);
+
+    if (skip_hidden != 0 and cursor_offset >= 0 and cursor_offset < hide_len) {
+        const off: usize = @intCast(cursor_offset);
+        if (off < clear_n and hide.?[off] != 0) {
+            var next: usize = off + 1;
+            while (next < clear_n and next < @as(usize, @intCast(hide_len)) and hide.?[next] != 0) : (next += 1) {}
+            if (next < clear_n and next < @as(usize, @intCast(hide_len))) {
+                const move = pdup(cursor, "zig_bw_view_finish_skip") orelse return -1;
+                zig_c_bw_p_goto_bol(move);
+                const target = zig_c_bw_pbyte(move) + @as(i64, @intCast(next));
+                zig_c_bw_pgoto(cursor, target);
+                cursor_offset = @intCast(next);
+                prm(move);
+            }
+        }
+    }
+
+    if (cursor_offset >= 0 and cursor_offset < col_map_len) {
+        zig_c_bw_set_xcol(cursor, col_map.?[@intCast(cursor_offset)]);
     }
     return 0;
 }

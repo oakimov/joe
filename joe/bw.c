@@ -69,6 +69,11 @@ extern int zig_bw_view_inline(const unsigned char *line, int line_len,
 	char *hide, int hide_len, int *subst, int subst_len,
 	char **urls, int urls_len, off_t *col_map, int col_map_len,
 	int *atr, int atr_len, int tab);
+/* Path A: gated Zig Feature 1.10 col_map ensure + cursor xcol. */
+extern int zig_bw_view_finish(const unsigned char *line, int line_len,
+	char *vm_hide, int vm_hide_len, int *vm_subst, int vm_subst_len,
+	off_t *vm_col_map, int vm_col_map_len, off_t *vm_col_map_line,
+	off_t buf_line, int tab, P *cursor, int skip_hidden);
 /* Path A Feature 2.1: gated Zig simple pipe substitute into vm_subst[]. */
 extern int zig_bw_table_simple(const unsigned char *line, int line_len, int row_type,
 	int *vm_subst, int vm_subst_len);
@@ -2570,12 +2575,14 @@ skip_emphasis:
 	}
 
 done:
-	/* Ensure we always have a valid map for this line (early done paths skip the block above). */
+table_rendered:
+	/* Feature 1.10: ensure col_map + update cursor xcol (shared done/table paths). */
 	{
 		off_t buf_line = bw->top->line + y - bw->y;
-		if (viewmode_col_map_line != buf_line) {
-			if (!viewmode_col_map || viewmode_col_map_size < (line_len > 0 ? line_len : 1)) {
-				int need = line_len > 0 ? line_len : 1;
+		int zig_ok = 0;
+		if (zig_bw_lgen_enabled) {
+			int need = line_len > 0 ? line_len : 1;
+			if (!viewmode_col_map || viewmode_col_map_size < need) {
 				off_t *nm = (off_t *)joe_realloc(viewmode_col_map, (ptrdiff_t)need * (ptrdiff_t)sizeof(off_t));
 				if (!nm) {
 					if (viewmode_col_map) joe_free(viewmode_col_map);
@@ -2587,65 +2594,90 @@ done:
 					viewmode_col_map_size = need;
 				}
 			}
-			if (viewmode_col_map && viewmode_col_map_size >= (line_len > 0 ? line_len : 1)) {
-				off_t display_col = 0;
-				int i;
-				for (i = 0; i < line_len; i++) {
-					viewmode_col_map[i] = display_col;
-					if (viewmode_hide && i < viewmode_hide_size && viewmode_hide[i])
-						continue;
-					if (viewmode_substitute && i < viewmode_substitute_size && viewmode_substitute[i]) {
-						int sub = viewmode_substitute[i];
-						{ int cw = joe_wcwidth(1, sub); display_col += (cw > 0) ? cw : 0; }
+			if (viewmode_col_map && viewmode_col_map_size >= need
+			    && viewmode_hide && viewmode_hide_size >= need
+			    && viewmode_substitute && viewmode_substitute_size >= need) {
+				int tab = bw->o.tab;
+				if (tab <= 0) tab = 8;
+				int skip_hidden = viewmode_table_rendered ? 0 : 1;
+				if (zig_bw_view_finish(line, line_len,
+					viewmode_hide, viewmode_hide_size,
+					viewmode_substitute, viewmode_substitute_size,
+					viewmode_col_map, viewmode_col_map_size,
+					&viewmode_col_map_line, buf_line, tab,
+					bw->cursor, skip_hidden) >= 0)
+					zig_ok = 1;
+			}
+		}
+		if (!zig_ok) {
+			/* Ensure we always have a valid map for this line. */
+			if (viewmode_col_map_line != buf_line) {
+				if (!viewmode_col_map || viewmode_col_map_size < (line_len > 0 ? line_len : 1)) {
+					int need = line_len > 0 ? line_len : 1;
+					off_t *nm = (off_t *)joe_realloc(viewmode_col_map, (ptrdiff_t)need * (ptrdiff_t)sizeof(off_t));
+					if (!nm) {
+						if (viewmode_col_map) joe_free(viewmode_col_map);
+						viewmode_col_map = NULL;
+						viewmode_col_map_size = 0;
+						viewmode_col_map_line = -1;
 					} else {
-						if (line[i] == '\t')
-							display_col += bw->b->o.tab - display_col % bw->b->o.tab;
-						else
-							{ int cw = joe_wcwidth(1, line[i]); display_col += (cw > 0) ? cw : 0; }
+						viewmode_col_map = nm;
+						viewmode_col_map_size = need;
 					}
 				}
-				viewmode_col_map_line = buf_line;
+				if (viewmode_col_map && viewmode_col_map_size >= (line_len > 0 ? line_len : 1)) {
+					off_t display_col = 0;
+					int i;
+					for (i = 0; i < line_len; i++) {
+						viewmode_col_map[i] = display_col;
+						if (viewmode_hide && i < viewmode_hide_size && viewmode_hide[i])
+							continue;
+						if (viewmode_substitute && i < viewmode_substitute_size && viewmode_substitute[i]) {
+							int sub = viewmode_substitute[i];
+							{ int cw = joe_wcwidth(1, sub); display_col += (cw > 0) ? cw : 0; }
+						} else {
+							if (line[i] == '\t')
+								display_col += bw->b->o.tab - display_col % bw->b->o.tab;
+							else
+								{ int cw = joe_wcwidth(1, line[i]); display_col += (cw > 0) ? cw : 0; }
+						}
+					}
+					viewmode_col_map_line = buf_line;
+				}
+			}
+
+			/* Feature 1.10/2.2.7: Update cursor position for view mode. */
+			if (bw->cursor->line == buf_line && viewmode_col_map &&
+			    viewmode_col_map_size > 0 && viewmode_col_map_line == buf_line) {
+				P *cur_tmp = pdup(bw->cursor, "viewmode_cursor");
+				p_goto_bol(cur_tmp);
+				off_t cursor_offset = bw->cursor->byte - cur_tmp->byte;
+				prm(cur_tmp);
+				if (!viewmode_table_rendered) {
+					if (cursor_offset >= 0 && cursor_offset < viewmode_hide_size &&
+					    viewmode_hide && viewmode_hide[cursor_offset]) {
+						off_t next_visible = cursor_offset + 1;
+						while (next_visible < viewmode_hide_size && viewmode_hide[next_visible])
+							++next_visible;
+						if (next_visible < viewmode_hide_size) {
+							P *move_tmp = pdup(bw->cursor, "viewmode_skip_hidden");
+							p_goto_bol(move_tmp);
+							off_t target_byte = move_tmp->byte + next_visible;
+							pgoto(bw->cursor, target_byte);
+							cursor_offset = next_visible;
+							prm(move_tmp);
+						}
+					}
+				}
+				if (cursor_offset >= 0 && cursor_offset < viewmode_col_map_size) {
+					off_t new_xcol = viewmode_col_map[cursor_offset];
+					bw->cursor->xcol = new_xcol;
+					bw->cursor->valcol = 1;
+				}
 			}
 		}
 	}
-
-table_rendered:
-	/* For table rows rendered directly to screen, skip lgen_core. */
 	joe_free(line);
-
-	/* Feature 1.10/2.2.7: Update cursor position for view mode.
-	 * Runs for both regular and table_rendered rows. */
-	{
-		off_t buf_line = bw->top->line + y - bw->y;
-		if (bw->cursor->line == buf_line && viewmode_col_map &&
-		    viewmode_col_map_size > 0 && viewmode_col_map_line == buf_line) {
-			P *cur_tmp = pdup(bw->cursor, "viewmode_cursor");
-			p_goto_bol(cur_tmp);
-			off_t cursor_offset = bw->cursor->byte - cur_tmp->byte;
-			prm(cur_tmp);
-			if (!viewmode_table_rendered) {
-				if (cursor_offset >= 0 && cursor_offset < viewmode_hide_size &&
-				    viewmode_hide && viewmode_hide[cursor_offset]) {
-					off_t next_visible = cursor_offset + 1;
-					while (next_visible < viewmode_hide_size && viewmode_hide[next_visible])
-						++next_visible;
-					if (next_visible < viewmode_hide_size) {
-						P *move_tmp = pdup(bw->cursor, "viewmode_skip_hidden");
-						p_goto_bol(move_tmp);
-						off_t target_byte = move_tmp->byte + next_visible;
-						pgoto(bw->cursor, target_byte);
-						cursor_offset = next_visible;
-						prm(move_tmp);
-					}
-				}
-			}
-			if (cursor_offset >= 0 && cursor_offset < viewmode_col_map_size) {
-				off_t new_xcol = viewmode_col_map[cursor_offset];
-				bw->cursor->xcol = new_xcol;
-				bw->cursor->valcol = 1;
-			}
-		}
-	}
 
 	int result = 0;
 	if (viewmode_table_rendered) {
@@ -2849,6 +2881,13 @@ off_t zig_c_bw_pline_no(P *p)
 off_t zig_c_bw_pxcol(P *p)
 {
 	return p ? p->xcol : 0;
+}
+
+void zig_c_bw_set_xcol(P *p, off_t xcol)
+{
+	if (!p) return;
+	p->xcol = xcol;
+	p->valcol = 1;
 }
 
 P *zig_c_bw_bof(P *p)

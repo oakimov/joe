@@ -529,7 +529,7 @@ fn styleLinkText(attrs: ?[]Attribute, start: usize, end: usize) void {
     }
 }
 
-fn buildColMap(tables: *ViewTables, line: []const u8, tab: u16) void {
+pub fn buildColMap(tables: *ViewTables, line: []const u8, tab: u16) void {
     const t: u64 = if (tab == 0) 1 else tab;
     var display_col: u64 = 0;
     var i: usize = 0;

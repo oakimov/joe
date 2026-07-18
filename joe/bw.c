@@ -96,6 +96,17 @@ extern int zig_bw_bwmk(W *window, B *b, int prompt, BW **out_bw);
 extern int zig_bw_bwrm(BW *w);
 extern int zig_bw_orphit(BW *bw);
 extern int zig_bw_calclincols(BW *bw);
+/* Path A: gated non-paint helpers. */
+extern int zig_bw_get_file_pos(const char *name, off_t *out);
+extern int zig_bw_set_file_pos(const char *name, off_t pos);
+extern int zig_bw_save_file_pos(FILE *f);
+extern int zig_bw_load_file_pos(FILE *f);
+extern int zig_bw_set_file_pos_all(Screen *t);
+extern int zig_bw_vtmaster(Screen *t, B *b, BW **out);
+extern int zig_bw_ustat(W *w, int k, int *out_rc);
+extern int zig_bw_ucrawlr(W *w, int k, int *out_rc);
+extern int zig_bw_ucrawll(W *w, int k, int *out_rc);
+extern int zig_bw_init_visiblews(void);
 /* Path A Feature 2.1: gated Zig simple pipe substitute into vm_subst[]. */
 extern int zig_bw_table_simple(const unsigned char *line, int line_len, int row_type,
 	int *vm_subst, int vm_subst_len);
@@ -3676,17 +3687,19 @@ static struct file_pos *find_file_pos(const char *name)
 
 int restore_file_pos;
 
-off_t get_file_pos(const char *name)
+char *ustat_line;
+
+/* Path A helpers for non-paint exports. Keep file_pos list + window walks in C. */
+off_t zig_c_bw_file_pos_get(const char *name)
 {
 	if (name && restore_file_pos) {
 		struct file_pos *p = find_file_pos(name);
 		return p->line;
-	} else {
-		return 0;
 	}
+	return 0;
 }
 
-void set_file_pos(const char *name, off_t pos)
+void zig_c_bw_file_pos_set(const char *name, off_t pos)
 {
 	if (name) {
 		struct file_pos *p = find_file_pos(name);
@@ -3694,7 +3707,7 @@ void set_file_pos(const char *name, off_t pos)
 	}
 }
 
-void save_file_pos(FILE *f)
+void zig_c_bw_file_pos_save(FILE *f)
 {
 	struct file_pos *p;
 	for (p = file_pos.link.prev; p != &file_pos; p = p->link.prev) {
@@ -3709,7 +3722,7 @@ void save_file_pos(FILE *f)
 	fprintf(f,"done\n");
 }
 
-void load_file_pos(FILE *f)
+void zig_c_bw_file_pos_load(FILE *f)
 {
 	char buf[1024];
 	while (fgets(buf,SIZEOF(buf)-1,f) && zcmp(buf,"done\n")) {
@@ -3720,33 +3733,27 @@ void load_file_pos(FILE *f)
 		if (!parse_off_t(&p, &pos)) {
 			parse_ws(&p, '#');
 			if (parse_string(&p, name, SIZEOF(name)) > 0) {
-				set_file_pos(name, pos);
+				/* Use C setter so gate-off and Zig paths share one list. */
+				zig_c_bw_file_pos_set(name, pos);
 			}
 		}
 	}
 }
 
-/* Save file position for all windows */
-
-void set_file_pos_all(Screen *t)
+void zig_c_bw_file_pos_all(Screen *t)
 {
-	/* Step through all windows */
 	W *w = t->topwin;
 	do {
 		if (w->watom == &watomtw) {
 			BW *bw = (BW *)w->object;
-			set_file_pos(bw->b->name, bw->cursor->line);
+			zig_c_bw_file_pos_set(bw->b->name, bw->cursor->line);
 		}
 		w = w->link.next;
 	} while(w != t->topwin);
-	/* Set through orphaned buffers */
 	set_file_pos_orphaned();
 }
 
-/* Return master BW for a B.  It's the last window on the screen with the B.  If the B has a VT, then
- * it's the last window on the screen with the B and where the cursor matches the VT cursor. */
-
-BW *vtmaster(Screen *t, B *b)
+BW *zig_c_bw_vtmaster_impl(Screen *t, B *b)
 {
 	W *w = t->topwin;
 	BW *m = 0;
@@ -3759,6 +3766,125 @@ BW *vtmaster(Screen *t, B *b)
 		w = w->link.next;
 	} while (w != t->topwin);
 	return m;
+}
+
+int zig_c_bw_ustat_impl(W *w)
+{
+	BW *bw;
+	int c;
+	const char *msg;
+	WIND_BW(bw, w);
+	c = brch(bw->cursor);
+
+	if (c == NO_MORE_DATA) {
+		if (bw->o.zmsg) msg = bw->o.zmsg;
+		else msg = "** Line %r Col %c Offset %o(0x%O) **";
+	} else {
+		if (bw->o.smsg) msg = bw->o.smsg;
+		else msg = "** Line %r Col %c Offset %o(0x%O) %e %a(0x%A) Width %w **";
+	}
+
+	ustat_line = stagen(ustat_line, bw, msg, (char)(zlen(msg) ? msg[zlen(msg) - 1] : ' '));
+	msgnw(bw->parent, ustat_line);
+	return 0;
+}
+
+int zig_c_bw_wind_bw(W *w, BW **out)
+{
+	if (!w || !out) return -1;
+	if (!(w->watom->what & (TYPETW | TYPEPW)))
+		return -1;
+	*out = (BW *)w->object;
+	return 0;
+}
+
+ptrdiff_t zig_c_bw_get_w(BW *w) { return w ? w->w : 0; }
+off_t zig_c_bw_get_offset(BW *w) { return w ? w->offset : 0; }
+void zig_c_bw_set_offset(BW *w, off_t off) { if (w) w->offset = off; }
+off_t zig_c_bw_get_cursor_xcol(BW *w) { return (w && w->cursor) ? w->cursor->xcol : 0; }
+void zig_c_bw_set_cursor_xcol(BW *w, off_t xcol)
+{
+	if (w && w->cursor) {
+		w->cursor->xcol = xcol;
+		w->cursor->valcol = 1;
+	}
+}
+void zig_c_bw_pcol(BW *w, off_t xcol)
+{
+	if (w && w->cursor)
+		pcol(w->cursor, xcol);
+}
+void zig_c_bw_updall(void) { updall(); }
+
+int zig_c_bw_locale_utf8(void)
+{
+	return (locale_map && locale_map->type) ? 1 : 0;
+}
+
+int zig_c_bw_from_uni(int cp)
+{
+	return locale_map ? from_uni(locale_map, cp) : -1;
+}
+
+off_t get_file_pos(const char *name)
+{
+	if (zig_bw_lgen_enabled) {
+		off_t zpos = 0;
+		if (zig_bw_get_file_pos(name, &zpos) >= 0)
+			return zpos;
+	}
+	return zig_c_bw_file_pos_get(name);
+}
+
+void set_file_pos(const char *name, off_t pos)
+{
+	if (zig_bw_lgen_enabled) {
+		if (zig_bw_set_file_pos(name, pos) >= 0)
+			return;
+	}
+	zig_c_bw_file_pos_set(name, pos);
+}
+
+void save_file_pos(FILE *f)
+{
+	if (zig_bw_lgen_enabled) {
+		if (zig_bw_save_file_pos(f) >= 0)
+			return;
+	}
+	zig_c_bw_file_pos_save(f);
+}
+
+void load_file_pos(FILE *f)
+{
+	if (zig_bw_lgen_enabled) {
+		if (zig_bw_load_file_pos(f) >= 0)
+			return;
+	}
+	zig_c_bw_file_pos_load(f);
+}
+
+/* Save file position for all windows */
+
+void set_file_pos_all(Screen *t)
+{
+	if (zig_bw_lgen_enabled) {
+		if (zig_bw_set_file_pos_all(t) >= 0)
+			return;
+	}
+	zig_c_bw_file_pos_all(t);
+}
+
+/* Return master BW for a B.  It's the last window on the screen with the B.  If the B has a VT, then
+ * it's the last window on the screen with the B and where the cursor matches the VT cursor. */
+
+BW *vtmaster(Screen *t, B *b)
+{
+	if (zig_bw_lgen_enabled) {
+		BW *zm = NULL;
+		if (zig_bw_vtmaster(t, b, &zm) >= 0)
+			return zm;
+	}
+	return zig_c_bw_vtmaster_impl(t, b);
 }
 
 void bwrm(BW *w)
@@ -3778,34 +3904,24 @@ void bwrm(BW *w)
 	joe_free(w);
 }
 
-char *ustat_line;
-
 int ustat(W *w, int k)
 {
-	(void)k;
-	BW *bw;
-	int c;
-	const char *msg;
-	WIND_BW(bw, w);
-	c = brch(bw->cursor);
-
-	if (c == NO_MORE_DATA) {
-		if (bw->o.zmsg) msg = bw->o.zmsg;
-		else msg = "** Line %r Col %c Offset %o(0x%O) **";
-	} else {
-		if (bw->o.smsg) msg = bw->o.smsg;
-		else msg = "** Line %r Col %c Offset %o(0x%O) %e %a(0x%A) Width %w **";
+	if (zig_bw_lgen_enabled) {
+		int zrc = 0;
+		if (zig_bw_ustat(w, k, &zrc) >= 0)
+			return zrc;
 	}
-
-	ustat_line = stagen(ustat_line, bw, msg, (char)(zlen(msg) ? msg[zlen(msg) - 1] : ' '));
-	msgnw(bw->parent, ustat_line);
-
-	return 0;
+	return zig_c_bw_ustat_impl(w);
 }
 
 int ucrawlr(W *w, int k)
 {
-	(void)k;
+	if (zig_bw_lgen_enabled) {
+		int zrc = 0;
+		if (zig_bw_ucrawlr(w, k, &zrc) >= 0)
+			return zrc;
+	}
+	{
 	BW *bw;
 	ptrdiff_t amnt;
 	WIND_BW(bw, w);
@@ -3827,11 +3943,17 @@ int ucrawlr(W *w, int k)
 	bw->offset += amnt;
 	updall();
 	return 0;
+	}
 }
 
 int ucrawll(W *w, int k)
 {
-	(void)k;
+	if (zig_bw_lgen_enabled) {
+		int zrc = 0;
+		if (zig_bw_ucrawll(w, k, &zrc) >= 0)
+			return zrc;
+	}
+	{
 	BW *bw;
 	off_t amnt;
 	WIND_BW(bw, w);
@@ -3871,6 +3993,7 @@ int ucrawll(W *w, int k)
 	pcol(bw->cursor, bw->cursor->xcol);
 	updall();
 	return rtn;
+	}
 }
 
 /* If we are about to call bwrm, and b->count is 1, and orphan mode
@@ -3926,6 +4049,11 @@ int calclincols(BW *bw)
 
 void init_visiblews(void)
 {
+	if (zig_bw_lgen_enabled) {
+		if (zig_bw_init_visiblews() >= 0)
+			return;
+	}
+	{
 	int spaces[] = { 0xb7, 0x2291, '.', 0 };
 	int tabs[] = { 0x2192, 0x203a, 0xbb, 0x25ba, '>', 0 };
 	int rtns[] = { 0x21b5, 0x21b2, '$', 0 };
@@ -3964,5 +4092,6 @@ void init_visiblews(void)
 			vrtn = rtns[i];
 			break;
 		}
+	}
 	}
 }

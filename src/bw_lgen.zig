@@ -23,6 +23,10 @@
 //! paint cleanup; C keeps viewmode static storage helpers + Feature fallback).
 //! Lifecycle uses `zig_bw_bwmove` / `zig_bw_bwresz` / `zig_bw_bwmk` / `zig_bw_bwrm` /
 //! `zig_bw_orphit` / `zig_bw_calclincols` (C fallback retained).
+//! Non-paint helpers use `zig_bw_get_file_pos` / `zig_bw_set_file_pos` /
+//! `zig_bw_save_file_pos` / `zig_bw_load_file_pos` / `zig_bw_set_file_pos_all` /
+//! `zig_bw_vtmaster` / `zig_bw_ustat` / `zig_bw_ucrawlr` / `zig_bw_ucrawll` /
+//! `zig_bw_init_visiblews` (C fallback retained).
 //! Feature 2.1 residual simple pipe substitute uses `zig_bw_table_simple`.
 //! Non-UTF-8 (byte) charmaps paint via `lgenLine` byte-mode.
 //! Default off until soak. Falls back to C when the gate is off.
@@ -65,6 +69,7 @@ const P = opaque {};
 const BW = opaque {};
 const W = opaque {};
 const B = opaque {};
+const Screen = opaque {};
 const Charmap = extern struct {
     next: ?*Charmap = null,
     name: ?[*:0]u8 = null,
@@ -2807,4 +2812,191 @@ pub export fn zig_bw_calclincols(bw: ?*BW) c_int {
         }
     }
     return width + 2;
+}
+
+const FILE = std.c.FILE;
+
+extern fn zig_c_bw_file_pos_get(name: ?[*:0]const u8) i64;
+extern fn zig_c_bw_file_pos_set(name: ?[*:0]const u8, pos: i64) void;
+extern fn zig_c_bw_file_pos_save(f: ?*FILE) void;
+extern fn zig_c_bw_file_pos_load(f: ?*FILE) void;
+extern fn zig_c_bw_file_pos_all(t: ?*Screen) void;
+extern fn zig_c_bw_vtmaster_impl(t: ?*Screen, b: ?*B) ?*BW;
+extern fn zig_c_bw_ustat_impl(w: ?*W) c_int;
+extern fn zig_c_bw_wind_bw(w: ?*W, out: ?*?*BW) c_int;
+extern fn zig_c_bw_get_w(w: ?*BW) isize;
+extern fn zig_c_bw_get_offset(w: ?*BW) i64;
+extern fn zig_c_bw_set_offset(w: ?*BW, off: i64) void;
+extern fn zig_c_bw_get_cursor_xcol(w: ?*BW) i64;
+extern fn zig_c_bw_set_cursor_xcol(w: ?*BW, xcol: i64) void;
+extern fn zig_c_bw_pcol(w: ?*BW, xcol: i64) void;
+extern fn zig_c_bw_updall() void;
+extern fn zig_c_bw_locale_utf8() c_int;
+extern fn zig_c_bw_from_uni(cp: c_int) c_int;
+
+/// Path A non-paint: get restored file position. Writes `*out` and returns `0`, or `-1` fallback.
+pub export fn zig_bw_get_file_pos(name: ?[*:0]const u8, out: ?*i64) c_int {
+    if (zig_bw_lgen_enabled == 0 or out == null) return -1;
+    out.?.* = zig_c_bw_file_pos_get(name);
+    return 0;
+}
+
+/// Path A non-paint: set restored file position.
+pub export fn zig_bw_set_file_pos(name: ?[*:0]const u8, pos: i64) c_int {
+    if (zig_bw_lgen_enabled == 0) return -1;
+    zig_c_bw_file_pos_set(name, pos);
+    return 0;
+}
+
+/// Path A non-paint: save file-pos database.
+pub export fn zig_bw_save_file_pos(f: ?*FILE) c_int {
+    if (zig_bw_lgen_enabled == 0 or f == null) return -1;
+    zig_c_bw_file_pos_save(f);
+    return 0;
+}
+
+/// Path A non-paint: load file-pos database.
+pub export fn zig_bw_load_file_pos(f: ?*FILE) c_int {
+    if (zig_bw_lgen_enabled == 0 or f == null) return -1;
+    zig_c_bw_file_pos_load(f);
+    return 0;
+}
+
+/// Path A non-paint: snapshot positions for all TW windows + orphans.
+pub export fn zig_bw_set_file_pos_all(t: ?*Screen) c_int {
+    if (zig_bw_lgen_enabled == 0 or t == null) return -1;
+    zig_c_bw_file_pos_all(t);
+    return 0;
+}
+
+/// Path A non-paint: VT/TW master BW for buffer `b`. Writes `*out` (may be null).
+pub export fn zig_bw_vtmaster(t: ?*Screen, b: ?*B, out: ?*?*BW) c_int {
+    if (zig_bw_lgen_enabled == 0 or t == null or b == null or out == null) return -1;
+    out.?.* = zig_c_bw_vtmaster_impl(t, b);
+    return 0;
+}
+
+/// Path A non-paint: status-line command. Writes command rc to `*out_rc`.
+pub export fn zig_bw_ustat(w: ?*W, k: c_int, out_rc: ?*c_int) c_int {
+    _ = k;
+    if (zig_bw_lgen_enabled == 0 or w == null or out_rc == null) return -1;
+    out_rc.?.* = zig_c_bw_ustat_impl(w);
+    return 0;
+}
+
+/// Path A non-paint: crawl right (horizontal scroll/cursor).
+pub export fn zig_bw_ucrawlr(w: ?*W, k: c_int, out_rc: ?*c_int) c_int {
+    _ = k;
+    if (zig_bw_lgen_enabled == 0 or w == null or out_rc == null) return -1;
+    var bw: ?*BW = null;
+    if (zig_c_bw_wind_bw(w, &bw) < 0) {
+        out_rc.?.* = -1;
+        return 0;
+    }
+    const win_w = zig_c_bw_get_w(bw);
+    var amnt: isize = if (opt_right < 0)
+        @divTrunc(win_w, -opt_right)
+    else
+        @as(isize, @intCast(opt_right));
+    if (amnt > win_w) amnt = win_w;
+    if (amnt <= 0) amnt = 1;
+    const amnt64: i64 = @intCast(amnt);
+    const xcol = zig_c_bw_get_cursor_xcol(bw);
+    const new_xcol = xcol + amnt64;
+    zig_c_bw_pcol(bw, new_xcol);
+    zig_c_bw_set_cursor_xcol(bw, new_xcol);
+    zig_c_bw_set_offset(bw, zig_c_bw_get_offset(bw) + amnt64);
+    zig_c_bw_updall();
+    out_rc.?.* = 0;
+    return 0;
+}
+
+/// Path A non-paint: crawl left (horizontal scroll/cursor).
+pub export fn zig_bw_ucrawll(w: ?*W, k: c_int, out_rc: ?*c_int) c_int {
+    _ = k;
+    if (zig_bw_lgen_enabled == 0 or w == null or out_rc == null) return -1;
+    var bw: ?*BW = null;
+    if (zig_c_bw_wind_bw(w, &bw) < 0) {
+        out_rc.?.* = -1;
+        return 0;
+    }
+    const win_w = zig_c_bw_get_w(bw);
+    var amnt: i64 = if (opt_left < 0)
+        @intCast(@divTrunc(win_w, -opt_left))
+    else
+        @as(i64, @intCast(opt_left));
+    if (amnt > win_w) amnt = @intCast(win_w);
+    if (amnt < 1) amnt = 1;
+
+    var rtn: c_int = -1;
+    var xcol = zig_c_bw_get_cursor_xcol(bw);
+    if (amnt > xcol) {
+        if (xcol != 0) rtn = 0;
+        xcol = 0;
+    } else {
+        xcol -= amnt;
+        rtn = 0;
+    }
+    zig_c_bw_set_cursor_xcol(bw, xcol);
+
+    var offset = zig_c_bw_get_offset(bw);
+    if (amnt > offset) {
+        if (offset != 0) rtn = 0;
+        offset = 0;
+    } else {
+        offset -= amnt;
+        rtn = 0;
+    }
+    zig_c_bw_set_offset(bw, offset);
+
+    if (rtn != 0) {
+        out_rc.?.* = rtn;
+        return 0;
+    }
+    zig_c_bw_pcol(bw, xcol);
+    zig_c_bw_updall();
+    out_rc.?.* = rtn;
+    return 0;
+}
+
+/// Path A non-paint: choose visible-whitespace glyphs for locale.
+pub export fn zig_bw_init_visiblews() c_int {
+    if (zig_bw_lgen_enabled == 0) return -1;
+    const spaces = [_]c_int{ 0xb7, 0x2291, '.', 0 };
+    const tabs = [_]c_int{ 0x2192, 0x203a, 0xbb, 0x25ba, '>', 0 };
+    const rtns = [_]c_int{ 0x21b5, 0x21b2, '$', 0 };
+
+    vspace = 0;
+    vtab = 0;
+    vrtn = 0;
+
+    if (zig_c_bw_locale_utf8() != 0) {
+        vspace = spaces[0];
+        vtab = tabs[0];
+        vrtn = rtns[0];
+        return 0;
+    }
+
+    var i: usize = 0;
+    while (spaces[i] != 0) : (i += 1) {
+        if (zig_c_bw_from_uni(spaces[i]) > 0) {
+            vspace = spaces[i];
+            break;
+        }
+    }
+    i = 0;
+    while (tabs[i] != 0) : (i += 1) {
+        if (zig_c_bw_from_uni(tabs[i]) > 0) {
+            vtab = tabs[i];
+            break;
+        }
+    }
+    i = 0;
+    while (rtns[i] != 0) : (i += 1) {
+        if (zig_c_bw_from_uni(rtns[i]) > 0) {
+            vrtn = rtns[i];
+            break;
+        }
+    }
+    return 0;
 }

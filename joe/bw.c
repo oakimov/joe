@@ -17,12 +17,6 @@ extern int zig_bw_lgen(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
 	int *palette, int palette_len, off_t from, off_t to, off_t line_byte,
 	int viewmode, char *vm_hide, int vm_hide_len, int *vm_subst, int vm_subst_len,
 	char **vm_urls, int vm_urls_len, int visiblews, int square, int ansi);
-/* Path A Feature 2.2: gated Zig padded table row (widths/aligns from C). */
-extern int zig_bw_table_row(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
-	ptrdiff_t x0, ptrdiff_t x1, const unsigned char *line, int line_len,
-	int ncols, const int *widths, const int *aligns, int row_type,
-	struct charmap *charmap, int defatr, int *palette, int palette_len,
-	off_t *col_map, int col_map_size);
 /* Path A: gated Zig gennum line-number gutter (same JOE_ZIG_BW_LGEN gate). */
 extern int zig_bw_gennum(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
 	int *compose, int lincols, int have_number, off_t line_1based, int atr,
@@ -44,10 +38,6 @@ extern int zig_bw_bwgenh(SCRN *t, int (*scrn)[COMPOSE], int *attr_base,
 	int bg_curlinum_atr, int bg_cursor_atr);
 /* Path A: gated thin bwgenh entry (mark setup + hex paint). */
 extern int zig_bw_bwgenh_entry(BW *w);
-/* Path A Feature 2.1/2.2: gated Zig table region detect (widths/aligns). */
-extern int zig_bw_table_detect(P *anchor, off_t buf_line,
-	off_t *out_start, off_t *out_end, off_t *out_sep, int *out_ncols,
-	int *out_widths, int *out_aligns, int out_cap);
 /* Path A: gated Zig cursor follow (text + hex). */
 extern int zig_bw_bwfllwt(P *top, P *cursor, SCRN *t, int *updtab,
 	ptrdiff_t y, ptrdiff_t h, ptrdiff_t w,
@@ -61,35 +51,8 @@ extern int zig_bw_bwins(SCRN *t, int *updtab, ptrdiff_t *sary, ptrdiff_t li,
 extern int zig_bw_bwdel(SCRN *t, int *updtab,
 	ptrdiff_t y, ptrdiff_t h, off_t top_line, off_t eof_line,
 	off_t l, off_t n, int flg, int do_highlight);
-/* Path A: gated Zig Feature 1.9 table dim/bold fallback. */
-extern int zig_bw_view_table_hl(const unsigned char *line, int line_len,
-	int *atr, int atr_len, int in_table_region);
-/* Path A: gated Zig lgen_view line-start Feature 1.3/1.5/1.7/1.8. */
-extern int zig_bw_view_line_start(const unsigned char *line, int line_len,
-	char *hide, int hide_len, int *subst, int subst_len,
-	off_t *col_map, int col_map_len, int tab);
-/* Path A: gated Zig lgen_view inline Feature 1.4/1.5/1.6 + col_map. */
-extern int zig_bw_view_inline(const unsigned char *line, int line_len,
-	char *hide, int hide_len, int *subst, int subst_len,
-	char **urls, int urls_len, off_t *col_map, int col_map_len,
-	int *atr, int atr_len, int tab);
-/* Path A: gated Zig Feature 1.10 col_map ensure + cursor xcol. */
-extern int zig_bw_view_finish(const unsigned char *line, int line_len,
-	char *vm_hide, int vm_hide_len, int *vm_subst, int vm_subst_len,
-	off_t *vm_col_map, int vm_col_map_len, off_t *vm_col_map_line,
-	off_t buf_line, int tab, P *cursor, int skip_hidden);
-/* Path A: gated thin lgen_view chrome dispatcher (Feature 1.x/2.x sequence). */
-extern int zig_bw_lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
-	ptrdiff_t x0, ptrdiff_t x1, P *p, const unsigned char *line, int line_len,
-	char *vm_hide, int vm_hide_len, int *vm_subst, int vm_subst_len,
-	char **urls, int urls_len, off_t *vm_col_map, int vm_col_map_len,
-	off_t *vm_col_map_line, int *atr, int atr_len, int tab, off_t buf_line,
-	P *cursor, off_t *table_region_start, off_t *table_region_end,
-	off_t *table_separator_line, off_t *table_cached_for_line,
-	off_t *table_no_region_line, int *table_col_count,
-	int *table_col_width, int *table_col_align, int table_cap,
-	struct charmap *charmap, int defatr, int *palette, int palette_len, int utf8);
-/* Path A: gated thin lgen_view entry (prelude + dispatcher + paint cleanup). */
+/* Path A: gated thin lgen_view entry (prelude + dispatcher + paint cleanup).
+ * Piecemeal Feature helpers live only in Zig now; C keeps pure Feature fallback. */
 extern int zig_bw_lgen_view_entry(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
 	ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,
 	HIGHLIGHT_STATE st, BW *bw);
@@ -114,10 +77,6 @@ extern int zig_bw_ustat(W *w, int k, int *out_rc);
 extern int zig_bw_ucrawlr(W *w, int k, int *out_rc);
 extern int zig_bw_ucrawll(W *w, int k, int *out_rc);
 extern int zig_bw_init_visiblews(void);
-/* Path A Feature 2.1: gated Zig simple pipe substitute into vm_subst[]. */
-extern int zig_bw_table_simple(const unsigned char *line, int line_len, int row_type,
-	int *vm_subst, int vm_subst_len);
-
 /* Attributes for line numbers, and current line */
 int bg_linum = 0;
 int bg_curlinum = 0;
@@ -805,7 +764,7 @@ static int lgen_core(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 {
 	/* Path A: Zig-native paint for UTF-8 and byte charmaps (+ linear/square
 	 * marks + viewmode tables + visiblews + ansi ESC hide). Feature 2.2 padded
-	 * table rows skip lgen_core (painted via zig_bw_table_row / C fallback in
+	 * table rows skip lgen_core (painted in Zig entry / C Feature fallback in
 	 * lgen_view). dspasis lives in outatr. */
 	if (zig_bw_lgen_enabled
 	    && p && p->b && p->b->o.charmap) {
@@ -1616,108 +1575,9 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 	}
 
 	/* --- Detect line type and hide delimiters --- */
+	/* Path A entry owns Zig Feature chrome under the gate; this body is the
+	 * pure-C Feature fallback when the gate is off or entry returns -1. */
 
-	/* Path A: thin Zig lgen_view chrome dispatcher (Feature 1.x/2.x sequence).
-	 * C keeps parse / line buffer / side-table alloc and post paint cleanup.
-	 * On success, Zig already ran Feature 1.10 finish — jump to paint_and_cleanup.
-	 * On failure (-1), fall through to piecemeal Path A + C chrome. */
-	if (zig_bw_lgen_enabled && attr_buf && attr_size > 0) {
-		int need = line_len > 0 ? line_len : 1;
-		int ready = 1;
-		if (!viewmode_col_map || viewmode_col_map_size < need) {
-			off_t *nm = (off_t *)joe_realloc(viewmode_col_map, (ptrdiff_t)need * (ptrdiff_t)sizeof(off_t));
-			if (!nm) {
-				if (viewmode_col_map) joe_free(viewmode_col_map);
-				viewmode_col_map = NULL;
-				viewmode_col_map_size = 0;
-				viewmode_col_map_line = -1;
-				ready = 0;
-			} else {
-				viewmode_col_map = nm;
-				viewmode_col_map_size = need;
-			}
-		}
-		if (!viewmode_link_url || viewmode_link_url_size < need) {
-			viewmode_free_link_urls();
-			char **nl = (char **)joe_realloc(viewmode_link_url, (ptrdiff_t)need * (ptrdiff_t)sizeof(char *));
-			if (!nl) {
-				ready = 0;
-			} else {
-				viewmode_link_url = nl;
-				if (viewmode_link_url_size < need) {
-					memset(viewmode_link_url + viewmode_link_url_size, 0,
-					       (size_t)(need - viewmode_link_url_size) * sizeof(char *));
-				}
-				viewmode_link_url_size = need;
-			}
-		} else {
-			viewmode_free_link_urls();
-			memset(viewmode_link_url, 0, (size_t)need * sizeof(char *));
-		}
-		if (ready
-		    && viewmode_hide && viewmode_hide_size >= need
-		    && viewmode_substitute && viewmode_substitute_size >= need
-		    && viewmode_col_map && viewmode_col_map_size >= need
-		    && viewmode_link_url && viewmode_link_url_size >= need
-		    && bw->b && bw->b->o.charmap) {
-			int tab = bw->o.tab;
-			if (tab <= 0) tab = 8;
-			off_t buf_line = bw->top->line + y - bw->y;
-			int defatr = (bw->o.hiline && bw->cursor->line == buf_line)
-				? (bg_text & curlinmask) | bg_curlin
-				: bg_text;
-			int utf8 = bw->b->o.charmap->type ? 1 : 0;
-			int z = zig_bw_lgen_view(t, y, screen, attr, x, w, p, line, line_len,
-				viewmode_hide, viewmode_hide_size,
-				viewmode_substitute, viewmode_substitute_size,
-				viewmode_link_url, viewmode_link_url_size,
-				viewmode_col_map, viewmode_col_map_size,
-				&viewmode_col_map_line, attr_buf, attr_size, tab, buf_line,
-				bw->cursor, &table_region_start, &table_region_end,
-				&table_separator_line, &table_cached_for_line,
-				&table_no_region_line, &table_col_count,
-				table_col_width, table_col_align, MAX_TABLE_COLS,
-				bw->b->o.charmap, BG_COLOR(defatr),
-				t->palette, t->palette ? 256 : 0, utf8);
-			if (z == 1) {
-				viewmode_table_rendered = 1;
-				goto paint_and_cleanup;
-			}
-			if (z == 0)
-				goto paint_and_cleanup;
-		}
-	}
-
-	/* Path A: Zig line-start view chrome (heading/fence/blockquote/HR/task). */
-	int zig_line_start_done = 0;
-	if (zig_bw_lgen_enabled) {
-		int need = line_len > 0 ? line_len : 1;
-		if (!viewmode_col_map || viewmode_col_map_size < need) {
-			off_t *nm = (off_t *)joe_realloc(viewmode_col_map, (ptrdiff_t)need * (ptrdiff_t)sizeof(off_t));
-			if (nm) {
-				viewmode_col_map = nm;
-				viewmode_col_map_size = need;
-			}
-		}
-		if (viewmode_col_map && viewmode_col_map_size >= need
-		    && viewmode_hide && viewmode_hide_size >= need
-		    && viewmode_substitute && viewmode_substitute_size >= need) {
-			int tab = bw->o.tab;
-			if (tab <= 0) tab = 8;
-			int z = zig_bw_view_line_start(line, line_len,
-				viewmode_hide, viewmode_hide_size,
-				viewmode_substitute, viewmode_substitute_size,
-				viewmode_col_map, viewmode_col_map_size, tab);
-			if (z == 1) {
-				viewmode_col_map_line = bw->top->line + y - bw->y;
-				goto done;
-			}
-			if (z == 0)
-				zig_line_start_done = 1;
-		}
-	}
-
-	if (!zig_line_start_done) {
 	/* Feature 1.3: Heading — hide # run and trailing space */
 	{
 		int i = 0;
@@ -1850,8 +1710,6 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 		}
 	}
 
-	} /* !zig_line_start_done */
-
 	/* Feature 2.1: Unicode Box-Drawing Table Borders
 	 * Detect table regions by scanning ahead, then apply box-drawing substitutions:
 	 * - First row:    | → ┌ (first), | → ┬ (middle), | → ┐ (last)
@@ -1901,20 +1759,6 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 					    buf_line <= table_no_region_line + 10) {
 						table_cached_for_line = buf_line;
 						goto skip_table_scan;
-					}
-
-					/* Path A: Zig-native table region detect (JOE_ZIG_BW_LGEN). */
-					if (zig_bw_lgen_enabled) {
-						int zdet = zig_bw_table_detect(p, buf_line,
-							&table_region_start, &table_region_end,
-							&table_separator_line, &table_col_count,
-							table_col_width, table_col_align, MAX_TABLE_COLS);
-						if (zdet >= 0) {
-							if (table_region_start == -1)
-								table_no_region_line = buf_line;
-							table_cached_for_line = buf_line;
-							goto skip_table_scan;
-						}
 					}
 
 					/* Try to find the table start by scanning backward from current line */
@@ -2153,47 +1997,13 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 						}
 					}
 				}
-				{
-					int used_zig = 0;
-					if (zig_bw_lgen_enabled
-					    && bw->b && bw->b->o.charmap && bw->b->o.charmap->type) {
-						int defatr = (bw->o.hiline && bw->cursor->line == y - bw->y + bw->top->line)
-							? (bg_text & curlinmask) | bg_curlin
-							: bg_text;
-						int ncols = table_col_count;
-						if (ncols > MAX_TABLE_COLS) ncols = MAX_TABLE_COLS;
-						int z = zig_bw_table_row(t, y, screen, attr, x, w, line, line_len,
-							ncols, table_col_width, table_col_align, (int)row_type,
-							bw->b->o.charmap, BG_COLOR(defatr),
-							t->palette, t->palette ? 256 : 0,
-							viewmode_col_map, viewmode_col_map_size);
-						if (z >= 0) {
-							used_zig = 1;
-							/* Match C render_padded_table_row: set map line after
-							 * non-separator fill (separator returns before col_map). */
-							if (row_type != TABLE_ROW_SEPARATOR
-							    && viewmode_col_map
-							    && viewmode_col_map_size >= (line_len > 0 ? line_len : 1))
-								viewmode_col_map_line = bw->top->line + y - bw->y;
-						}
-					}
-					if (!used_zig)
-						render_padded_table_row(t, y, screen, attr, x, w, bw, line, line_len, row_type);
-				}
+				render_padded_table_row(t, y, screen, attr, x, w, bw, line, line_len, row_type);
 				viewmode_table_rendered = 1;
 				/* Skip rest of lgen_view — we rendered to screen directly */
 				goto table_rendered;
 			} else {
-				/* Feature 2.1 residual: no column widths — simple pipe substitute.
-				 * Path A: Zig applySimpleBorders; C fallback for separator-only. */
-				int zok = 0;
-				if (zig_bw_lgen_enabled && bw->b && bw->b->o.charmap && bw->b->o.charmap->type
-				    && viewmode_substitute && viewmode_substitute_size >= line_len) {
-					if (zig_bw_table_simple(line, line_len, (int)row_type,
-						viewmode_substitute, viewmode_substitute_size) >= 0)
-						zok = 1;
-				}
-				if (!zok) {
+				/* Feature 2.1 residual: no column widths — simple pipe substitute. */
+				{
 					/* Find pipe positions in this line */
 					int pipe_positions[32];
 					int pipe_count = 0;
@@ -2244,10 +2054,7 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 	{
 		off_t buf_line = bw->top->line + y - bw->y;
 		int in_region = (buf_line >= table_region_start && buf_line < table_region_end);
-		if (zig_bw_lgen_enabled &&
-		    zig_bw_view_table_hl(line, line_len, attr_buf, attr_size, in_region) >= 0) {
-			/* Zig Path A handled Feature 1.9 */
-		} else if (!in_region) {
+		if (!in_region) {
 			/* Not in a detected table region — check if this single line looks like a table */
 			int i = 0;
 			while (i < line_len && (line[i] == ' ' || line[i] == '\t'))
@@ -2273,53 +2080,6 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 					for (k = 0; k < line_len && k < attr_size; k++)
 						attr_buf[k] |= BOLD;
 				}
-			}
-		}
-	}
-
-	/* Path A: Zig inline view chrome (emphasis / code / links / col_map). */
-	if (zig_bw_lgen_enabled) {
-		int need = line_len > 0 ? line_len : 1;
-		/* Ensure link URL array is sized */
-		if (!viewmode_link_url || viewmode_link_url_size < need) {
-			viewmode_free_link_urls();
-			char **nl = (char **)joe_realloc(viewmode_link_url, (ptrdiff_t)need * (ptrdiff_t)sizeof(char *));
-			if (!nl) {
-				/* OOM — fall back to C */
-			} else {
-				viewmode_link_url = nl;
-				if (viewmode_link_url_size < need) {
-					memset(viewmode_link_url + viewmode_link_url_size, 0,
-					       (size_t)(need - viewmode_link_url_size) * sizeof(char *));
-				}
-				viewmode_link_url_size = need;
-			}
-		} else {
-			viewmode_free_link_urls();
-			memset(viewmode_link_url, 0, (size_t)need * sizeof(char *));
-		}
-		/* Ensure column map is sized */
-		if (!viewmode_col_map || viewmode_col_map_size < need) {
-			off_t *nm = (off_t *)joe_realloc(viewmode_col_map, (ptrdiff_t)need * (ptrdiff_t)sizeof(off_t));
-			if (nm) {
-				viewmode_col_map = nm;
-				viewmode_col_map_size = need;
-			}
-		}
-		if (viewmode_link_url && viewmode_link_url_size >= need
-		    && viewmode_col_map && viewmode_col_map_size >= need
-		    && viewmode_hide && viewmode_hide_size >= need
-		    && viewmode_substitute && viewmode_substitute_size >= need) {
-			int tab = bw->o.tab;
-			if (tab <= 0) tab = 8;
-			if (zig_bw_view_inline(line, line_len,
-				viewmode_hide, viewmode_hide_size,
-				viewmode_substitute, viewmode_substitute_size,
-				viewmode_link_url, viewmode_link_url_size,
-				viewmode_col_map, viewmode_col_map_size,
-				attr_buf, attr_size, tab) >= 0) {
-				viewmode_col_map_line = bw->top->line + y - bw->y;
-				goto done;
 			}
 		}
 	}
@@ -2705,38 +2465,7 @@ table_rendered:
 	/* Feature 1.10: ensure col_map + update cursor xcol (shared done/table paths). */
 	{
 		off_t buf_line = bw->top->line + y - bw->y;
-		int zig_ok = 0;
-		if (zig_bw_lgen_enabled) {
-			int need = line_len > 0 ? line_len : 1;
-			if (!viewmode_col_map || viewmode_col_map_size < need) {
-				off_t *nm = (off_t *)joe_realloc(viewmode_col_map, (ptrdiff_t)need * (ptrdiff_t)sizeof(off_t));
-				if (!nm) {
-					if (viewmode_col_map) joe_free(viewmode_col_map);
-					viewmode_col_map = NULL;
-					viewmode_col_map_size = 0;
-					viewmode_col_map_line = -1;
-				} else {
-					viewmode_col_map = nm;
-					viewmode_col_map_size = need;
-				}
-			}
-			if (viewmode_col_map && viewmode_col_map_size >= need
-			    && viewmode_hide && viewmode_hide_size >= need
-			    && viewmode_substitute && viewmode_substitute_size >= need) {
-				int tab = bw->o.tab;
-				if (tab <= 0) tab = 8;
-				int skip_hidden = viewmode_table_rendered ? 0 : 1;
-				if (zig_bw_view_finish(line, line_len,
-					viewmode_hide, viewmode_hide_size,
-					viewmode_substitute, viewmode_substitute_size,
-					viewmode_col_map, viewmode_col_map_size,
-					&viewmode_col_map_line, buf_line, tab,
-					bw->cursor, skip_hidden) >= 0)
-					zig_ok = 1;
-			}
-		}
-		if (!zig_ok) {
-			/* Ensure we always have a valid map for this line. */
+		/* Ensure we always have a valid map for this line. */
 			if (viewmode_col_map_line != buf_line) {
 				if (!viewmode_col_map || viewmode_col_map_size < (line_len > 0 ? line_len : 1)) {
 					int need = line_len > 0 ? line_len : 1;
@@ -2801,7 +2530,6 @@ table_rendered:
 					bw->cursor->valcol = 1;
 				}
 			}
-		}
 	}
 paint_and_cleanup:
 	joe_free(line);

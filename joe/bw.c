@@ -144,165 +144,26 @@ int opt_right = 8;
 void bwfllwh(W *thew)
 {
 	BW *w = (BW *)thew->object;
-	/* Path A: Zig-native hex follow (Path A). */
 	if (zig_bw_bwfllwh(w->top, w->cursor, w->t->t, w->t->t->updtab,
 		w->y, w->h, w->w, &w->offset) >= 0)
 		return;
-	
-
-	/* Top must be a multiple of 16 bytes */
-	if (w->top->byte%16) {
-		pbkwd(w->top,w->top->byte%16);
-	}
-
-	/* Move backward */
-	if (w->cursor->byte < w->top->byte) {
-		off_t new_top = w->cursor->byte/16;
-		if (opt_mid) {
-			if (new_top >= w->h / 2)
-				new_top -= w->h / 2;
-			else
-				new_top = 0;
-		}
-		if (w->top->byte/16 - new_top < w->h)
-			nscrldn(w->t->t, w->y, w->y + w->h, (int) (w->top->byte/16 - new_top));
-		else
-			msetI(w->t->t->updtab + w->y, 1, w->h);
-		pgoto(w->top,new_top*16);
-	}
-
-	/* Move forward */
-	if (w->cursor->byte >= w->top->byte+(w->h*16)) {
-		off_t new_top;
-		if (opt_mid) {
-			new_top = w->cursor->byte/16 - w->h / 2;
-		} else {
-			new_top = w->cursor->byte/16 - (w->h - 1);
-		}
-		if (new_top - w->top->byte/16 < w->h)
-			nscrlup(w->t->t, w->y, w->y + w->h, (int) (new_top - w->top->byte/16));
-		else {
-			msetI(w->t->t->updtab + w->y, 1, w->h);
-		}
-		pgoto(w->top, new_top*16);
-	}
-
-	/* Adjust scroll offset */
-	if (w->cursor->byte%16+60 < w->offset) {
-		w->offset = w->cursor->byte%16+60;
-		msetI(w->t->t->updtab + w->y, 1, w->h);
-	} else if (w->cursor->byte%16+60 >= w->offset + w->w) {
-		w->offset = w->cursor->byte%16+60 - (w->w - 1);
-		msetI(w->t->t->updtab + w->y, 1, w->h);
-	}
+	fprintf(stderr, "Path A: zig_bw_bwfllwh -1\n");
+	abort();
 }
+
 
 /* For text */
 
 void bwfllwt(W *thew)
 {
 	BW *w = (BW *)thew->object;
-	P *newtop;
-
-	/* Path A: Zig-native text follow (Path A). */
 	if (zig_bw_bwfllwt(w->top, w->cursor, w->t->t, w->t->t->updtab,
 		w->y, w->h, w->w, &w->offset, &w->curlin, w->o.hiline) >= 0)
 		return;
-	
-
-
-	if (!pisbol(w->top)) {
-		p_goto_bol(w->top);
-	}
-
-	if (w->cursor->line < w->top->line) {
-		newtop = pdup(w->cursor, "bwfllwt");
-		p_goto_bol(newtop);
-		if (opt_mid) {
-			if (newtop->line >= w->h / 2)
-				pline(newtop, newtop->line - w->h / 2);
-			else
-				pset(newtop, newtop->b->bof);
-		}
-		if (w->top->line - newtop->line < w->h)
-			nscrldn(w->t->t, w->y, w->y + w->h, (int) (w->top->line - newtop->line));
-		else {
-			msetI(w->t->t->updtab + w->y, 1, w->h);
-		}
-		pset(w->top, newtop);
-		prm(newtop);
-	} else if (w->cursor->line >= w->top->line + w->h) {
-		/* newtop = pdup(w->top); */
-		/* getto() creates newtop */
-		if (opt_mid)
-			newtop = getto(NULL, w->cursor, w->top, w->cursor->line - w->h / 2);
-		else
-			newtop = getto(NULL, w->cursor, w->top, w->cursor->line - (w->h - 1));
-		if (newtop->line - w->top->line < w->h)
-			nscrlup(w->t->t, w->y, w->y + w->h, (int) (newtop->line - w->top->line));
-		else {
-			msetI(w->t->t->updtab + w->y, 1, w->h);
-		}
-		pset(w->top, newtop);
-		prm(newtop);
-	}
-
-/* Adjust column */
-	if (w->cursor->xcol < w->offset) {
-		/* Need to scroll left */
-		off_t target = w->cursor->xcol;
-		ptrdiff_t amnt;
-
-		if (opt_left < 0) {
-			amnt = w->w / (-opt_left);
-		} else {
-			amnt = opt_left - 1;
-		}
-
-		if (amnt >= w->w)
-			amnt = w->w - 1;
-
-		if (amnt < 0)
-			amnt = 0;
-
-		if (target < amnt) {
-			target = 0;
-		} else {
-			target -= amnt;
-		}
-		w->offset = target;
-		msetI(w->t->t->updtab + w->y, 1, w->h);
-	}
-	if (w->cursor->xcol >= w->offset + w->w) {
-		/* Need to scroll right */
-		ptrdiff_t amnt;
-		if (opt_right < 0) {
-			amnt = w->w - w->w/(-opt_right);
-		} else {
-			amnt = w->w - opt_right;
-		}
-		if (amnt >= w->w)
-			amnt = w->w - 1;
-		if (amnt < 0)
-			amnt = 0;
-
-		w->offset = w->cursor->xcol - amnt;
-
-		msetI(w->t->t->updtab + w->y, 1, w->h);
-	}
-
-	if (w->o.hiline) {
-		if (w->curlin != w->cursor->line) {
-			/* Update old and new cursor lines */
-			if (w->curlin >= w->top->line && w->curlin < (w->top->line + w->h))
-				w->t->t->updtab[w->y + w->curlin - w->top->line] = 1;
-			w->curlin = w->cursor->line;
-			w->t->t->updtab[w->y + w->curlin - w->top->line] = 1;
-		}
-	} else {
-		w->curlin = w->cursor->line;
-	}
+	fprintf(stderr, "Path A: zig_bw_bwfllwt -1\n");
+	abort();
 }
+
 
 /* For either */
 
@@ -337,98 +198,27 @@ static HIGHLIGHT_STATE get_highlight_state(BW *w, P *p, off_t line)
 
 void bwins(BW *w, off_t l, off_t n, int flg)
 {
-	/* Path A: Zig-native post-insert scroll (Path A). */
-	int z = zig_bw_bwins(w->t->t, w->t->t->updtab, w->t->t->sary, w->t->t->li,
+	if (zig_bw_bwins(w->t->t, w->t->t->updtab, w->t->t->sary, w->t->t->li,
 		w->y, w->h, w->top->line, w->b->eof->line,
-		l, n, flg, (w->o.highlight && w->o.syntax) ? 1 : 0);
-	if (z >= 0)
+		l, n, flg, (w->o.highlight && w->o.syntax) ? 1 : 0) >= 0)
 		return;
-	
-
-	/* If highlighting is enabled... */
-	if (w->o.highlight && w->o.syntax) {
-		/* Invalidate cache */
-		/* lattr_cut(w->db, l + 1); */
-		/* Force updates */
-		if (l < w->top->line) {
-			msetI(w->t->t->updtab + w->y, 1, w->h);
-		} else if ((l + 1) < w->top->line + w->h) {
-			ptrdiff_t start = TO_DIFF_OK(l + 1 - w->top->line);
-			ptrdiff_t size = w->h - start;
-			msetI(w->t->t->updtab + w->y + start, 1, size);
-		}
-	}
-
-	/* Scroll */
-	if (l + flg + n < w->top->line + w->h && l + flg >= w->top->line && l + flg <= w->b->eof->line) {
-		if (flg)
-			w->t->t->sary[w->y + l - w->top->line] = w->t->t->li;
-		nscrldn(w->t->t, (int) (w->y + l + flg - w->top->line), w->y + w->h, (int) n);
-	}
-
-	/* Force update of lines in opened hole */
-	if (l < w->top->line + w->h && l >= w->top->line) {
-		if (n >= w->h - (l - w->top->line)) {
-			msetI(w->t->t->updtab + w->y + l - w->top->line, 1, w->h - (int) (l - w->top->line));
-		} else {
-			msetI(w->t->t->updtab + w->y + l - w->top->line, 1, (int) n + 1);
-		}
-	}
+	fprintf(stderr, "Path A: zig_bw_bwins -1\n");
+	abort();
 }
+
 
 /* Scroll current windows after a delete */
 
 void bwdel(BW *w, off_t l, off_t n, int flg)
 {
-	/* Path A: Zig-native post-delete scroll (Path A). */
-	int z = zig_bw_bwdel(w->t->t, w->t->t->updtab,
+	if (zig_bw_bwdel(w->t->t, w->t->t->updtab,
 		w->y, w->h, w->top->line, w->b->eof->line,
-		l, n, flg, (w->o.highlight && w->o.syntax) ? 1 : 0);
-	if (z >= 0)
+		l, n, flg, (w->o.highlight && w->o.syntax) ? 1 : 0) >= 0)
 		return;
-	
-
-	/* If highlighting is enabled... */
-	if (w->o.highlight && w->o.syntax) {
-		/* lattr_cut(w->db, l + 1); */
-		if (l < w->top->line) {
-			msetI(w->t->t->updtab + w->y, 1, w->h);
-		} else if ((l + 1) < w->top->line + w->h) {
-			ptrdiff_t start = TO_DIFF_OK(l + 1 - w->top->line);
-			ptrdiff_t size = w->h - start;
-			msetI(w->t->t->updtab + w->y + start, 1, size);
-		}
-	}
-
-	/* Update the line where the delete began */
-	if (l < w->top->line + w->h && l >= w->top->line)
-		w->t->t->updtab[w->y + l - w->top->line] = 1;
-
-	/* Update the line where the delete ended */
-	if (l + n < w->top->line + w->h && l + n >= w->top->line)
-		w->t->t->updtab[w->y + l + n - w->top->line] = 1;
-
-	if (l < w->top->line + w->h && (l + n >= w->top->line + w->h || (l + n == w->b->eof->line && w->b->eof->line >= w->top->line + w->h))) {
-		if (l >= w->top->line)
-			/* Update window from l to end */
-			msetI(w->t->t->updtab + w->y + l - w->top->line, 1, w->h - (int) (l - w->top->line));
-		else
-			/* Update entire window */
-			msetI(w->t->t->updtab + w->y, 1, w->h);
-	} else if (l < w->top->line + w->h && l + n == w->b->eof->line && w->b->eof->line < w->top->line + w->h) {
-		if (l >= w->top->line)
-			/* Update window from l to end of file */
-			msetI(w->t->t->updtab + w->y + l - w->top->line, 1, (int) n);
-		else
-			/* Update from beginning of window to end of file */
-			msetI(w->t->t->updtab + w->y, 1, (int) (w->b->eof->line - w->top->line));
-	} else if (l + n < w->top->line + w->h && l + n > w->top->line && l + n < w->b->eof->line) {
-		if (l + flg >= w->top->line)
-			nscrlup(w->t->t, (int) (w->y + l + flg - w->top->line), w->y + w->h, (int) n);
-		else
-			nscrlup(w->t->t, w->y, w->y + w->h, (int) (l + n - w->top->line));
-	}
+	fprintf(stderr, "Path A: zig_bw_bwdel -1\n");
+	abort();
 }
+
 
 struct ansi_sm
 {
@@ -1650,81 +1440,29 @@ void bwmove(BW *w, ptrdiff_t x, ptrdiff_t y)
 {
 	if (zig_bw_bwmove(w, x, y) >= 0)
 		return;
-	
-
-	w->x = x;
-	w->y = y;
+	fprintf(stderr, "Path A: zig_bw_bwmove -1\n");
+	abort();
 }
+
 
 void bwresz(BW *w, ptrdiff_t wi, ptrdiff_t he)
 {
 	if (zig_bw_bwresz(w, wi, he) >= 0)
 		return;
-	
-
-	if (he > w->h && w->y != -1) {
-		msetI(w->t->t->updtab + w->y + w->h, 1, he - w->h);
-	}
-	w->w = wi;
-	w->h = he;
-	if (w->b->vt && w->b->pid && w == vtmaster(w->parent->t, w->b)) {
-		vt_resize(w->b->vt, w->top, he, wi);
-		ttstsz(w->b->out, wi, he);
-	}
+	fprintf(stderr, "Path A: zig_bw_bwresz -1\n");
+	abort();
 }
+
 
 BW *bwmk(W *window, B *b, int prompt)
 {
 	BW *zw = NULL;
 	if (zig_bw_bwmk(window, b, prompt, &zw) >= 0)
 		return zw;
-	
-
-	{
-	BW *w = (BW *) joe_malloc(SIZEOF(BW));
-
-	w->parent = window;
-	w->b = b;
-	if (prompt || (!window->y && staen) || window->h < 2) {
-		w->y = window->y;
-		w->h = window->h;
-	} else {
-		w->y = window->y + 1;
-		w->h = window->h - 1;
-	}
-	if (b->oldcur) {
-		w->top = b->oldtop;
-		b->oldtop = NULL;
-		w->top->owner = NULL;
-		w->cursor = b->oldcur;
-		b->oldcur = NULL;
-		w->cursor->owner = NULL;
-	} else {
-		w->top = pdup(b->bof, "bwmk");
-		w->cursor = pdup(b->bof, "bwmk");
-	}
-	w->t = window->t;
-	w->object = NULL;
-	w->offset = 0;
-	w->o = w->b->o;
-	w->lincols = 0;
-	w->curlin = 0;
-	w->x = window->x;
-	w->w = window->w;
-	if (window == window->main) {
-		rmkbd(window->kbd);
-		window->kbd = mkkbd(kmap_getcontext(w->o.context));
-	}
-	w->top->xcol = 0;
-	w->cursor->xcol = 0;
-	w->top_changed = 1;
-	w->db = 0;
-	w->shell_flag = 0;
-	w->pasting = 0;
-	w->last_viewmode = 0;
-	return w;
-	}
+	fprintf(stderr, "Path A: zig_bw_bwmk -1\n");
+	abort();
 }
+
 
 /* Database of last file positions */
 
@@ -1903,37 +1641,37 @@ off_t get_file_pos(const char *name)
 	off_t zpos = 0;
 	if (zig_bw_get_file_pos(name, &zpos) >= 0)
 		return zpos;
-	
-
-	return zig_c_bw_file_pos_get(name);
+	fprintf(stderr, "Path A: zig_bw_get_file_pos -1\n");
+	abort();
 }
+
 
 void set_file_pos(const char *name, off_t pos)
 {
 	if (zig_bw_set_file_pos(name, pos) >= 0)
 		return;
-	
-
-	zig_c_bw_file_pos_set(name, pos);
+	fprintf(stderr, "Path A: zig_bw_set_file_pos -1\n");
+	abort();
 }
+
 
 void save_file_pos(FILE *f)
 {
 	if (zig_bw_save_file_pos(f) >= 0)
 		return;
-	
-
-	zig_c_bw_file_pos_save(f);
+	fprintf(stderr, "Path A: zig_bw_save_file_pos -1\n");
+	abort();
 }
+
 
 void load_file_pos(FILE *f)
 {
 	if (zig_bw_load_file_pos(f) >= 0)
 		return;
-	
-
-	zig_c_bw_file_pos_load(f);
+	fprintf(stderr, "Path A: zig_bw_load_file_pos -1\n");
+	abort();
 }
+
 
 /* Save file position for all windows */
 
@@ -1941,10 +1679,10 @@ void set_file_pos_all(Screen *t)
 {
 	if (zig_bw_set_file_pos_all(t) >= 0)
 		return;
-	
-
-	zig_c_bw_file_pos_all(t);
+	fprintf(stderr, "Path A: zig_bw_set_file_pos_all -1\n");
+	abort();
 }
+
 
 /* Return master BW for a B.  It's the last window on the screen with the B.  If the B has a VT, then
  * it's the last window on the screen with the B and where the cursor matches the VT cursor. */
@@ -1954,119 +1692,49 @@ BW *vtmaster(Screen *t, B *b)
 	BW *zm = NULL;
 	if (zig_bw_vtmaster(t, b, &zm) >= 0)
 		return zm;
-	
-
-	return zig_c_bw_vtmaster_impl(t, b);
+	fprintf(stderr, "Path A: zig_bw_vtmaster -1\n");
+	abort();
 }
+
 
 void bwrm(BW *w)
 {
 	if (zig_bw_bwrm(w) >= 0)
 		return;
-	
-
-	if (w->b == errbuf && w->b->count == 1) {
-		/* Do not lose message buffer */
-		orphit(w);
-	}
-	set_file_pos(w->b->name,w->cursor->line);
-	prm(w->top);
-	prm(w->cursor);
-	brm(w->b);
-	joe_free(w);
+	fprintf(stderr, "Path A: zig_bw_bwrm -1\n");
+	abort();
 }
+
 
 int ustat(W *w, int k)
 {
 	int zrc = 0;
 	if (zig_bw_ustat(w, k, &zrc) >= 0)
 		return zrc;
-	
-
-	return zig_c_bw_ustat_impl(w);
+	fprintf(stderr, "Path A: zig_bw_ustat -1\n");
+	abort();
 }
+
 
 int ucrawlr(W *w, int k)
 {
 	int zrc = 0;
 	if (zig_bw_ucrawlr(w, k, &zrc) >= 0)
 		return zrc;
-	
-
-	{
-	BW *bw;
-	ptrdiff_t amnt;
-	WIND_BW(bw, w);
-
-	if (opt_right < 0)
-		amnt = bw->w / (-opt_right);
-	else
-		amnt = opt_right;
-
-	if (amnt > bw->w)
-		amnt = bw->w;
-	if (amnt <= 0)
-		amnt = 1;
-
-	/* amnt = bw->w / 2; */
-
-	pcol(bw->cursor, bw->cursor->xcol + amnt);
-	bw->cursor->xcol += amnt;
-	bw->offset += amnt;
-	updall();
-	return 0;
-	}
+	fprintf(stderr, "Path A: zig_bw_ucrawlr -1\n");
+	abort();
 }
+
 
 int ucrawll(W *w, int k)
 {
 	int zrc = 0;
 	if (zig_bw_ucrawll(w, k, &zrc) >= 0)
 		return zrc;
-	
-
-	{
-	BW *bw;
-	off_t amnt;
-	WIND_BW(bw, w);
-	int rtn = -1;
-
-	if (opt_left < 0)
-		amnt = bw->w / (-opt_left);
-	else
-		amnt = opt_left;
-
-	if (amnt > bw->w)
-		amnt = bw->w;
-
-	if (amnt < 1)
-		amnt = 1;
-
-	if (amnt > bw->cursor->xcol) {
-		if (bw->cursor->xcol)
-			rtn = 0;
-		bw->cursor->xcol = 0;
-	} else {
-		bw->cursor->xcol -= amnt;
-		rtn = 0;
-	}
-
-	if (amnt > bw->offset) {
-		if (bw->offset)
-			rtn = 0;
-		bw->offset = 0;
-	} else {
-		bw->offset -= amnt;
-		rtn = 0;
-	}
-
-	if (rtn)
-		return rtn;
-	pcol(bw->cursor, bw->cursor->xcol);
-	updall();
-	return rtn;
-	}
+	fprintf(stderr, "Path A: zig_bw_ucrawll -1\n");
+	abort();
 }
+
 
 /* If we are about to call bwrm, and b->count is 1, and orphan mode
  * is set, call this. */
@@ -2075,13 +1743,10 @@ void orphit(BW *bw)
 {
 	if (zig_bw_orphit(bw) >= 0)
 		return;
-	
-
-	++bw->b->count; /* Assumes bwrm() is about to be called */
-	bw->b->orphan = 1;
-	pdupown(bw->cursor, &bw->b->oldcur, "orphit");
-	pdupown(bw->top, &bw->b->oldtop, "orphit");
+	fprintf(stderr, "Path A: zig_bw_orphit -1\n");
+	abort();
 }
+
 
 /* Calculate the width of the line number gutter for the Window */
 
@@ -2090,32 +1755,10 @@ int calclincols(BW *bw)
 	int z = zig_bw_calclincols(bw);
 	if (z >= 0)
 		return z;
-	
-
-	{
-	int width = 0;
-	off_t lines = bw->b->eof->line + 1;
-
-	if (!bw->o.linums) {
-		return 0;
-	}
-
-	if (lines < 10) {
-		width = 1;
-	} else if (lines < 100) {
-		width = 2;
-	} else if (lines < 1000) {
-		width = 3;
-	} else if (lines < 10000) {
-		width = 4;
-	} else {
-		off_t l;
-		for (l = 10000, width = 4; lines >= l; l *= 10, width++) {}
-	}
-
-	return width + 2;
-	}
+	fprintf(stderr, "Path A: zig_bw_calclincols -1\n");
+	abort();
 }
+
 
 /* Determine characters to use for visible whitespace */
 
@@ -2123,47 +1766,7 @@ void init_visiblews(void)
 {
 	if (zig_bw_init_visiblews() >= 0)
 		return;
-	
-
-	{
-	int spaces[] = { 0xb7, 0x2291, '.', 0 };
-	int tabs[] = { 0x2192, 0x203a, 0xbb, 0x25ba, '>', 0 };
-	int rtns[] = { 0x21b5, 0x21b2, '$', 0 };
-	int i;
-
-	vspace = vtab = vrtn = 0;
-
-	/* If we're Unicode, just take the best */
-	if (locale_map->type) {
-		vspace = spaces[0];
-		vtab = tabs[0];
-		vrtn = rtns[0];
-		return;
-	}
-
-	/* Otherwise, we need to find bytes matching the desired code points */
-	for (i = 0; spaces[i]; i++) {
-		/* Check for unicode character in locale so we can display it */
-		if (from_uni(locale_map, spaces[i]) > 0) {
-			vspace = spaces[i];
-			break;
-		}
-	}
-
-	for (i = 0; tabs[i]; i++) {
-		/* Same */
-		if (from_uni(locale_map, tabs[i]) > 0) {
-			vtab = tabs[i];
-			break;
-		}
-	}
-
-	for (i = 0; rtns[i]; i++) {
-		/* Same */
-		if (from_uni(locale_map, rtns[i]) > 0) {
-			vrtn = rtns[i];
-			break;
-		}
-	}
-	}
+	fprintf(stderr, "Path A: zig_bw_init_visiblews -1\n");
+	abort();
 }
+

@@ -57,6 +57,9 @@ extern int zig_bw_bwins(SCRN *t, int *updtab, ptrdiff_t *sary, ptrdiff_t li,
 extern int zig_bw_bwdel(SCRN *t, int *updtab,
 	ptrdiff_t y, ptrdiff_t h, off_t top_line, off_t eof_line,
 	off_t l, off_t n, int flg, int do_highlight);
+/* Path A: gated Zig Feature 1.9 table dim/bold fallback. */
+extern int zig_bw_view_table_hl(const unsigned char *line, int line_len,
+	int *atr, int atr_len, int in_table_region);
 /* Path A: gated Zig lgen_view line-start Feature 1.3/1.5/1.7/1.8. */
 extern int zig_bw_view_line_start(const unsigned char *line, int line_len,
 	char *hide, int hide_len, int *subst, int subst_len,
@@ -2109,7 +2112,11 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 	/* Feature 1.9 fallback: Table highlighting (dim/bold) — only if box-drawing didn't apply */
 	{
 		off_t buf_line = bw->top->line + y - bw->y;
-		if (buf_line < table_region_start || buf_line >= table_region_end) {
+		int in_region = (buf_line >= table_region_start && buf_line < table_region_end);
+		if (zig_bw_lgen_enabled &&
+		    zig_bw_view_table_hl(line, line_len, attr_buf, attr_size, in_region) >= 0) {
+			/* Zig Path A handled Feature 1.9 */
+		} else if (!in_region) {
 			/* Not in a detected table region — check if this single line looks like a table */
 			int i = 0;
 			while (i < line_len && (line[i] == ' ' || line[i] == '\t'))

@@ -15,6 +15,7 @@
 //! Post-edit window scroll uses `zig_bw_bwins` / `zig_bw_bwdel`.
 //! `lgen_view` line-start Feature 1.3/1.5/1.7/1.8 uses `zig_bw_view_line_start`.
 //! `lgen_view` inline Feature 1.4/1.5/1.6 + col_map uses `zig_bw_view_inline`.
+//! Feature 1.9 single-line table dim/bold uses `zig_bw_view_table_hl`.
 //! Feature 2.1 residual simple pipe substitute uses `zig_bw_table_simple`.
 //! Non-UTF-8 (byte) charmaps paint via `lgenLine` byte-mode.
 //! Default off until soak. Falls back to C when the gate is off.
@@ -45,6 +46,8 @@ const NO_MORE_DATA: c_int = -256;
 const max_line_bytes: usize = 256 * 1024;
 const INVERSE: c_int = 64;
 const UNDERLINE: c_int = 128;
+const BOLD: c_int = 256;
+const DIM: c_int = 1024;
 const FG_SHIFT: c_int = 21;
 const FG_NOT_DEFAULT: c_int = 256 << FG_SHIFT;
 const FG_MASK: c_int = 1023 << FG_SHIFT;
@@ -595,6 +598,46 @@ pub export fn zig_bw_bwdel(
         } else {
             zig_c_bw_nscrlup(t, win_y, win_y + win_h, @intCast(l + n - top_line));
         }
+    }
+    return 0;
+}
+
+/// Path A Feature 1.9: dim/bold highlight for pipe lines outside a table region.
+/// Returns `0` on success, `-1` to fall back to C.
+pub export fn zig_bw_view_table_hl(
+    line_ptr: ?[*]const u8,
+    line_len: c_int,
+    atr: ?[*]c_int,
+    atr_len: c_int,
+    in_table_region: c_int,
+) c_int {
+    if (zig_bw_lgen_enabled == 0) return -1;
+    if (line_ptr == null or atr == null or line_len < 0 or atr_len <= 0) return -1;
+    if (in_table_region != 0) return 0;
+
+    const n: usize = @intCast(line_len);
+    const line = line_ptr.?[0..n];
+    var i: usize = 0;
+    while (i < n and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {}
+    if (i >= n or line[i] != '|') return 0;
+
+    var is_separator = true;
+    var has_dash = false;
+    for (line) |b| {
+        switch (b) {
+            '|', ' ', '\t', ':' => {},
+            '-' => has_dash = true,
+            else => {
+                is_separator = false;
+                break;
+            },
+        }
+    }
+    const flag: c_int = if (is_separator and has_dash) DIM else BOLD;
+    const alen: usize = @intCast(atr_len);
+    var j: usize = 0;
+    while (j < n and j < alen) : (j += 1) {
+        atr.?[j] |= flag;
     }
     return 0;
 }

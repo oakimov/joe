@@ -89,6 +89,13 @@ extern int zig_bw_lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *a
 extern int zig_bw_lgen_view_entry(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
 	ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,
 	HIGHLIGHT_STATE st, BW *bw);
+/* Path A: gated lifecycle helpers. */
+extern int zig_bw_bwmove(BW *w, ptrdiff_t x, ptrdiff_t y);
+extern int zig_bw_bwresz(BW *w, ptrdiff_t wi, ptrdiff_t he);
+extern int zig_bw_bwmk(W *window, B *b, int prompt, BW **out_bw);
+extern int zig_bw_bwrm(BW *w);
+extern int zig_bw_orphit(BW *bw);
+extern int zig_bw_calclincols(BW *bw);
 /* Path A Feature 2.1: gated Zig simple pipe substitute into vm_subst[]. */
 extern int zig_bw_table_simple(const unsigned char *line, int line_len, int row_type,
 	int *vm_subst, int vm_subst_len);
@@ -3270,6 +3277,133 @@ void zig_c_bw_view_after(int line_len)
 	viewmode_table_rendered = 0;
 }
 
+/* Path A helpers for lifecycle exports. */
+void zig_c_bw_set_pos(BW *w, ptrdiff_t x, ptrdiff_t y)
+{
+	if (!w) return;
+	w->x = x;
+	w->y = y;
+}
+
+ptrdiff_t zig_c_bw_get_h(BW *w)
+{
+	return w ? w->h : 0;
+}
+
+void zig_c_bw_set_size(BW *w, ptrdiff_t wi, ptrdiff_t he)
+{
+	if (!w) return;
+	w->w = wi;
+	w->h = he;
+}
+
+void zig_c_bw_dirty_grown_rows(BW *w, ptrdiff_t old_h, ptrdiff_t new_h)
+{
+	if (!w || !w->t || !w->t->t || w->y == -1) return;
+	if (new_h > old_h)
+		msetI(w->t->t->updtab + w->y + old_h, 1, new_h - old_h);
+}
+
+void zig_c_bw_resz_vt_if_master(BW *w, ptrdiff_t wi, ptrdiff_t he)
+{
+	if (!w || !w->b || !w->parent) return;
+	if (w->b->vt && w->b->pid && w == vtmaster(w->parent->t, w->b)) {
+		vt_resize(w->b->vt, w->top, he, wi);
+		ttstsz(w->b->out, wi, he);
+	}
+}
+
+int zig_c_bw_get_linums(BW *w)
+{
+	return (w && w->o.linums) ? 1 : 0;
+}
+
+off_t zig_c_bw_b_eof_line(BW *w)
+{
+	return (w && w->b && w->b->eof) ? w->b->eof->line : 0;
+}
+
+BW *zig_c_bw_alloc(void)
+{
+	return (BW *)joe_malloc(SIZEOF(BW));
+}
+
+int zig_c_bw_mk_init(BW *w, W *window, B *b, int prompt)
+{
+	if (!w || !window || !b) return -1;
+
+	w->parent = window;
+	w->b = b;
+	if (prompt || (!window->y && staen) || window->h < 2) {
+		w->y = window->y;
+		w->h = window->h;
+	} else {
+		w->y = window->y + 1;
+		w->h = window->h - 1;
+	}
+	if (b->oldcur) {
+		w->top = b->oldtop;
+		b->oldtop = NULL;
+		w->top->owner = NULL;
+		w->cursor = b->oldcur;
+		b->oldcur = NULL;
+		w->cursor->owner = NULL;
+	} else {
+		w->top = pdup(b->bof, "bwmk");
+		w->cursor = pdup(b->bof, "bwmk");
+		if (!w->top || !w->cursor) return -1;
+	}
+	w->t = window->t;
+	w->object = NULL;
+	w->offset = 0;
+	w->o = w->b->o;
+	w->lincols = 0;
+	w->curlin = 0;
+	w->x = window->x;
+	w->w = window->w;
+	if (window == window->main) {
+		rmkbd(window->kbd);
+		window->kbd = mkkbd(kmap_getcontext(w->o.context));
+	}
+	w->top->xcol = 0;
+	w->cursor->xcol = 0;
+	w->top_changed = 1;
+	w->db = 0;
+	w->shell_flag = 0;
+	w->pasting = 0;
+	w->last_viewmode = 0;
+	return 0;
+}
+
+void zig_c_bw_orphit_impl(BW *bw)
+{
+	if (!bw || !bw->b) return;
+	++bw->b->count;
+	bw->b->orphan = 1;
+	pdupown(bw->cursor, &bw->b->oldcur, "orphit");
+	pdupown(bw->top, &bw->b->oldtop, "orphit");
+}
+
+int zig_c_bw_is_sole_errbuf(BW *w)
+{
+	return (w && w->b == errbuf && w->b->count == 1) ? 1 : 0;
+}
+
+void zig_c_bw_rm_save_pos(BW *w)
+{
+	if (w && w->b && w->cursor)
+		set_file_pos(w->b->name, w->cursor->line);
+}
+
+void zig_c_bw_rm_release(BW *w)
+{
+	if (!w) return;
+	if (w->top) prm(w->top);
+	if (w->cursor) prm(w->cursor);
+	if (w->b) brm(w->b);
+	joe_free(w);
+}
+
 void bwgen(BW *w, int linums, int linchg)
 {
 	int (*screen)[COMPOSE];
@@ -3431,12 +3565,20 @@ bwgen_viewmode_cursor:
 
 void bwmove(BW *w, ptrdiff_t x, ptrdiff_t y)
 {
+	if (zig_bw_lgen_enabled) {
+		if (zig_bw_bwmove(w, x, y) >= 0)
+			return;
+	}
 	w->x = x;
 	w->y = y;
 }
 
 void bwresz(BW *w, ptrdiff_t wi, ptrdiff_t he)
 {
+	if (zig_bw_lgen_enabled) {
+		if (zig_bw_bwresz(w, wi, he) >= 0)
+			return;
+	}
 	if (he > w->h && w->y != -1) {
 		msetI(w->t->t->updtab + w->y + w->h, 1, he - w->h);
 	}
@@ -3450,6 +3592,12 @@ void bwresz(BW *w, ptrdiff_t wi, ptrdiff_t he)
 
 BW *bwmk(W *window, B *b, int prompt)
 {
+	if (zig_bw_lgen_enabled) {
+		BW *zw = NULL;
+		if (zig_bw_bwmk(window, b, prompt, &zw) >= 0)
+			return zw;
+	}
+	{
 	BW *w = (BW *) joe_malloc(SIZEOF(BW));
 
 	w->parent = window;
@@ -3492,6 +3640,7 @@ BW *bwmk(W *window, B *b, int prompt)
 	w->pasting = 0;
 	w->last_viewmode = 0;
 	return w;
+	}
 }
 
 /* Database of last file positions */
@@ -3614,6 +3763,10 @@ BW *vtmaster(Screen *t, B *b)
 
 void bwrm(BW *w)
 {
+	if (zig_bw_lgen_enabled) {
+		if (zig_bw_bwrm(w) >= 0)
+			return;
+	}
 	if (w->b == errbuf && w->b->count == 1) {
 		/* Do not lose message buffer */
 		orphit(w);
@@ -3725,6 +3878,10 @@ int ucrawll(W *w, int k)
 
 void orphit(BW *bw)
 {
+	if (zig_bw_lgen_enabled) {
+		if (zig_bw_orphit(bw) >= 0)
+			return;
+	}
 	++bw->b->count; /* Assumes bwrm() is about to be called */
 	bw->b->orphan = 1;
 	pdupown(bw->cursor, &bw->b->oldcur, "orphit");
@@ -3735,6 +3892,12 @@ void orphit(BW *bw)
 
 int calclincols(BW *bw)
 {
+	if (zig_bw_lgen_enabled) {
+		int z = zig_bw_calclincols(bw);
+		if (z >= 0)
+			return z;
+	}
+	{
 	int width = 0;
 	off_t lines = bw->b->eof->line + 1;
 
@@ -3756,6 +3919,7 @@ int calclincols(BW *bw)
 	}
 
 	return width + 2;
+	}
 }
 
 /* Determine characters to use for visible whitespace */

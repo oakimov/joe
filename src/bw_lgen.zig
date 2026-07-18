@@ -21,6 +21,8 @@
 //! Feature 1.x/2.x sequence).
 //! Thin `lgen_view` entry uses `zig_bw_lgen_view_entry` (prelude + dispatcher +
 //! paint cleanup; C keeps viewmode static storage helpers + Feature fallback).
+//! Lifecycle uses `zig_bw_bwmove` / `zig_bw_bwresz` / `zig_bw_bwmk` / `zig_bw_bwrm` /
+//! `zig_bw_orphit` / `zig_bw_calclincols` (C fallback retained).
 //! Feature 2.1 residual simple pipe substitute uses `zig_bw_table_simple`.
 //! Non-UTF-8 (byte) charmaps paint via `lgenLine` byte-mode.
 //! Default off until soak. Falls back to C when the gate is off.
@@ -61,6 +63,8 @@ const FG_BLUE: c_int = FG_NOT_DEFAULT | (4 << FG_SHIFT);
 const SCRN = opaque {};
 const P = opaque {};
 const BW = opaque {};
+const W = opaque {};
+const B = opaque {};
 const Charmap = extern struct {
     next: ?*Charmap = null,
     name: ?[*:0]u8 = null,
@@ -2713,4 +2717,94 @@ test "bwgen square mark line scope matches C" {
     try std.testing.expect(!in_range);
     const buf_line2: i64 = 3;
     try std.testing.expect(buf_line2 >= fromline and buf_line2 <= toline);
+}
+
+extern fn zig_c_bw_set_pos(w: ?*BW, x: isize, y: isize) void;
+extern fn zig_c_bw_get_h(w: ?*BW) isize;
+extern fn zig_c_bw_set_size(w: ?*BW, wi: isize, he: isize) void;
+extern fn zig_c_bw_dirty_grown_rows(w: ?*BW, old_h: isize, new_h: isize) void;
+extern fn zig_c_bw_resz_vt_if_master(w: ?*BW, wi: isize, he: isize) void;
+extern fn zig_c_bw_get_linums(w: ?*BW) c_int;
+extern fn zig_c_bw_b_eof_line(w: ?*BW) i64;
+extern fn zig_c_bw_alloc() ?*BW;
+extern fn zig_c_bw_mk_init(w: ?*BW, window: ?*W, b: ?*B, prompt: c_int) c_int;
+extern fn zig_c_bw_orphit_impl(bw: ?*BW) void;
+extern fn zig_c_bw_is_sole_errbuf(w: ?*BW) c_int;
+extern fn zig_c_bw_rm_save_pos(w: ?*BW) void;
+extern fn zig_c_bw_rm_release(w: ?*BW) void;
+
+/// Path A lifecycle: set BW origin. Returns `0` on success, `-1` to fall back.
+pub export fn zig_bw_bwmove(w: ?*BW, x: isize, y: isize) c_int {
+    if (zig_bw_lgen_enabled == 0 or w == null) return -1;
+    zig_c_bw_set_pos(w, x, y);
+    return 0;
+}
+
+/// Path A lifecycle: resize BW (+ dirty new rows + VT master resize).
+pub export fn zig_bw_bwresz(w: ?*BW, wi: isize, he: isize) c_int {
+    if (zig_bw_lgen_enabled == 0 or w == null) return -1;
+    const old_h = zig_c_bw_get_h(w);
+    zig_c_bw_dirty_grown_rows(w, old_h, he);
+    zig_c_bw_set_size(w, wi, he);
+    zig_c_bw_resz_vt_if_master(w, wi, he);
+    return 0;
+}
+
+/// Path A lifecycle: allocate + init BW. On success writes `*out_bw` and returns `0`.
+pub export fn zig_bw_bwmk(window: ?*W, b: ?*B, prompt: c_int, out_bw: ?*?*BW) c_int {
+    if (zig_bw_lgen_enabled == 0) return -1;
+    if (window == null or b == null or out_bw == null) return -1;
+    const w = zig_c_bw_alloc() orelse return -1;
+    if (zig_c_bw_mk_init(w, window, b, prompt) < 0) {
+        joe_free(w);
+        return -1;
+    }
+    out_bw.?.* = w;
+    return 0;
+}
+
+/// Path A lifecycle: orphan buffer before `bwrm` when needed.
+pub export fn zig_bw_orphit(bw: ?*BW) c_int {
+    if (zig_bw_lgen_enabled == 0 or bw == null) return -1;
+    zig_c_bw_orphit_impl(bw);
+    return 0;
+}
+
+/// Path A lifecycle: destroy BW (errbuf orphan, save pos, release).
+pub export fn zig_bw_bwrm(w: ?*BW) c_int {
+    if (zig_bw_lgen_enabled == 0 or w == null) return -1;
+    if (zig_c_bw_is_sole_errbuf(w) != 0) {
+        // Use impl directly to avoid re-entering gated `orphit`.
+        zig_c_bw_orphit_impl(w);
+    }
+    zig_c_bw_rm_save_pos(w);
+    zig_c_bw_rm_release(w);
+    return 0;
+}
+
+/// Path A lifecycle: line-number gutter width (`linums` digit width + 2).
+/// Returns width (`>= 0`), or `-1` to fall back to C.
+pub export fn zig_bw_calclincols(bw: ?*BW) c_int {
+    if (zig_bw_lgen_enabled == 0 or bw == null) return -1;
+    if (zig_c_bw_get_linums(bw) == 0) return 0;
+    const lines = zig_c_bw_b_eof_line(bw) + 1;
+    var width: c_int = 0;
+    if (lines < 10) {
+        width = 1;
+    } else if (lines < 100) {
+        width = 2;
+    } else if (lines < 1000) {
+        width = 3;
+    } else if (lines < 10000) {
+        width = 4;
+    } else {
+        var l: i64 = 10000;
+        width = 4;
+        while (lines >= l) : (l *= 10) {
+            width += 1;
+            // Guard against overflow in the decade walk.
+            if (l > std.math.maxInt(i64) / 10) break;
+        }
+    }
+    return width + 2;
 }

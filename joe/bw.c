@@ -74,6 +74,17 @@ extern int zig_bw_view_finish(const unsigned char *line, int line_len,
 	char *vm_hide, int vm_hide_len, int *vm_subst, int vm_subst_len,
 	off_t *vm_col_map, int vm_col_map_len, off_t *vm_col_map_line,
 	off_t buf_line, int tab, P *cursor, int skip_hidden);
+/* Path A: gated thin lgen_view chrome dispatcher (Feature 1.x/2.x sequence). */
+extern int zig_bw_lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
+	ptrdiff_t x0, ptrdiff_t x1, P *p, const unsigned char *line, int line_len,
+	char *vm_hide, int vm_hide_len, int *vm_subst, int vm_subst_len,
+	char **urls, int urls_len, off_t *vm_col_map, int vm_col_map_len,
+	off_t *vm_col_map_line, int *atr, int atr_len, int tab, off_t buf_line,
+	P *cursor, off_t *table_region_start, off_t *table_region_end,
+	off_t *table_separator_line, off_t *table_cached_for_line,
+	off_t *table_no_region_line, int *table_col_count,
+	int *table_col_width, int *table_col_align, int table_cap,
+	struct charmap *charmap, int defatr, int *palette, int palette_len, int utf8);
 /* Path A Feature 2.1: gated Zig simple pipe substitute into vm_subst[]. */
 extern int zig_bw_table_simple(const unsigned char *line, int line_len, int row_type,
 	int *vm_subst, int vm_subst_len);
@@ -1562,6 +1573,77 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 
 	/* --- Detect line type and hide delimiters --- */
 
+	/* Path A: thin Zig lgen_view chrome dispatcher (Feature 1.x/2.x sequence).
+	 * C keeps parse / line buffer / side-table alloc and post paint cleanup.
+	 * On success, Zig already ran Feature 1.10 finish — jump to paint_and_cleanup.
+	 * On failure (-1), fall through to piecemeal Path A + C chrome. */
+	if (zig_bw_lgen_enabled && attr_buf && attr_size > 0) {
+		int need = line_len > 0 ? line_len : 1;
+		int ready = 1;
+		if (!viewmode_col_map || viewmode_col_map_size < need) {
+			off_t *nm = (off_t *)joe_realloc(viewmode_col_map, (ptrdiff_t)need * (ptrdiff_t)sizeof(off_t));
+			if (!nm) {
+				if (viewmode_col_map) joe_free(viewmode_col_map);
+				viewmode_col_map = NULL;
+				viewmode_col_map_size = 0;
+				viewmode_col_map_line = -1;
+				ready = 0;
+			} else {
+				viewmode_col_map = nm;
+				viewmode_col_map_size = need;
+			}
+		}
+		if (!viewmode_link_url || viewmode_link_url_size < need) {
+			viewmode_free_link_urls();
+			char **nl = (char **)joe_realloc(viewmode_link_url, (ptrdiff_t)need * (ptrdiff_t)sizeof(char *));
+			if (!nl) {
+				ready = 0;
+			} else {
+				viewmode_link_url = nl;
+				if (viewmode_link_url_size < need) {
+					memset(viewmode_link_url + viewmode_link_url_size, 0,
+					       (size_t)(need - viewmode_link_url_size) * sizeof(char *));
+				}
+				viewmode_link_url_size = need;
+			}
+		} else {
+			viewmode_free_link_urls();
+			memset(viewmode_link_url, 0, (size_t)need * sizeof(char *));
+		}
+		if (ready
+		    && viewmode_hide && viewmode_hide_size >= need
+		    && viewmode_substitute && viewmode_substitute_size >= need
+		    && viewmode_col_map && viewmode_col_map_size >= need
+		    && viewmode_link_url && viewmode_link_url_size >= need
+		    && bw->b && bw->b->o.charmap) {
+			int tab = bw->o.tab;
+			if (tab <= 0) tab = 8;
+			off_t buf_line = bw->top->line + y - bw->y;
+			int defatr = (bw->o.hiline && bw->cursor->line == buf_line)
+				? (bg_text & curlinmask) | bg_curlin
+				: bg_text;
+			int utf8 = bw->b->o.charmap->type ? 1 : 0;
+			int z = zig_bw_lgen_view(t, y, screen, attr, x, w, p, line, line_len,
+				viewmode_hide, viewmode_hide_size,
+				viewmode_substitute, viewmode_substitute_size,
+				viewmode_link_url, viewmode_link_url_size,
+				viewmode_col_map, viewmode_col_map_size,
+				&viewmode_col_map_line, attr_buf, attr_size, tab, buf_line,
+				bw->cursor, &table_region_start, &table_region_end,
+				&table_separator_line, &table_cached_for_line,
+				&table_no_region_line, &table_col_count,
+				table_col_width, table_col_align, MAX_TABLE_COLS,
+				bw->b->o.charmap, BG_COLOR(defatr),
+				t->palette, t->palette ? 256 : 0, utf8);
+			if (z == 1) {
+				viewmode_table_rendered = 1;
+				goto paint_and_cleanup;
+			}
+			if (z == 0)
+				goto paint_and_cleanup;
+		}
+	}
+
 	/* Path A: Zig line-start view chrome (heading/fence/blockquote/HR/task). */
 	int zig_line_start_done = 0;
 	if (zig_bw_lgen_enabled) {
@@ -2677,6 +2759,7 @@ table_rendered:
 			}
 		}
 	}
+paint_and_cleanup:
 	joe_free(line);
 
 	int result = 0;

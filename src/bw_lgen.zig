@@ -17,6 +17,8 @@
 //! `lgen_view` inline Feature 1.4/1.5/1.6 + col_map uses `zig_bw_view_inline`.
 //! Feature 1.9 single-line table dim/bold uses `zig_bw_view_table_hl`.
 //! Feature 1.10 col_map ensure + cursor xcol uses `zig_bw_view_finish`.
+//! Thin `lgen_view` chrome orchestration uses `zig_bw_lgen_view` (composes the
+//! Feature 1.x/2.x sequence; C keeps parse/line buffer/paint cleanup).
 //! Feature 2.1 residual simple pipe substitute uses `zig_bw_table_simple`.
 //! Non-UTF-8 (byte) charmaps paint via `lgenLine` byte-mode.
 //! Default off until soak. Falls back to C when the gate is off.
@@ -900,6 +902,266 @@ pub export fn zig_bw_view_finish(
     if (cursor_offset >= 0 and cursor_offset < col_map_len) {
         zig_c_bw_set_xcol(cursor, col_map.?[@intCast(cursor_offset)]);
     }
+    return 0;
+}
+
+/// Thin `lgen_view` chrome dispatcher (JOE_ZIG_BW_LGEN).
+///
+/// C keeps parse / line buffer / side-table alloc and post paint cleanup.
+/// This owns Feature 1.x/2.x chrome sequencing: line-start → table detect/row
+/// /simple → table_hl → inline → finish.
+///
+/// Returns:
+/// - `1` — Feature 2.2 table row painted; caller `pnextl`
+/// - `0` — side tables ready; caller `lgen_core` with `viewmode_skip_parse`
+/// - `-1` — fall back to C chrome
+pub export fn zig_bw_lgen_view(
+    t: ?*SCRN,
+    y: isize,
+    screen: ?[*][COMPOSE]c_int,
+    attr_row: ?[*]c_int,
+    x0: isize,
+    x1: isize,
+    p: ?*P,
+    line_ptr: ?[*]const u8,
+    line_len: c_int,
+    hide: ?[*]u8,
+    hide_len: c_int,
+    subst: ?[*]c_int,
+    subst_len: c_int,
+    urls: ?[*]?[*:0]u8,
+    urls_len: c_int,
+    col_map: ?[*]i64,
+    col_map_len: c_int,
+    col_map_line: ?*i64,
+    atr: ?[*]c_int,
+    atr_len: c_int,
+    tab: c_int,
+    buf_line: i64,
+    cursor: ?*P,
+    table_region_start: ?*i64,
+    table_region_end: ?*i64,
+    table_separator_line: ?*i64,
+    table_cached_for_line: ?*i64,
+    table_no_region_line: ?*i64,
+    table_col_count: ?*c_int,
+    table_col_width: ?[*]c_int,
+    table_col_align: ?[*]c_int,
+    table_cap: c_int,
+    charmap: ?*Charmap,
+    defatr: c_int,
+    palette: ?[*]c_int,
+    palette_len: c_int,
+    utf8: c_int,
+) c_int {
+    if (zig_bw_lgen_enabled == 0) return -1;
+    if (line_ptr == null or hide == null or subst == null or col_map == null or col_map_line == null) return -1;
+    if (cursor == null or p == null) return -1;
+    if (table_region_start == null or table_region_end == null or table_separator_line == null) return -1;
+    if (table_cached_for_line == null or table_no_region_line == null or table_col_count == null) return -1;
+    if (table_col_width == null or table_col_align == null or table_cap <= 0) return -1;
+    if (line_len < 0) return -1;
+
+    const n: usize = @intCast(line_len);
+    const clear_n: usize = if (n == 0) 1 else n;
+    if (hide_len < @as(c_int, @intCast(clear_n))) return -1;
+    if (subst_len < @as(c_int, @intCast(clear_n))) return -1;
+    if (col_map_len < @as(c_int, @intCast(clear_n))) return -1;
+    if (urls == null or urls_len < @as(c_int, @intCast(clear_n))) return -1;
+    if (atr == null or atr_len <= 0) return -1;
+
+    // 1) Line-start Feature 1.3/1.5/1.7/1.8 (+ task).
+    const zls = zig_bw_view_line_start(
+        line_ptr,
+        line_len,
+        hide,
+        hide_len,
+        subst,
+        subst_len,
+        col_map,
+        col_map_len,
+        tab,
+    );
+    if (zls < 0) return -1;
+    if (zls == 1) {
+        col_map_line.?.* = buf_line;
+        if (zig_bw_view_finish(
+            line_ptr,
+            line_len,
+            hide,
+            hide_len,
+            subst,
+            subst_len,
+            col_map,
+            col_map_len,
+            col_map_line,
+            buf_line,
+            tab,
+            cursor,
+            1,
+        ) < 0)
+            return -1;
+        return 0;
+    }
+
+    // 2) Table region cache + detect + row paint / simple borders.
+    var row_type: c_int = 0; // TABLE_ROW_NONE
+    if (table_cached_for_line.?.* != buf_line) {
+        if (buf_line >= table_region_start.?.* and buf_line < table_region_end.?.*) {
+            table_cached_for_line.?.* = buf_line;
+        } else {
+            table_region_start.?.* = -1;
+            table_region_end.?.* = -1;
+            table_separator_line.?.* = -1;
+            table_col_count.?.* = 0;
+            var vi: c_int = 0;
+            while (vi < table_cap) : (vi += 1) {
+                table_col_width.?[@intCast(vi)] = 0;
+                table_col_align.?[@intCast(vi)] = 0;
+            }
+
+            var has_pipe: bool = false;
+            var pi: usize = 0;
+            while (pi < n) : (pi += 1) {
+                if (line_ptr.?[pi] == '|') {
+                    has_pipe = true;
+                    break;
+                }
+            }
+            const no_line = table_no_region_line.?.*;
+            if (!has_pipe and no_line != -1 and buf_line >= no_line - 10 and buf_line <= no_line + 10) {
+                table_cached_for_line.?.* = buf_line;
+            } else {
+                const zdet = zig_bw_table_detect(
+                    p,
+                    buf_line,
+                    table_region_start,
+                    table_region_end,
+                    table_separator_line,
+                    table_col_count,
+                    table_col_width,
+                    table_col_align,
+                    table_cap,
+                );
+                if (zdet < 0) return -1;
+                if (table_region_start.?.* == -1)
+                    table_no_region_line.?.* = buf_line;
+                table_cached_for_line.?.* = buf_line;
+            }
+        }
+    }
+
+    if (buf_line >= table_region_start.?.* and buf_line < table_region_end.?.*) {
+        if (buf_line == table_separator_line.?.*) {
+            row_type = 2; // SEPARATOR
+        } else if (buf_line == table_region_start.?.*) {
+            row_type = 1; // HEADER
+        } else if (buf_line == table_region_end.?.* - 1 and table_region_end.?.* - 1 > table_separator_line.?.*) {
+            row_type = 4; // LAST
+        } else if (buf_line > table_separator_line.?.*) {
+            row_type = 3; // BODY
+        } else {
+            row_type = 1; // between header and separator
+        }
+    }
+
+    if (row_type != 0) {
+        const ncols = table_col_count.?.*;
+        if (ncols > 0) {
+            // Feature 2.2 padded row requires UTF-8 (matches live C gate).
+            if (utf8 == 0 or t == null or screen == null or attr_row == null or charmap == null)
+                return -1;
+            var use_ncols = ncols;
+            if (use_ncols > table_cap) use_ncols = table_cap;
+            const zrow = zig_bw_table_row(
+                t,
+                y,
+                screen,
+                attr_row,
+                x0,
+                x1,
+                line_ptr,
+                line_len,
+                use_ncols,
+                table_col_width,
+                table_col_align,
+                row_type,
+                charmap,
+                defatr,
+                palette,
+                palette_len,
+                col_map,
+                col_map_len,
+            );
+            if (zrow < 0) return -1;
+            if (row_type != 2 and col_map_len >= @as(c_int, @intCast(clear_n)))
+                col_map_line.?.* = buf_line;
+            _ = zig_bw_view_finish(
+                line_ptr,
+                line_len,
+                hide,
+                hide_len,
+                subst,
+                subst_len,
+                col_map,
+                col_map_len,
+                col_map_line,
+                buf_line,
+                tab,
+                cursor,
+                0, // table-rendered: do not skip hidden
+            );
+            return 1;
+        } else if (utf8 != 0) {
+            // Feature 2.1 residual (separator-only mutate).
+            if (zig_bw_table_simple(line_ptr, line_len, row_type, subst, subst_len) < 0)
+                return -1;
+        } else {
+            return -1;
+        }
+    }
+
+    // 3) Feature 1.9 table highlight (outside region).
+    const in_region: c_int = if (buf_line >= table_region_start.?.* and buf_line < table_region_end.?.*) 1 else 0;
+    if (zig_bw_view_table_hl(line_ptr, line_len, atr, atr_len, in_region) < 0)
+        return -1;
+
+    // 4) Inline Feature 1.4/1.5/1.6 + col_map.
+    if (zig_bw_view_inline(
+        line_ptr,
+        line_len,
+        hide,
+        hide_len,
+        subst,
+        subst_len,
+        urls,
+        urls_len,
+        col_map,
+        col_map_len,
+        atr,
+        atr_len,
+        tab,
+    ) < 0)
+        return -1;
+    col_map_line.?.* = buf_line;
+
+    // 5) Feature 1.10 finish.
+    if (zig_bw_view_finish(
+        line_ptr,
+        line_len,
+        hide,
+        hide_len,
+        subst,
+        subst_len,
+        col_map,
+        col_map_len,
+        col_map_line,
+        buf_line,
+        tab,
+        cursor,
+        1,
+    ) < 0)
+        return -1;
     return 0;
 }
 

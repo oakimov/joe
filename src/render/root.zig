@@ -29,6 +29,7 @@ pub const HighlightState = syntax.HighlightState;
 pub const loadSyntax = syntax.load;
 pub const ViewTables = view.ViewTables;
 pub const analyzeLine = view.analyzeLine;
+pub const analyzeLineStart = view.analyzeLineStart;
 pub const analyzeLineInline = view.analyzeLineInline;
 pub const tryPaintTable = table.tryPaintFromLines;
 pub const tableLayoutAt = table.layoutAt;

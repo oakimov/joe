@@ -133,6 +133,24 @@ pub fn analyzeLine(tables: *ViewTables, line: []const u8, attrs: ?[]Attribute) !
         tables.len = line.len;
     }
 
+    if (analyzeLineStart(tables, line, 8)) return;
+
+    // Feature 1.4: Bold/italic/strikethrough — hide delimiters (skip list markers + code spans)
+    applyEmphasis(tables, line);
+
+    // Feature 1.5: Inline code backticks — hide matching runs
+    applyInlineCode(tables, line);
+
+    // Feature 1.6: Links — hide delimiters, store URL, style link text
+    applyLinks(tables, line, attrs);
+
+    buildColMap(tables, line, 8);
+}
+
+/// Line-start Feature 1.3/1.5/1.7/1.8 (+ task 1.7.4). Returns true when the
+/// line is fully handled (JOE `goto done`); false to continue with tables/inline.
+pub fn analyzeLineStart(tables: *ViewTables, line: []const u8, tab: u16) bool {
+    const tab_u: u16 = if (tab == 0) 8 else tab;
     // Feature 1.3: Heading — hide # run and trailing space
     {
         var i: usize = 0;
@@ -145,8 +163,8 @@ pub fn analyzeLine(tables: *ViewTables, line: []const u8, attrs: ?[]Attribute) !
                 var j: usize = 0;
                 while (j < i) : (j += 1) tables.hide[j] = 1;
             }
-            buildColMap(tables, line, 8);
-            return;
+            buildColMap(tables, line, tab_u);
+            return true;
         }
     }
 
@@ -159,16 +177,16 @@ pub fn analyzeLine(tables: *ViewTables, line: []const u8, attrs: ?[]Attribute) !
             while (fence_end < line.len and line[fence_end] == '`') : (fence_end += 1) {}
             var j: usize = 0;
             while (j < fence_end) : (j += 1) tables.hide[j] = 1;
-            buildColMap(tables, line, 8);
-            return;
+            buildColMap(tables, line, tab_u);
+            return true;
         }
         if (i + 2 < line.len and line[i] == '~' and line[i + 1] == '~' and line[i + 2] == '~') {
             var fence_end = i + 3;
             while (fence_end < line.len and line[fence_end] == '~') : (fence_end += 1) {}
             var j: usize = 0;
             while (j < fence_end) : (j += 1) tables.hide[j] = 1;
-            buildColMap(tables, line, 8);
-            return;
+            buildColMap(tables, line, tab_u);
+            return true;
         }
     }
 
@@ -183,8 +201,8 @@ pub fn analyzeLine(tables: *ViewTables, line: []const u8, attrs: ?[]Attribute) !
             if (i < line.len and line[i] == ' ') i += 1;
         }
         if (nesting > 0) {
-            buildColMap(tables, line, 8);
-            return;
+            buildColMap(tables, line, tab_u);
+            return true;
         }
     }
 
@@ -231,22 +249,13 @@ pub fn analyzeLine(tables: *ViewTables, line: []const u8, attrs: ?[]Attribute) !
             if (is_rule and count >= 3) {
                 var k: usize = 0;
                 while (k < line.len) : (k += 1) tables.substitute[k] = 0x2500;
-                buildColMap(tables, line, 8);
-                return;
+                buildColMap(tables, line, tab_u);
+                return true;
             }
         }
     }
 
-    // Feature 1.4: Bold/italic/strikethrough — hide delimiters (skip list markers + code spans)
-    applyEmphasis(tables, line);
-
-    // Feature 1.5: Inline code backticks — hide matching runs
-    applyInlineCode(tables, line);
-
-    // Feature 1.6: Links — hide delimiters, store URL, style link text
-    applyLinks(tables, line, attrs);
-
-    buildColMap(tables, line, 8);
+    return false;
 }
 
 /// Feature 1.4/1.5/1.6 + col_map only (JOE post-table inline chrome).

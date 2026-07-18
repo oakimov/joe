@@ -13,6 +13,7 @@
 //! Table region detect uses `zig_bw_table_detect` → `table.layoutAt` (fills C widths/aligns).
 //! Cursor follow/scroll uses `zig_bw_bwfllwt` / `zig_bw_bwfllwh` (C scroll helpers).
 //! Post-edit window scroll uses `zig_bw_bwins` / `zig_bw_bwdel`.
+//! `lgen_view` line-start Feature 1.3/1.5/1.7/1.8 uses `zig_bw_view_line_start`.
 //! `lgen_view` inline Feature 1.4/1.5/1.6 + col_map uses `zig_bw_view_inline`.
 //! Feature 2.1 residual simple pipe substitute uses `zig_bw_table_simple`.
 //! Non-UTF-8 (byte) charmaps paint via `lgenLine` byte-mode.
@@ -596,6 +597,59 @@ pub export fn zig_bw_bwdel(
         }
     }
     return 0;
+}
+
+/// Path A `lgen_view` line-start chrome: heading/fence/blockquote/HR/task.
+/// Returns:
+/// - `1` — line fully handled (`goto done`); col_map filled
+/// - `0` — start features applied or N/A; continue with tables/inline
+/// - `-1` — fall back to C
+pub export fn zig_bw_view_line_start(
+    line_ptr: ?[*]const u8,
+    line_len: c_int,
+    hide: ?[*]u8,
+    hide_len: c_int,
+    subst: ?[*]c_int,
+    subst_len: c_int,
+    col_map: ?[*]i64,
+    col_map_len: c_int,
+    tab: c_int,
+) c_int {
+    if (zig_bw_lgen_enabled == 0) return -1;
+    if (line_ptr == null or hide == null or subst == null or col_map == null) return -1;
+    if (line_len < 0) return -1;
+    const n: usize = @intCast(line_len);
+    const clear_n: usize = if (n == 0) 1 else n;
+    if (hide_len < @as(c_int, @intCast(clear_n))) return -1;
+    if (subst_len < @as(c_int, @intCast(clear_n))) return -1;
+    if (col_map_len < @as(c_int, @intCast(clear_n))) return -1;
+
+    const line = line_ptr.?[0..n];
+    const alloc = std.heap.c_allocator;
+
+    const hide_slice = hide.?[0..clear_n];
+    const subst_scratch = alloc.alloc(u21, clear_n) catch return -1;
+    defer alloc.free(subst_scratch);
+    const url_scratch = alloc.alloc(?[]const u8, clear_n) catch return -1;
+    defer alloc.free(url_scratch);
+    const col_scratch = alloc.alloc(u64, clear_n) catch return -1;
+    defer alloc.free(col_scratch);
+
+    @memset(hide_slice, 0);
+    @memset(subst_scratch, 0);
+
+    var tables = ViewTables.init(alloc);
+    tables.bindScratch(hide_slice, subst_scratch, url_scratch, col_scratch, n);
+
+    const tab_u: u16 = if (tab <= 0) 8 else @intCast(tab);
+    const done = render.analyzeLineStart(&tables, line, tab_u);
+
+    var si: usize = 0;
+    while (si < clear_n) : (si += 1) {
+        subst.?[si] = @intCast(subst_scratch[si]);
+        col_map.?[si] = @intCast(col_scratch[si]);
+    }
+    return if (done) 1 else 0;
 }
 
 /// Path A `lgen_view` inline chrome: emphasis / inline code / links / col_map.

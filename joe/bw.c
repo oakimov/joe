@@ -57,6 +57,10 @@ extern int zig_bw_bwins(SCRN *t, int *updtab, ptrdiff_t *sary, ptrdiff_t li,
 extern int zig_bw_bwdel(SCRN *t, int *updtab,
 	ptrdiff_t y, ptrdiff_t h, off_t top_line, off_t eof_line,
 	off_t l, off_t n, int flg, int do_highlight);
+/* Path A: gated Zig lgen_view line-start Feature 1.3/1.5/1.7/1.8. */
+extern int zig_bw_view_line_start(const unsigned char *line, int line_len,
+	char *hide, int hide_len, int *subst, int subst_len,
+	off_t *col_map, int col_map_len, int tab);
 /* Path A: gated Zig lgen_view inline Feature 1.4/1.5/1.6 + col_map. */
 extern int zig_bw_view_inline(const unsigned char *line, int line_len,
 	char *hide, int hide_len, int *subst, int subst_len,
@@ -1550,6 +1554,36 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 
 	/* --- Detect line type and hide delimiters --- */
 
+	/* Path A: Zig line-start view chrome (heading/fence/blockquote/HR/task). */
+	int zig_line_start_done = 0;
+	if (zig_bw_lgen_enabled) {
+		int need = line_len > 0 ? line_len : 1;
+		if (!viewmode_col_map || viewmode_col_map_size < need) {
+			off_t *nm = (off_t *)joe_realloc(viewmode_col_map, (ptrdiff_t)need * (ptrdiff_t)sizeof(off_t));
+			if (nm) {
+				viewmode_col_map = nm;
+				viewmode_col_map_size = need;
+			}
+		}
+		if (viewmode_col_map && viewmode_col_map_size >= need
+		    && viewmode_hide && viewmode_hide_size >= need
+		    && viewmode_substitute && viewmode_substitute_size >= need) {
+			int tab = bw->o.tab;
+			if (tab <= 0) tab = 8;
+			int z = zig_bw_view_line_start(line, line_len,
+				viewmode_hide, viewmode_hide_size,
+				viewmode_substitute, viewmode_substitute_size,
+				viewmode_col_map, viewmode_col_map_size, tab);
+			if (z == 1) {
+				viewmode_col_map_line = bw->top->line + y - bw->y;
+				goto done;
+			}
+			if (z == 0)
+				zig_line_start_done = 1;
+		}
+	}
+
+	if (!zig_line_start_done) {
 	/* Feature 1.3: Heading — hide # run and trailing space */
 	{
 		int i = 0;
@@ -1681,6 +1715,8 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 			}
 		}
 	}
+
+	} /* !zig_line_start_done */
 
 	/* Feature 2.1: Unicode Box-Drawing Table Borders
 	 * Detect table regions by scanning ahead, then apply box-drawing substitutions:

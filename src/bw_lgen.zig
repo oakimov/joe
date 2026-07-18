@@ -25,9 +25,9 @@
 //! Thin `lgen_view` entry uses `zig_bw_lgen_view_entry` (prelude + dispatcher +
 //! paint cleanup; Zig owns viewmode static storage under the gate via
 //! `zig_bw_vm_*` prepare/getters/after/cleanup/display_col; C Feature fallback
-//! body + `zig_c_bw_view_{defatr,col_map*}` cursor/attr helpers retained when
-//! gate off / Path A returns `-1`; dead prepare/hide/subst/urls/table/after
-//! bridges removed).
+//! body + `zig_c_bw_view_col_map*` cursor helper retained when gate off /
+//! Path A returns `-1`; `defatr` computed in Zig; dead prepare/hide/subst/
+//! urls/table/after bridges removed).
 //! Lifecycle uses `zig_bw_bwmove` / `zig_bw_bwresz` / `zig_bw_bwmk` / `zig_bw_bwrm` /
 //! `zig_bw_orphit` / `zig_bw_calclincols` (C fallback retained).
 //! Non-paint helpers use `zig_bw_get_file_pos` / `zig_bw_set_file_pos` /
@@ -1441,7 +1441,6 @@ extern fn zig_c_bw_get_top_line(bw: ?*BW) i64;
 extern fn zig_c_bw_get_tab(bw: ?*BW) c_int;
 extern fn zig_c_bw_get_syntax(bw: ?*BW) ?*HighSyntax;
 extern fn zig_c_bw_get_charmap(bw: ?*BW) ?*Charmap;
-extern fn zig_c_bw_view_defatr(bw: ?*BW, buf_line: i64) c_int;
 // Feature 1.10 cursor fallback when Zig vm map misses (gate-off / entry `-1`).
 extern fn zig_c_bw_view_col_map() ?[*]i64;
 extern fn zig_c_bw_view_col_map_size() c_int;
@@ -1450,6 +1449,25 @@ extern fn zig_c_bw_get_palette(t: ?*SCRN, out_len: ?*c_int) ?[*]c_int;
 
 extern fn zig_c_bw_get_visiblews(bw: ?*BW) c_int;
 extern fn zig_c_bw_get_ansi(bw: ?*BW) c_int;
+extern fn zig_c_bw_get_hiline(w: ?*BW) c_int;
+
+// Match C bg_* / curlinmask (BG_COLOR is identity in scrn.h).
+extern var bg_text: c_int;
+extern var bg_curlin: c_int;
+extern var curlinmask: c_int;
+
+/// Default line attribute: hiline current-line blend, else `bg_text`.
+fn viewDefatr(bw: ?*BW, buf_line: i64) c_int {
+    if (bw == null) return bg_text;
+    if (zig_c_bw_get_hiline(bw) != 0) {
+        if (zig_c_bw_get_cursor(bw)) |cursor| {
+            if (zig_c_bw_pline_no(cursor) == buf_line) {
+                return (bg_text & curlinmask) | bg_curlin;
+            }
+        }
+    }
+    return bg_text;
+}
 
 /// Paint preparsed viewmode line via Zig tables + `zig_bw_lgen` (skip C statics).
 fn paintViewBodyWithVm(
@@ -1472,7 +1490,7 @@ fn paintViewBodyWithVm(
     const top_line = zig_c_bw_get_top_line(bw);
     const win_y = zig_c_bw_get_y(bw);
     const buf_line = top_line + y - win_y;
-    const defatr = zig_c_bw_view_defatr(bw, buf_line);
+    const defatr = viewDefatr(bw, buf_line);
     var pal_len: c_int = 0;
     const palette = zig_c_bw_get_palette(t, &pal_len);
     const line_byte = zig_c_bw_pbyte(p);
@@ -1511,8 +1529,8 @@ fn paintViewBodyWithVm(
 /// Thin `lgen_view` entry (JOE_ZIG_BW_LGEN): prelude + dispatcher + paint cleanup.
 ///
 /// Zig owns viewmode static storage (`zig_bw_vm_*`) under the gate. C keeps the
-/// Feature fallback body (+ parallel statics; live Zig bridges are only
-/// `zig_c_bw_view_{defatr,col_map*}`) when this returns `-1`.
+/// Feature fallback body (+ parallel statics; live Zig bridge is only
+/// `zig_c_bw_view_col_map*`) when this returns `-1`.
 /// Markdown syntax gating stays in C.
 ///
 /// Returns paint result (`>= 0`) or `-1` to fall back to C `lgen_view`.
@@ -1631,7 +1649,7 @@ pub export fn zig_bw_lgen_view_entry(
     const palette = zig_c_bw_get_palette(t, &pal_len);
 
     const buf_line = top_line + y - win_y;
-    const defatr = zig_c_bw_view_defatr(bw, buf_line);
+    const defatr = viewDefatr(bw, buf_line);
     const utf8: c_int = if (charmap.@"type" != 0) 1 else 0;
 
     const z = zig_bw_lgen_view(
@@ -2124,7 +2142,6 @@ pub export fn zig_bw_bwgenh(
 }
 
 extern fn zig_c_bw_bwgenh_setup(w: ?*BW, from: ?*i64, to: ?*i64) c_int;
-extern fn zig_c_bw_get_hiline(w: ?*BW) c_int;
 extern fn zig_c_bw_bg_text() c_int;
 extern fn zig_c_bw_bg_linum() c_int;
 extern fn zig_c_bw_bg_curlinum() c_int;

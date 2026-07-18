@@ -2919,8 +2919,8 @@ HIGHLIGHT_STATE zig_c_bw_get_highlight_state(BW *w, P *p, off_t line)
 
 /* Path A helpers for zig_bw_lgen_view_entry / bwgen entry.
  * Zig owns viewmode tables under the gate (`zig_bw_vm_*`). Dead prepare/hide/
- * subst/urls/table-ptr/after bridges removed; C Feature fallback still owns
- * its parallel statics directly. Kept: lgen_core, defatr, col_map cursor
+ * subst/urls/table-ptr/after/defatr bridges removed; C Feature fallback still
+ * owns its parallel statics directly. Kept: lgen_core + col_map cursor
  * fallback for gate-off / Path A `-1`. */
 int zig_c_bw_lgen_core(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
 	ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,
@@ -2963,17 +2963,6 @@ struct high_syntax *zig_c_bw_get_syntax(BW *bw)
 struct charmap *zig_c_bw_get_charmap(BW *bw)
 {
 	return (bw && bw->b) ? bw->b->o.charmap : NULL;
-}
-
-int zig_c_bw_view_defatr(BW *bw, off_t buf_line)
-{
-	int defatr;
-	if (!bw)
-		return BG_COLOR(bg_text);
-	defatr = (bw->o.hiline && bw->cursor && bw->cursor->line == buf_line)
-		? (bg_text & curlinmask) | bg_curlin
-		: bg_text;
-	return BG_COLOR(defatr);
 }
 
 /* Feature 1.10 cursor fallback when Zig vm map misses (gate-off / entry `-1`). */

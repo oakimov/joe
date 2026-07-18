@@ -85,6 +85,10 @@ extern int zig_bw_lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *a
 	off_t *table_no_region_line, int *table_col_count,
 	int *table_col_width, int *table_col_align, int table_cap,
 	struct charmap *charmap, int defatr, int *palette, int palette_len, int utf8);
+/* Path A: gated thin lgen_view entry (prelude + dispatcher + paint cleanup). */
+extern int zig_bw_lgen_view_entry(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
+	ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,
+	HIGHLIGHT_STATE st, BW *bw);
 /* Path A Feature 2.1: gated Zig simple pipe substitute into vm_subst[]. */
 extern int zig_bw_table_simple(const unsigned char *line, int line_len, int row_type,
 	int *vm_subst, int vm_subst_len);
@@ -1465,6 +1469,13 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 	/* Only process when syntax highlighting is active and syntax is Markdown. */
 	if (st.state == -1 || !bw->o.syntax || zcmp(bw->o.syntax->name, "md"))
 		return lgen_core(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
+
+	/* Path A: Zig owns prelude + chrome dispatcher + paint cleanup. */
+	if (zig_bw_lgen_enabled) {
+		int z = zig_bw_lgen_view_entry(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
+		if (z >= 0)
+			return z;
+	}
 
 	/* Invalidate caches when rendering a different window (split-screen safety). */
 	if (viewmode_last_bw != bw) {
@@ -3082,6 +3093,181 @@ void zig_c_bw_gennum(BW *w, int (*screen)[COMPOSE], int *attr, SCRN *t,
 HIGHLIGHT_STATE zig_c_bw_get_highlight_state(BW *w, P *p, off_t line)
 {
 	return get_highlight_state(w, p, line);
+}
+
+/* Path A helpers for zig_bw_lgen_view_entry (viewmode statics + lgen_core). */
+int zig_c_bw_lgen_core(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
+	ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,
+	HIGHLIGHT_STATE st, BW *bw)
+{
+	return lgen_core(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
+}
+
+int zig_c_bw_view_paint_body(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
+	ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,
+	HIGHLIGHT_STATE st, BW *bw)
+{
+	int result;
+	viewmode_skip_parse = 1;
+	result = lgen_core(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
+	viewmode_skip_parse = 0;
+	return result;
+}
+
+P *zig_c_bw_get_top(BW *bw)
+{
+	return bw ? bw->top : NULL;
+}
+
+P *zig_c_bw_get_cursor(BW *bw)
+{
+	return bw ? bw->cursor : NULL;
+}
+
+ptrdiff_t zig_c_bw_get_y(BW *bw)
+{
+	return bw ? bw->y : 0;
+}
+
+off_t zig_c_bw_get_top_line(BW *bw)
+{
+	return (bw && bw->top) ? bw->top->line : 0;
+}
+
+int zig_c_bw_get_tab(BW *bw)
+{
+	int tab = bw ? bw->o.tab : 8;
+	return tab <= 0 ? 8 : tab;
+}
+
+struct high_syntax *zig_c_bw_get_syntax(BW *bw)
+{
+	return bw ? bw->o.syntax : NULL;
+}
+
+struct charmap *zig_c_bw_get_charmap(BW *bw)
+{
+	return (bw && bw->b) ? bw->b->o.charmap : NULL;
+}
+
+int zig_c_bw_view_defatr(BW *bw, off_t buf_line)
+{
+	int defatr;
+	if (!bw)
+		return BG_COLOR(bg_text);
+	defatr = (bw->o.hiline && bw->cursor && bw->cursor->line == buf_line)
+		? (bg_text & curlinmask) | bg_curlin
+		: bg_text;
+	return BG_COLOR(defatr);
+}
+
+int zig_c_bw_view_prepare(BW *bw, int need)
+{
+	if (!bw || need <= 0 || need > VIEWMODE_MAX_LINE_BYTES)
+		return -1;
+
+	if (viewmode_last_bw != bw) {
+		table_region_start = -1;
+		table_region_end = -1;
+		table_separator_line = -1;
+		table_cached_for_line = -1;
+		table_no_region_line = -1;
+		table_col_count = 0;
+		viewmode_col_map_line = -1;
+		viewmode_last_bw = bw;
+	}
+
+	if (!viewmode_hide || viewmode_hide_size < need) {
+		if (viewmode_hide)
+			joe_free(viewmode_hide);
+		viewmode_hide_size = need;
+		viewmode_hide = (char *)joe_malloc((ptrdiff_t)viewmode_hide_size);
+		if (!viewmode_hide) {
+			viewmode_hide_size = 0;
+			return -1;
+		}
+	}
+	memset(viewmode_hide, 0, (size_t)need);
+
+	if (!viewmode_substitute || viewmode_substitute_size < need) {
+		if (viewmode_substitute)
+			joe_free(viewmode_substitute);
+		viewmode_substitute_size = need;
+		viewmode_substitute = (int *)joe_malloc((ptrdiff_t)viewmode_substitute_size * (ptrdiff_t)sizeof(int));
+		if (!viewmode_substitute) {
+			viewmode_substitute_size = 0;
+			return -1;
+		}
+	}
+	memset(viewmode_substitute, 0, (size_t)need * sizeof(int));
+
+	if (!viewmode_col_map || viewmode_col_map_size < need) {
+		off_t *nm = (off_t *)joe_realloc(viewmode_col_map, (ptrdiff_t)need * (ptrdiff_t)sizeof(off_t));
+		if (!nm) {
+			if (viewmode_col_map) joe_free(viewmode_col_map);
+			viewmode_col_map = NULL;
+			viewmode_col_map_size = 0;
+			viewmode_col_map_line = -1;
+			return -1;
+		}
+		viewmode_col_map = nm;
+		viewmode_col_map_size = need;
+	}
+
+	if (!viewmode_link_url || viewmode_link_url_size < need) {
+		viewmode_free_link_urls();
+		char **nl = (char **)joe_realloc(viewmode_link_url, (ptrdiff_t)need * (ptrdiff_t)sizeof(char *));
+		if (!nl)
+			return -1;
+		viewmode_link_url = nl;
+		if (viewmode_link_url_size < need) {
+			memset(viewmode_link_url + viewmode_link_url_size, 0,
+			       (size_t)(need - viewmode_link_url_size) * sizeof(char *));
+		}
+		viewmode_link_url_size = need;
+	} else {
+		viewmode_free_link_urls();
+		memset(viewmode_link_url, 0, (size_t)need * sizeof(char *));
+	}
+	return 0;
+}
+
+char *zig_c_bw_view_hide(void) { return viewmode_hide; }
+int zig_c_bw_view_hide_size(void) { return viewmode_hide_size; }
+int *zig_c_bw_view_subst(void) { return viewmode_substitute; }
+int zig_c_bw_view_subst_size(void) { return viewmode_substitute_size; }
+char **zig_c_bw_view_urls(void) { return viewmode_link_url; }
+int zig_c_bw_view_urls_size(void) { return viewmode_link_url_size; }
+off_t *zig_c_bw_view_col_map(void) { return viewmode_col_map; }
+int zig_c_bw_view_col_map_size(void) { return viewmode_col_map_size; }
+off_t *zig_c_bw_view_col_map_line_ptr(void) { return &viewmode_col_map_line; }
+off_t *zig_c_bw_view_trs_ptr(void) { return &table_region_start; }
+off_t *zig_c_bw_view_tre_ptr(void) { return &table_region_end; }
+off_t *zig_c_bw_view_tsl_ptr(void) { return &table_separator_line; }
+off_t *zig_c_bw_view_tcfl_ptr(void) { return &table_cached_for_line; }
+off_t *zig_c_bw_view_tnrl_ptr(void) { return &table_no_region_line; }
+int *zig_c_bw_view_tcc_ptr(void) { return &table_col_count; }
+int *zig_c_bw_view_tcw(void) { return table_col_width; }
+int *zig_c_bw_view_tca(void) { return table_col_align; }
+int zig_c_bw_view_tcap(void) { return MAX_TABLE_COLS; }
+
+int *zig_c_bw_get_palette(SCRN *t, int *out_len)
+{
+	if (out_len) *out_len = 0;
+	if (!t || !t->palette) return NULL;
+	if (out_len) *out_len = 256;
+	return t->palette;
+}
+
+void zig_c_bw_view_after(int line_len)
+{
+	int n = line_len > 0 ? line_len : 1;
+	if (viewmode_hide)
+		memset(viewmode_hide, 0, (size_t)n);
+	if (viewmode_substitute)
+		memset(viewmode_substitute, 0, (size_t)n * sizeof(int));
+	viewmode_free_link_urls();
+	viewmode_table_rendered = 0;
 }
 
 void bwgen(BW *w, int linums, int linchg)

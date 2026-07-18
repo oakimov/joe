@@ -18,7 +18,9 @@
 //! Feature 1.9 single-line table dim/bold uses `zig_bw_view_table_hl`.
 //! Feature 1.10 col_map ensure + cursor xcol uses `zig_bw_view_finish`.
 //! Thin `lgen_view` chrome orchestration uses `zig_bw_lgen_view` (composes the
-//! Feature 1.x/2.x sequence; C keeps parse/line buffer/paint cleanup).
+//! Feature 1.x/2.x sequence).
+//! Thin `lgen_view` entry uses `zig_bw_lgen_view_entry` (prelude + dispatcher +
+//! paint cleanup; C keeps viewmode static storage helpers + Feature fallback).
 //! Feature 2.1 residual simple pipe substitute uses `zig_bw_table_simple`.
 //! Non-UTF-8 (byte) charmaps paint via `lgenLine` byte-mode.
 //! Default off until soak. Falls back to C when the gate is off.
@@ -58,6 +60,7 @@ const FG_BLUE: c_int = FG_NOT_DEFAULT | (4 << FG_SHIFT);
 
 const SCRN = opaque {};
 const P = opaque {};
+const BW = opaque {};
 const Charmap = extern struct {
     next: ?*Charmap = null,
     name: ?[*:0]u8 = null,
@@ -907,7 +910,7 @@ pub export fn zig_bw_view_finish(
 
 /// Thin `lgen_view` chrome dispatcher (JOE_ZIG_BW_LGEN).
 ///
-/// C keeps parse / line buffer / side-table alloc and post paint cleanup.
+/// Prefers being called from `zig_bw_lgen_view_entry` (prelude + paint cleanup).
 /// This owns Feature 1.x/2.x chrome sequencing: line-start → table detect/row
 /// /simple → table_hl → inline → finish.
 ///
@@ -1165,6 +1168,243 @@ pub export fn zig_bw_lgen_view(
     return 0;
 }
 
+const viewmode_max_line_bytes: c_int = 1024 * 1024;
+
+extern fn joe_malloc(n: isize) ?*anyopaque;
+extern fn joe_realloc(p: ?*anyopaque, n: isize) ?*anyopaque;
+extern fn joe_free(p: ?*anyopaque) void;
+extern fn zig_c_bw_lgen_core(
+    t: ?*SCRN,
+    y: isize,
+    screen: ?[*][COMPOSE]c_int,
+    attr_row: ?[*]c_int,
+    x: isize,
+    w: isize,
+    p: ?*P,
+    scr: i64,
+    from: i64,
+    to: i64,
+    st: HighlightState,
+    bw: ?*BW,
+) c_int;
+extern fn zig_c_bw_view_paint_body(
+    t: ?*SCRN,
+    y: isize,
+    screen: ?[*][COMPOSE]c_int,
+    attr_row: ?[*]c_int,
+    x: isize,
+    w: isize,
+    p: ?*P,
+    scr: i64,
+    from: i64,
+    to: i64,
+    st: HighlightState,
+    bw: ?*BW,
+) c_int;
+extern fn zig_c_bw_get_top(bw: ?*BW) ?*P;
+extern fn zig_c_bw_get_cursor(bw: ?*BW) ?*P;
+extern fn zig_c_bw_get_y(bw: ?*BW) isize;
+extern fn zig_c_bw_get_top_line(bw: ?*BW) i64;
+extern fn zig_c_bw_get_tab(bw: ?*BW) c_int;
+extern fn zig_c_bw_get_syntax(bw: ?*BW) ?*HighSyntax;
+extern fn zig_c_bw_get_charmap(bw: ?*BW) ?*Charmap;
+extern fn zig_c_bw_view_defatr(bw: ?*BW, buf_line: i64) c_int;
+extern fn zig_c_bw_view_prepare(bw: ?*BW, need: c_int) c_int;
+extern fn zig_c_bw_view_hide() ?[*]u8;
+extern fn zig_c_bw_view_hide_size() c_int;
+extern fn zig_c_bw_view_subst() ?[*]c_int;
+extern fn zig_c_bw_view_subst_size() c_int;
+extern fn zig_c_bw_view_urls() ?[*]?[*:0]u8;
+extern fn zig_c_bw_view_urls_size() c_int;
+extern fn zig_c_bw_view_col_map() ?[*]i64;
+extern fn zig_c_bw_view_col_map_size() c_int;
+extern fn zig_c_bw_view_col_map_line_ptr() ?*i64;
+extern fn zig_c_bw_view_trs_ptr() ?*i64;
+extern fn zig_c_bw_view_tre_ptr() ?*i64;
+extern fn zig_c_bw_view_tsl_ptr() ?*i64;
+extern fn zig_c_bw_view_tcfl_ptr() ?*i64;
+extern fn zig_c_bw_view_tnrl_ptr() ?*i64;
+extern fn zig_c_bw_view_tcc_ptr() ?*c_int;
+extern fn zig_c_bw_view_tcw() ?[*]c_int;
+extern fn zig_c_bw_view_tca() ?[*]c_int;
+extern fn zig_c_bw_view_tcap() c_int;
+extern fn zig_c_bw_view_after(line_len: c_int) void;
+extern fn zig_c_bw_get_palette(t: ?*SCRN, out_len: ?*c_int) ?[*]c_int;
+
+/// Thin `lgen_view` entry (JOE_ZIG_BW_LGEN): prelude + dispatcher + paint cleanup.
+///
+/// C keeps viewmode static storage (`zig_c_bw_view_*`) and the full Feature
+/// fallback body when this returns `-1`. Markdown syntax gating stays in C.
+///
+/// Returns paint result (`>= 0`) or `-1` to fall back to C `lgen_view`.
+pub export fn zig_bw_lgen_view_entry(
+    t: ?*SCRN,
+    y: isize,
+    screen: ?[*][COMPOSE]c_int,
+    attr_row: ?[*]c_int,
+    x: isize,
+    w: isize,
+    p: ?*P,
+    scr: i64,
+    from: i64,
+    to: i64,
+    st: HighlightState,
+    bw: ?*BW,
+) c_int {
+    if (zig_bw_lgen_enabled == 0) return -1;
+    if (t == null or screen == null or attr_row == null or p == null or bw == null) return -1;
+
+    const syntax = zig_c_bw_get_syntax(bw) orelse return -1;
+    const charmap = zig_c_bw_get_charmap(bw) orelse return -1;
+    const cursor = zig_c_bw_get_cursor(bw) orelse return -1;
+    const top_line = zig_c_bw_get_top_line(bw);
+    const win_y = zig_c_bw_get_y(bw);
+    const tab = zig_c_bw_get_tab(bw);
+
+    // Pathological line length: match C early bail to `lgen_core`.
+    {
+        const lp = pdup(p, "zig_bw_lgen_view_entry_len") orelse return -1;
+        defer prm(lp);
+        zig_c_bw_p_goto_bol(lp);
+        var ll: c_int = 0;
+        while (true) {
+            const ch = pgetb(lp);
+            if (ch == NO_MORE_DATA or ch == '\n') break;
+            ll += 1;
+            if (ll > viewmode_max_line_bytes) {
+                return zig_c_bw_lgen_core(t, y, screen, attr_row, x, w, p, scr, from, to, st, bw);
+            }
+        }
+    }
+
+    // Parse into hybrid attr_buf (same as C prelude).
+    {
+        const tmp = pdup(p, "zig_bw_lgen_view_entry_parse") orelse return -1;
+        defer prm(tmp);
+        zig_c_bw_p_goto_bol(tmp);
+        _ = parse(syntax, tmp, st, charmap);
+    }
+
+    // Read line bytes.
+    var line_len: c_int = 0;
+    var line_cap: isize = 1024;
+    var line_truncated: bool = false;
+    const line_mem = joe_malloc(line_cap) orelse return -1;
+    var line_ptr: [*]u8 = @ptrCast(@alignCast(line_mem));
+    defer joe_free(line_ptr);
+
+    {
+        const tmp = pdup(p, "zig_bw_lgen_view_entry_read") orelse return -1;
+        defer prm(tmp);
+        zig_c_bw_p_goto_bol(tmp);
+        while (true) {
+            const c = pgetb(tmp);
+            if (c == NO_MORE_DATA or c == '\n') break;
+            if (line_len >= std.math.maxInt(c_int) - 1) break;
+            if (line_len >= viewmode_max_line_bytes) {
+                line_truncated = true;
+                break;
+            }
+            if (@as(isize, @intCast(line_len)) >= line_cap) {
+                var new_cap = line_cap * 2;
+                if (new_cap <= line_cap) new_cap = line_cap + 1024 * 1024;
+                if (new_cap > viewmode_max_line_bytes) new_cap = viewmode_max_line_bytes;
+                const np = joe_realloc(line_ptr, new_cap) orelse return -1;
+                line_ptr = @ptrCast(@alignCast(np));
+                line_cap = new_cap;
+            }
+            line_ptr[@intCast(line_len)] = @intCast(c);
+            line_len += 1;
+        }
+    }
+
+    const need: c_int = if (line_len > 0) line_len else 1;
+    if (zig_c_bw_view_prepare(bw, need) < 0) return -1;
+
+    if (line_truncated) {
+        zig_c_bw_view_after(line_len);
+        return zig_c_bw_view_paint_body(t, y, screen, attr_row, x, w, p, scr, from, to, st, bw);
+    }
+
+    if (attr_buf == null or attr_size <= 0) return -1;
+
+    const hide = zig_c_bw_view_hide() orelse return -1;
+    const hide_size = zig_c_bw_view_hide_size();
+    const subst = zig_c_bw_view_subst() orelse return -1;
+    const subst_size = zig_c_bw_view_subst_size();
+    const urls = zig_c_bw_view_urls() orelse return -1;
+    const urls_size = zig_c_bw_view_urls_size();
+    const col_map = zig_c_bw_view_col_map() orelse return -1;
+    const col_map_size = zig_c_bw_view_col_map_size();
+    const col_map_line = zig_c_bw_view_col_map_line_ptr() orelse return -1;
+    const trs = zig_c_bw_view_trs_ptr() orelse return -1;
+    const tre = zig_c_bw_view_tre_ptr() orelse return -1;
+    const tsl = zig_c_bw_view_tsl_ptr() orelse return -1;
+    const tcfl = zig_c_bw_view_tcfl_ptr() orelse return -1;
+    const tnrl = zig_c_bw_view_tnrl_ptr() orelse return -1;
+    const tcc = zig_c_bw_view_tcc_ptr() orelse return -1;
+    const tcw = zig_c_bw_view_tcw() orelse return -1;
+    const tca = zig_c_bw_view_tca() orelse return -1;
+    const tcap = zig_c_bw_view_tcap();
+
+    var pal_len: c_int = 0;
+    const palette = zig_c_bw_get_palette(t, &pal_len);
+
+    const buf_line = top_line + y - win_y;
+    const defatr = zig_c_bw_view_defatr(bw, buf_line);
+    const utf8: c_int = if (charmap.@"type" != 0) 1 else 0;
+
+    const z = zig_bw_lgen_view(
+        t,
+        y,
+        screen,
+        attr_row,
+        x,
+        w,
+        p,
+        line_ptr,
+        line_len,
+        hide,
+        hide_size,
+        subst,
+        subst_size,
+        urls,
+        urls_size,
+        col_map,
+        col_map_size,
+        col_map_line,
+        attr_buf,
+        attr_size,
+        tab,
+        buf_line,
+        cursor,
+        trs,
+        tre,
+        tsl,
+        tcfl,
+        tnrl,
+        tcc,
+        tcw,
+        tca,
+        tcap,
+        charmap,
+        defatr,
+        palette,
+        pal_len,
+        utf8,
+    );
+    if (z < 0) return -1;
+
+    if (z == 1) {
+        _ = pnextl(p);
+        zig_c_bw_view_after(line_len);
+        return 0;
+    }
+    const result = zig_c_bw_view_paint_body(t, y, screen, attr_row, x, w, p, scr, from, to, st, bw);
+    zig_c_bw_view_after(line_len);
+    return result;
+}
+
 /// Feature 2.1 residual: fill `vm_subst` via `table.applySimpleBorders`.
 /// Live C only mutates separator rows when `table_col_count==0`; header/body/last
 /// are no-ops — this matches that. Returns `0` on success, `-1` to fall back.
@@ -1197,7 +1437,6 @@ pub export fn zig_bw_table_simple(
     return 0;
 }
 
-const BW = opaque {};
 
 extern var have: c_int;
 extern fn zig_c_bw_lgen(

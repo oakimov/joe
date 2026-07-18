@@ -1454,6 +1454,9 @@ extern fn zig_c_bw_get_hiline(w: ?*BW) c_int;
 // Match C bg_* / curlinmask (BG_COLOR is identity in scrn.h).
 extern var bg_text: c_int;
 extern var bg_curlin: c_int;
+extern var bg_linum: c_int;
+extern var bg_curlinum: c_int;
+extern var bg_cursor: c_int;
 extern var curlinmask: c_int;
 
 /// Default line attribute: hiline current-line blend, else `bg_text`.
@@ -2142,11 +2145,6 @@ pub export fn zig_bw_bwgenh(
 }
 
 extern fn zig_c_bw_bwgenh_setup(w: ?*BW, from: ?*i64, to: ?*i64) c_int;
-extern fn zig_c_bw_bg_text() c_int;
-extern fn zig_c_bw_bg_linum() c_int;
-extern fn zig_c_bw_bg_curlinum() c_int;
-extern fn zig_c_bw_bg_cursor() c_int;
-
 /// Thin `bwgenh` entry (JOE_ZIG_BW_LGEN): mark setup + hex paint.
 /// C keeps the full `bwgenh` fallback body. Returns `0` or `-1` fallback.
 pub export fn zig_bw_bwgenh_entry(w: ?*BW) c_int {
@@ -2176,10 +2174,10 @@ pub export fn zig_bw_bwgenh_entry(w: ?*BW) c_int {
         zig_c_bw_get_hiline(w),
         from,
         to,
-        zig_c_bw_bg_text(),
-        zig_c_bw_bg_linum(),
-        zig_c_bw_bg_curlinum(),
-        zig_c_bw_bg_cursor(),
+        bg_text,
+        bg_linum,
+        bg_curlinum,
+        bg_cursor,
     );
 }
 

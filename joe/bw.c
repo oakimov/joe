@@ -2642,11 +2642,6 @@ int zig_c_bw_get_hiline(BW *w)
 	return (w && w->o.hiline) ? 1 : 0;
 }
 
-int zig_c_bw_bg_text(void) { return BG_COLOR(bg_text); }
-int zig_c_bw_bg_linum(void) { return BG_COLOR(bg_linum); }
-int zig_c_bw_bg_curlinum(void) { return BG_COLOR(bg_curlinum); }
-int zig_c_bw_bg_cursor(void) { return BG_COLOR(bg_cursor); }
-
 void bwgenh(BW *w)
 {
 	int (*screen)[COMPOSE];

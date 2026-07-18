@@ -11,7 +11,8 @@
 //! so Path A body/gutter bridges still apply).
 //! Thin `bwgen` entry uses `zig_bw_bwgen_entry` (lattr/viewmode/mark setup + loops +
 //! Feature 1.10 cursor; C fallback retained).
-//! Hex dump paint uses `zig_bw_bwgenh` (mark setup stays in C; loop calls C `genfield`).
+//! Hex dump paint uses `zig_bw_bwgenh` (loop calls C `genfield`).
+//! Thin `bwgenh` entry uses `zig_bw_bwgenh_entry` (mark setup + hex paint; C fallback retained).
 //! Table region detect uses `zig_bw_table_detect` → `table.layoutAt` (fills C widths/aligns).
 //! Cursor follow/scroll uses `zig_bw_bwfllwt` / `zig_bw_bwfllwh` (C scroll helpers).
 //! Post-edit window scroll uses `zig_bw_bwins` / `zig_bw_bwdel`.
@@ -1721,8 +1722,8 @@ pub export fn zig_bw_bwgen_entry(w: ?*BW, linums: c_int, linchg: c_int) c_int {
 
 /// JOE `bwgenh` hex dump paint loop → C `genfield`.
 ///
-/// Mark range setup stays in C (`bwgenh`). This owns the per-row hex formatting
-/// and `genfield` emit. Returns `0` on success, `-1` to fall back to C.
+/// Prefer `zig_bw_bwgenh_entry` for mark setup + paint. This owns the per-row
+/// hex formatting and `genfield` emit. Returns `0` on success, `-1` to fall back.
 pub export fn zig_bw_bwgenh(
     t: ?*SCRN,
     scrn: ?[*][COMPOSE]c_int,
@@ -1845,6 +1846,50 @@ pub export fn zig_bw_bwgenh(
     }
     return 0;
 }
+
+extern fn zig_c_bw_bwgenh_setup(w: ?*BW, from: ?*i64, to: ?*i64) c_int;
+extern fn zig_c_bw_get_hiline(w: ?*BW) c_int;
+extern fn zig_c_bw_bg_text() c_int;
+extern fn zig_c_bw_bg_linum() c_int;
+extern fn zig_c_bw_bg_curlinum() c_int;
+extern fn zig_c_bw_bg_cursor() c_int;
+
+/// Thin `bwgenh` entry (JOE_ZIG_BW_LGEN): mark setup + hex paint.
+/// C keeps the full `bwgenh` fallback body. Returns `0` or `-1` fallback.
+pub export fn zig_bw_bwgenh_entry(w: ?*BW) c_int {
+    if (zig_bw_lgen_enabled == 0 or w == null) return -1;
+
+    var from: i64 = 0;
+    var to: i64 = 0;
+    if (zig_c_bw_bwgenh_setup(w, &from, &to) < 0) return -1;
+
+    const t = zig_c_bw_get_scrn(w) orelse return -1;
+    const scrn = zig_c_bw_scrn_cells(t) orelse return -1;
+    const attr_base = zig_c_bw_scrn_attr(t) orelse return -1;
+    const top = zig_c_bw_get_top(w) orelse return -1;
+    const cursor = zig_c_bw_get_cursor(w) orelse return -1;
+
+    return zig_bw_bwgenh(
+        t,
+        scrn,
+        attr_base,
+        zig_c_bw_scr_w(w),
+        zig_c_bw_get_y(w),
+        zig_c_bw_get_h(w),
+        zig_c_bw_get_w(w),
+        zig_c_bw_get_offset(w),
+        top,
+        zig_c_bw_pbyte(cursor),
+        zig_c_bw_get_hiline(w),
+        from,
+        to,
+        zig_c_bw_bg_text(),
+        zig_c_bw_bg_linum(),
+        zig_c_bw_bg_curlinum(),
+        zig_c_bw_bg_cursor(),
+    );
+}
+
 
 /// Feature 2.2 padded table row → Zig `table.paintRow` → hybrid `outatr`.
 ///

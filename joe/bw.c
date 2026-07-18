@@ -42,6 +42,8 @@ extern int zig_bw_bwgenh(SCRN *t, int (*scrn)[COMPOSE], int *attr_base,
 	off_t offset, P *top, off_t cursor_byte, int hiline,
 	off_t from, off_t to, int bg_text_atr, int bg_linum_atr,
 	int bg_curlinum_atr, int bg_cursor_atr);
+/* Path A: gated thin bwgenh entry (mark setup + hex paint). */
+extern int zig_bw_bwgenh_entry(BW *w);
 /* Path A Feature 2.1/2.2: gated Zig table region detect (widths/aligns). */
 extern int zig_bw_table_detect(P *anchor, off_t buf_line,
 	off_t *out_start, off_t *out_end, off_t *out_sep, int *out_ncols,
@@ -2852,11 +2854,65 @@ static void gennum(BW *w, int (*screen)[COMPOSE], int *attr, SCRN *t, ptrdiff_t 
 	outatr_complete(t);
 }
 
+/* Path A helpers for zig_bw_bwgenh_entry (mark setup + color/hiline). */
+int zig_c_bw_bwgenh_setup(BW *w, off_t *from, off_t *to)
+{
+	SCRN *t;
+	int dosquare = 0;
+	if (!w || !from || !to)
+		return -1;
+	if (!w->t || !w->t->t)
+		return -1;
+	t = w->t->t;
+
+	*from = *to = 0;
+
+	if (markv(0) && markk->b == w->b)
+		if (square) {
+			*from = markb->xcol;
+			*to = markk->xcol;
+			dosquare = 1;
+		} else {
+			*from = markb->byte;
+			*to = markk->byte;
+		}
+	else if (marking && w == (BW *)maint->curwin->object && markb && markb->b == w->b && w->cursor->byte != markb->byte && !*from) {
+		if (square) {
+			*from = off_min(w->cursor->xcol, markb->xcol);
+			*to = off_max(w->cursor->xcol, markb->xcol);
+			dosquare = 1;
+		} else {
+			*from = off_min(w->cursor->byte, markb->byte);
+			*to = off_max(w->cursor->byte, markb->byte);
+		}
+	}
+
+	if (marking && w == (BW *)maint->curwin->object)
+		msetI(t->updtab + w->y, 1, w->h);
+
+	/* Hex dump ignores square marks (C zeros the range). */
+	if (dosquare) {
+		*from = 0;
+		*to = 0;
+	}
+	return 0;
+}
+
+int zig_c_bw_get_hiline(BW *w)
+{
+	return (w && w->o.hiline) ? 1 : 0;
+}
+
+int zig_c_bw_bg_text(void) { return BG_COLOR(bg_text); }
+int zig_c_bw_bg_linum(void) { return BG_COLOR(bg_linum); }
+int zig_c_bw_bg_curlinum(void) { return BG_COLOR(bg_curlinum); }
+int zig_c_bw_bg_cursor(void) { return BG_COLOR(bg_cursor); }
+
 void bwgenh(BW *w)
 {
 	int (*screen)[COMPOSE];
 	int *attr;
-	P *q = pdup(w->top, "bwgenh");
+	P *q;
 	ptrdiff_t bot = w->h + w->y;
 	ptrdiff_t y;
 	SCRN *t = w->t->t;
@@ -2865,6 +2921,13 @@ void bwgenh(BW *w)
 	off_t to;
 	int dosquare = 0;
 
+	/* Path A: Zig owns mark setup + hex paint. */
+	if (zig_bw_lgen_enabled) {
+		if (zig_bw_bwgenh_entry(w) >= 0)
+			return;
+	}
+
+	q = pdup(w->top, "bwgenh");
 	from = to = 0;
 
 	if (markv(0) && markk->b == w->b)

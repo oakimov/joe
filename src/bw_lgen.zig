@@ -25,7 +25,9 @@
 //! Thin `lgen_view` entry uses `zig_bw_lgen_view_entry` (prelude + dispatcher +
 //! paint cleanup; Zig owns viewmode static storage under the gate via
 //! `zig_bw_vm_*` prepare/getters/after/cleanup/display_col; C Feature fallback
-//! + `zig_c_bw_view_*` retained when gate off / Path A returns `-1`).
+//! body + `zig_c_bw_view_{defatr,col_map*}` cursor/attr helpers retained when
+//! gate off / Path A returns `-1`; dead prepare/hide/subst/urls/table/after
+//! bridges removed).
 //! Lifecycle uses `zig_bw_bwmove` / `zig_bw_bwresz` / `zig_bw_bwmk` / `zig_bw_bwrm` /
 //! `zig_bw_orphit` / `zig_bw_calclincols` (C fallback retained).
 //! Non-paint helpers use `zig_bw_get_file_pos` / `zig_bw_set_file_pos` /
@@ -1190,9 +1192,9 @@ extern fn joe_realloc(p: ?*anyopaque, n: isize) ?*anyopaque;
 extern fn joe_free(p: ?*anyopaque) void;
 extern var square: c_int;
 
-// Zig-owned viewmode statics under JOE_ZIG_BW_LGEN. C keeps parallel statics
-// (`zig_c_bw_view_*`) for Feature fallback when the gate is off or Path A
-// returns `-1`.
+// Zig-owned viewmode statics under JOE_ZIG_BW_LGEN. C keeps parallel Feature
+// statics directly (no Zig bridges) for gate-off / Path A `-1`; only
+// `zig_c_bw_view_{defatr,col_map*}` remain as cursor/attr helpers.
 var vm_hide: ?[*]u8 = null;
 var vm_hide_size: c_int = 0;
 var vm_subst: ?[*]c_int = null;
@@ -1432,20 +1434,6 @@ extern fn zig_c_bw_lgen_core(
     st: HighlightState,
     bw: ?*BW,
 ) c_int;
-extern fn zig_c_bw_view_paint_body(
-    t: ?*SCRN,
-    y: isize,
-    screen: ?[*][COMPOSE]c_int,
-    attr_row: ?[*]c_int,
-    x: isize,
-    w: isize,
-    p: ?*P,
-    scr: i64,
-    from: i64,
-    to: i64,
-    st: HighlightState,
-    bw: ?*BW,
-) c_int;
 extern fn zig_c_bw_get_top(bw: ?*BW) ?*P;
 extern fn zig_c_bw_get_cursor(bw: ?*BW) ?*P;
 extern fn zig_c_bw_get_y(bw: ?*BW) isize;
@@ -1454,26 +1442,10 @@ extern fn zig_c_bw_get_tab(bw: ?*BW) c_int;
 extern fn zig_c_bw_get_syntax(bw: ?*BW) ?*HighSyntax;
 extern fn zig_c_bw_get_charmap(bw: ?*BW) ?*Charmap;
 extern fn zig_c_bw_view_defatr(bw: ?*BW, buf_line: i64) c_int;
-extern fn zig_c_bw_view_prepare(bw: ?*BW, need: c_int) c_int;
-extern fn zig_c_bw_view_hide() ?[*]u8;
-extern fn zig_c_bw_view_hide_size() c_int;
-extern fn zig_c_bw_view_subst() ?[*]c_int;
-extern fn zig_c_bw_view_subst_size() c_int;
-extern fn zig_c_bw_view_urls() ?[*]?[*:0]u8;
-extern fn zig_c_bw_view_urls_size() c_int;
+// Feature 1.10 cursor fallback when Zig vm map misses (gate-off / entry `-1`).
 extern fn zig_c_bw_view_col_map() ?[*]i64;
 extern fn zig_c_bw_view_col_map_size() c_int;
 extern fn zig_c_bw_view_col_map_line_ptr() ?*i64;
-extern fn zig_c_bw_view_trs_ptr() ?*i64;
-extern fn zig_c_bw_view_tre_ptr() ?*i64;
-extern fn zig_c_bw_view_tsl_ptr() ?*i64;
-extern fn zig_c_bw_view_tcfl_ptr() ?*i64;
-extern fn zig_c_bw_view_tnrl_ptr() ?*i64;
-extern fn zig_c_bw_view_tcc_ptr() ?*c_int;
-extern fn zig_c_bw_view_tcw() ?[*]c_int;
-extern fn zig_c_bw_view_tca() ?[*]c_int;
-extern fn zig_c_bw_view_tcap() c_int;
-extern fn zig_c_bw_view_after(line_len: c_int) void;
 extern fn zig_c_bw_get_palette(t: ?*SCRN, out_len: ?*c_int) ?[*]c_int;
 
 extern fn zig_c_bw_get_visiblews(bw: ?*BW) c_int;
@@ -1539,7 +1511,8 @@ fn paintViewBodyWithVm(
 /// Thin `lgen_view` entry (JOE_ZIG_BW_LGEN): prelude + dispatcher + paint cleanup.
 ///
 /// Zig owns viewmode static storage (`zig_bw_vm_*`) under the gate. C keeps the
-/// Feature fallback body (+ `zig_c_bw_view_*` statics) when this returns `-1`.
+/// Feature fallback body (+ parallel statics; live Zig bridges are only
+/// `zig_c_bw_view_{defatr,col_map*}`) when this returns `-1`.
 /// Markdown syntax gating stays in C.
 ///
 /// Returns paint result (`>= 0`) or `-1` to fall back to C `lgen_view`.

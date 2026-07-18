@@ -2917,23 +2917,16 @@ HIGHLIGHT_STATE zig_c_bw_get_highlight_state(BW *w, P *p, off_t line)
 	return get_highlight_state(w, p, line);
 }
 
-/* Path A helpers for zig_bw_lgen_view_entry (viewmode statics + lgen_core). */
+/* Path A helpers for zig_bw_lgen_view_entry / bwgen entry.
+ * Zig owns viewmode tables under the gate (`zig_bw_vm_*`). Dead prepare/hide/
+ * subst/urls/table-ptr/after bridges removed; C Feature fallback still owns
+ * its parallel statics directly. Kept: lgen_core, defatr, col_map cursor
+ * fallback for gate-off / Path A `-1`. */
 int zig_c_bw_lgen_core(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
 	ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,
 	HIGHLIGHT_STATE st, BW *bw)
 {
 	return lgen_core(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
-}
-
-int zig_c_bw_view_paint_body(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
-	ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,
-	HIGHLIGHT_STATE st, BW *bw)
-{
-	int result;
-	viewmode_skip_parse = 1;
-	result = lgen_core(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
-	viewmode_skip_parse = 0;
-	return result;
 }
 
 P *zig_c_bw_get_top(BW *bw)
@@ -2983,95 +2976,10 @@ int zig_c_bw_view_defatr(BW *bw, off_t buf_line)
 	return BG_COLOR(defatr);
 }
 
-int zig_c_bw_view_prepare(BW *bw, int need)
-{
-	if (!bw || need <= 0 || need > VIEWMODE_MAX_LINE_BYTES)
-		return -1;
-
-	if (viewmode_last_bw != bw) {
-		table_region_start = -1;
-		table_region_end = -1;
-		table_separator_line = -1;
-		table_cached_for_line = -1;
-		table_no_region_line = -1;
-		table_col_count = 0;
-		viewmode_col_map_line = -1;
-		viewmode_last_bw = bw;
-	}
-
-	if (!viewmode_hide || viewmode_hide_size < need) {
-		if (viewmode_hide)
-			joe_free(viewmode_hide);
-		viewmode_hide_size = need;
-		viewmode_hide = (char *)joe_malloc((ptrdiff_t)viewmode_hide_size);
-		if (!viewmode_hide) {
-			viewmode_hide_size = 0;
-			return -1;
-		}
-	}
-	memset(viewmode_hide, 0, (size_t)need);
-
-	if (!viewmode_substitute || viewmode_substitute_size < need) {
-		if (viewmode_substitute)
-			joe_free(viewmode_substitute);
-		viewmode_substitute_size = need;
-		viewmode_substitute = (int *)joe_malloc((ptrdiff_t)viewmode_substitute_size * (ptrdiff_t)sizeof(int));
-		if (!viewmode_substitute) {
-			viewmode_substitute_size = 0;
-			return -1;
-		}
-	}
-	memset(viewmode_substitute, 0, (size_t)need * sizeof(int));
-
-	if (!viewmode_col_map || viewmode_col_map_size < need) {
-		off_t *nm = (off_t *)joe_realloc(viewmode_col_map, (ptrdiff_t)need * (ptrdiff_t)sizeof(off_t));
-		if (!nm) {
-			if (viewmode_col_map) joe_free(viewmode_col_map);
-			viewmode_col_map = NULL;
-			viewmode_col_map_size = 0;
-			viewmode_col_map_line = -1;
-			return -1;
-		}
-		viewmode_col_map = nm;
-		viewmode_col_map_size = need;
-	}
-
-	if (!viewmode_link_url || viewmode_link_url_size < need) {
-		viewmode_free_link_urls();
-		char **nl = (char **)joe_realloc(viewmode_link_url, (ptrdiff_t)need * (ptrdiff_t)sizeof(char *));
-		if (!nl)
-			return -1;
-		viewmode_link_url = nl;
-		if (viewmode_link_url_size < need) {
-			memset(viewmode_link_url + viewmode_link_url_size, 0,
-			       (size_t)(need - viewmode_link_url_size) * sizeof(char *));
-		}
-		viewmode_link_url_size = need;
-	} else {
-		viewmode_free_link_urls();
-		memset(viewmode_link_url, 0, (size_t)need * sizeof(char *));
-	}
-	return 0;
-}
-
-char *zig_c_bw_view_hide(void) { return viewmode_hide; }
-int zig_c_bw_view_hide_size(void) { return viewmode_hide_size; }
-int *zig_c_bw_view_subst(void) { return viewmode_substitute; }
-int zig_c_bw_view_subst_size(void) { return viewmode_substitute_size; }
-char **zig_c_bw_view_urls(void) { return viewmode_link_url; }
-int zig_c_bw_view_urls_size(void) { return viewmode_link_url_size; }
+/* Feature 1.10 cursor fallback when Zig vm map misses (gate-off / entry `-1`). */
 off_t *zig_c_bw_view_col_map(void) { return viewmode_col_map; }
 int zig_c_bw_view_col_map_size(void) { return viewmode_col_map_size; }
 off_t *zig_c_bw_view_col_map_line_ptr(void) { return &viewmode_col_map_line; }
-off_t *zig_c_bw_view_trs_ptr(void) { return &table_region_start; }
-off_t *zig_c_bw_view_tre_ptr(void) { return &table_region_end; }
-off_t *zig_c_bw_view_tsl_ptr(void) { return &table_separator_line; }
-off_t *zig_c_bw_view_tcfl_ptr(void) { return &table_cached_for_line; }
-off_t *zig_c_bw_view_tnrl_ptr(void) { return &table_no_region_line; }
-int *zig_c_bw_view_tcc_ptr(void) { return &table_col_count; }
-int *zig_c_bw_view_tcw(void) { return table_col_width; }
-int *zig_c_bw_view_tca(void) { return table_col_align; }
-int zig_c_bw_view_tcap(void) { return MAX_TABLE_COLS; }
 
 int *zig_c_bw_get_palette(SCRN *t, int *out_len)
 {
@@ -3079,17 +2987,6 @@ int *zig_c_bw_get_palette(SCRN *t, int *out_len)
 	if (!t || !t->palette) return NULL;
 	if (out_len) *out_len = 256;
 	return t->palette;
-}
-
-void zig_c_bw_view_after(int line_len)
-{
-	int n = line_len > 0 ? line_len : 1;
-	if (viewmode_hide)
-		memset(viewmode_hide, 0, (size_t)n);
-	if (viewmode_substitute)
-		memset(viewmode_substitute, 0, (size_t)n * sizeof(int));
-	viewmode_free_link_urls();
-	viewmode_table_rendered = 0;
 }
 
 /* Path A helpers for lifecycle exports. */

@@ -7,8 +7,10 @@
 //! path). Feature 2.2 padded table rows use `zig_bw_table_row` → `render.table.paintRow`
 //! with widths/aligns from Path A detect or C. Line-number gutters use
 //! `zig_bw_gennum` (JOE `" %21lld "` trailing `lincols`; past-EOF blanks).
-//! Window paint loops use `zig_bw_bwgen` (mark/lattr/viewmode setup stays in C;
-//! loops call C `getto`/`lgen`/`gennum` so Path A body/gutter bridges still apply).
+//! Window paint loops use `zig_bw_bwgen` (loops call C `getto`/`lgen`/`gennum`
+//! so Path A body/gutter bridges still apply).
+//! Thin `bwgen` entry uses `zig_bw_bwgen_entry` (lattr/viewmode/mark setup + loops +
+//! Feature 1.10 cursor; C fallback retained).
 //! Hex dump paint uses `zig_bw_bwgenh` (mark setup stays in C; loop calls C `genfield`).
 //! Table region detect uses `zig_bw_table_detect` → `table.layoutAt` (fills C widths/aligns).
 //! Cursor follow/scroll uses `zig_bw_bwfllwt` / `zig_bw_bwfllwh` (C scroll helpers).
@@ -1473,7 +1475,7 @@ extern fn zig_c_bw_gennum(
 extern fn zig_c_bw_get_highlight_state(w: ?*BW, p: ?*P, line: i64) HighlightState;
 /// JOE `bwgen` paint loops → C `getto` / `gennum` / `lgen`.
 ///
-/// Mark range / lattr / viewmode-invalidate stay in C. This only owns the two
+/// Prefer `zig_bw_bwgen_entry` for full setup+loops+cursor. This owns the two
 /// screen-row loops (cursor→bottom, then top→cursor) plus `prm` of the walk
 /// pointer. Returns `0` on success, `-1` to fall back to C loops.
 pub export fn zig_bw_bwgen(
@@ -1613,6 +1615,109 @@ fn paintOneRow(ctx: anytype, y: isize, p_in: ?*P) ?*P {
     return p;
 }
 
+
+extern fn zig_c_bw_bwgen_setup(
+    w: ?*BW,
+    from: ?*i64,
+    to: ?*i64,
+    fromline: ?*i64,
+    toline: ?*i64,
+    dosquare: ?*c_int,
+) c_int;
+extern fn zig_c_bw_get_scrn(w: ?*BW) ?*SCRN;
+extern fn zig_c_bw_get_x(w: ?*BW) isize;
+extern fn zig_c_bw_scr_w(w: ?*BW) isize;
+extern fn zig_c_bw_scrn_cells(t: ?*SCRN) ?[*][COMPOSE]c_int;
+extern fn zig_c_bw_scrn_attr(t: ?*SCRN) ?[*]c_int;
+extern fn zig_c_bw_scrn_updtab(t: ?*SCRN) ?[*]c_int;
+extern fn zig_c_bw_scrn_compose(t: ?*SCRN) ?[*]c_int;
+extern fn zig_c_bw_get_viewmode(w: ?*BW) c_int;
+extern fn zig_c_bw_get_h(w: ?*BW) isize;
+extern fn zig_c_bw_get_w(w: ?*BW) isize;
+extern fn zig_c_bw_get_offset(w: ?*BW) i64;
+extern fn zig_c_bw_set_cursor_xcol(w: ?*BW, xcol: i64) void;
+
+fn applyBwgenViewCursor(w: ?*BW) void {
+    if (zig_c_bw_get_viewmode(w) == 0) return;
+    const col_map = zig_c_bw_view_col_map() orelse return;
+    const col_map_size = zig_c_bw_view_col_map_size();
+    if (col_map_size <= 0) return;
+    const map_line_ptr = zig_c_bw_view_col_map_line_ptr() orelse return;
+    const cursor = zig_c_bw_get_cursor(w) orelse return;
+    const buf_line = zig_c_bw_pline_no(cursor);
+    if (map_line_ptr.* != buf_line) return;
+
+    const tmp = pdup(cursor, "zig_bw_bwgen_entry_cursor") orelse return;
+    defer prm(tmp);
+    zig_c_bw_p_goto_bol(tmp);
+    const cursor_offset = zig_c_bw_pbyte(cursor) - zig_c_bw_pbyte(tmp);
+    if (cursor_offset >= 0 and cursor_offset < col_map_size) {
+        zig_c_bw_set_cursor_xcol(w, col_map[@intCast(cursor_offset)]);
+    }
+}
+
+/// Thin `bwgen` entry (JOE_ZIG_BW_LGEN): lattr/viewmode/mark setup + paint loops +
+/// Feature 1.10 cursor. C keeps the full `bwgen` fallback body.
+///
+/// Returns `0` on success, `-1` to fall back to C `bwgen`.
+pub export fn zig_bw_bwgen_entry(w: ?*BW, linums: c_int, linchg: c_int) c_int {
+    if (zig_bw_lgen_enabled == 0 or w == null) return -1;
+
+    var from: i64 = 0;
+    var to: i64 = 0;
+    var fromline: i64 = 0;
+    var toline: i64 = 0;
+    var dosquare: c_int = 0;
+    if (zig_c_bw_bwgen_setup(w, &from, &to, &fromline, &toline, &dosquare) < 0)
+        return -1;
+
+    const t = zig_c_bw_get_scrn(w) orelse return -1;
+    const scrn = zig_c_bw_scrn_cells(t) orelse return -1;
+    const attr_base = zig_c_bw_scrn_attr(t) orelse return -1;
+    const updtab = zig_c_bw_scrn_updtab(t) orelse return -1;
+    const compose = zig_c_bw_scrn_compose(t);
+    const top = zig_c_bw_get_top(w) orelse return -1;
+    const cursor = zig_c_bw_get_cursor(w) orelse return -1;
+
+    const scr_w = zig_c_bw_scr_w(w);
+    const win_x = zig_c_bw_get_x(w);
+    const win_y = zig_c_bw_get_y(w);
+    const win_w = zig_c_bw_get_w(w);
+    const win_h = zig_c_bw_get_h(w);
+    const top_line = zig_c_bw_get_top_line(w);
+    const offset = zig_c_bw_get_offset(w);
+    const cursor_line = zig_c_bw_pline_no(cursor);
+    const mid_y = @as(isize, @intCast(cursor_line - top_line)) + win_y;
+
+    if (zig_bw_bwgen(
+        w,
+        t,
+        scrn,
+        attr_base,
+        updtab,
+        compose,
+        scr_w,
+        win_x,
+        win_y,
+        win_w,
+        win_h,
+        mid_y,
+        top,
+        cursor,
+        top_line,
+        offset,
+        linums,
+        linchg,
+        dosquare,
+        from,
+        to,
+        fromline,
+        toline,
+    ) < 0) return -1;
+
+    applyBwgenViewCursor(w);
+    return 0;
+}
 
 /// JOE `bwgenh` hex dump paint loop → C `genfield`.
 ///
@@ -2725,7 +2830,6 @@ test "bwgen square mark line scope matches C" {
 }
 
 extern fn zig_c_bw_set_pos(w: ?*BW, x: isize, y: isize) void;
-extern fn zig_c_bw_get_h(w: ?*BW) isize;
 extern fn zig_c_bw_set_size(w: ?*BW, wi: isize, he: isize) void;
 extern fn zig_c_bw_dirty_grown_rows(w: ?*BW, old_h: isize, new_h: isize) void;
 extern fn zig_c_bw_resz_vt_if_master(w: ?*BW, wi: isize, he: isize) void;
@@ -2824,11 +2928,8 @@ extern fn zig_c_bw_file_pos_all(t: ?*Screen) void;
 extern fn zig_c_bw_vtmaster_impl(t: ?*Screen, b: ?*B) ?*BW;
 extern fn zig_c_bw_ustat_impl(w: ?*W) c_int;
 extern fn zig_c_bw_wind_bw(w: ?*W, out: ?*?*BW) c_int;
-extern fn zig_c_bw_get_w(w: ?*BW) isize;
-extern fn zig_c_bw_get_offset(w: ?*BW) i64;
 extern fn zig_c_bw_set_offset(w: ?*BW, off: i64) void;
 extern fn zig_c_bw_get_cursor_xcol(w: ?*BW) i64;
-extern fn zig_c_bw_set_cursor_xcol(w: ?*BW, xcol: i64) void;
 extern fn zig_c_bw_pcol(w: ?*BW, xcol: i64) void;
 extern fn zig_c_bw_updall() void;
 extern fn zig_c_bw_locale_utf8() c_int;

@@ -34,6 +34,8 @@ extern int zig_bw_bwgen(BW *w, SCRN *t, int (*scrn)[COMPOSE], int *attr_base,
 	ptrdiff_t mid_y, P *top, P *cursor, off_t top_line, off_t offset,
 	int linums, int linchg, int dosquare,
 	off_t from, off_t to, off_t fromline, off_t toline);
+/* Path A: gated thin bwgen entry (lattr/viewmode/mark setup + loops + cursor). */
+extern int zig_bw_bwgen_entry(BW *w, int linums, int linchg);
 /* Path A: gated Zig bwgenh hex dump paint (mark setup stays in C). */
 extern int zig_bw_bwgenh(SCRN *t, int (*scrn)[COMPOSE], int *attr_base,
 	ptrdiff_t scr_w, ptrdiff_t win_y, ptrdiff_t win_h, ptrdiff_t win_w,
@@ -3415,6 +3417,106 @@ void zig_c_bw_rm_release(BW *w)
 	joe_free(w);
 }
 
+/* Path A helpers for zig_bw_bwgen_entry (lattr/viewmode/mark + screen fields). */
+int zig_c_bw_bwgen_setup(BW *w, off_t *from, off_t *to, off_t *fromline, off_t *toline, int *dosquare)
+{
+	SCRN *t;
+	if (!w || !from || !to || !fromline || !toline || !dosquare)
+		return -1;
+	if (!w->t || !w->t->t)
+		return -1;
+	t = w->t->t;
+
+	/* Set w.db to correct value */
+	if (w->o.highlight && w->o.syntax && (!w->db || w->db->syn != w->o.syntax))
+		w->db = find_lattr_db(w->b, w->o.syntax);
+
+	/* Feature 1.1/1.4: Invalidate screen buffer when viewmode toggles. */
+	if (w->o.viewmode != w->last_viewmode) {
+		scrn_invalidate(w->t->t);
+		w->last_viewmode = w->o.viewmode;
+	}
+
+	*fromline = *toline = *from = *to = 0;
+	*dosquare = 0;
+
+	if (w->b == errbuf && w->b->err) {
+		P *tmp = pdup(w->b->err, "bwgen");
+		p_goto_bol(tmp);
+		*from = tmp->byte;
+		pnextl(tmp);
+		*to = tmp->byte;
+		prm(tmp);
+	} else if (markv(0) && markk->b == w->b)
+		if (square) {
+			*from = markb->xcol;
+			*to = markk->xcol;
+			*dosquare = 1;
+			*fromline = markb->line;
+			*toline = markk->line;
+		} else {
+			*from = markb->byte;
+			*to = markk->byte;
+		}
+	else if (marking && w == (BW *)maint->curwin->object && markb && markb->b == w->b && w->cursor->byte != markb->byte && !*from) {
+		if (square) {
+			*from = off_min(w->cursor->xcol, markb->xcol);
+			*to = off_max(w->cursor->xcol, markb->xcol);
+			*fromline = off_min(w->cursor->line, markb->line);
+			*toline = off_max(w->cursor->line, markb->line);
+			*dosquare = 1;
+		} else {
+			*from = off_min(w->cursor->byte, markb->byte);
+			*to = off_max(w->cursor->byte, markb->byte);
+		}
+	}
+
+	if (marking && w == (BW *)maint->curwin->object)
+		msetI(t->updtab + w->y, 1, w->h);
+
+	return 0;
+}
+
+SCRN *zig_c_bw_get_scrn(BW *w)
+{
+	return (w && w->t) ? w->t->t : NULL;
+}
+
+ptrdiff_t zig_c_bw_get_x(BW *w)
+{
+	return w ? w->x : 0;
+}
+
+ptrdiff_t zig_c_bw_scr_w(BW *w)
+{
+	return (w && w->t) ? w->t->w : 0;
+}
+
+int (*zig_c_bw_scrn_cells(SCRN *t))[COMPOSE]
+{
+	return t ? t->scrn : NULL;
+}
+
+int *zig_c_bw_scrn_attr(SCRN *t)
+{
+	return t ? t->attr : NULL;
+}
+
+int *zig_c_bw_scrn_updtab(SCRN *t)
+{
+	return t ? t->updtab : NULL;
+}
+
+int *zig_c_bw_scrn_compose(SCRN *t)
+{
+	return t ? t->compose : NULL;
+}
+
+int zig_c_bw_get_viewmode(BW *w)
+{
+	return (w && w->o.viewmode) ? 1 : 0;
+}
+
 void bwgen(BW *w, int linums, int linchg)
 {
 	int (*screen)[COMPOSE];
@@ -3427,6 +3529,12 @@ void bwgen(BW *w, int linums, int linchg)
 	off_t from, to;
 	off_t fromline, toline;
 	SCRN *t = w->t->t;
+
+	/* Path A: Zig owns lattr/viewmode/mark setup + paint loops + cursor. */
+	if (zig_bw_lgen_enabled) {
+		if (zig_bw_bwgen_entry(w, linums, linchg) >= 0)
+			return;
+	}
 
 	/* Set w.db to correct value */
 	if (w->o.highlight && w->o.syntax && (!w->db || w->db->syn != w->o.syntax))

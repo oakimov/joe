@@ -483,34 +483,7 @@ off_t zig_c_bw_b_eof_line(BW *w)
 
 /* zig_c_bw_alloc / zig_c_bw_mk_init: owned by Zig `bwMkInit` */
 
-void zig_c_bw_orphit_impl(BW *bw)
-{
-	if (!bw || !bw->b) return;
-	++bw->b->count;
-	bw->b->orphan = 1;
-	pdupown(bw->cursor, &bw->b->oldcur, "orphit");
-	pdupown(bw->top, &bw->b->oldtop, "orphit");
-}
-
-int zig_c_bw_is_sole_errbuf(BW *w)
-{
-	return (w && w->b == errbuf && w->b->count == 1) ? 1 : 0;
-}
-
-void zig_c_bw_rm_save_pos(BW *w)
-{
-	if (w && w->b && w->cursor)
-		set_file_pos(w->b->name, w->cursor->line);
-}
-
-void zig_c_bw_rm_release(BW *w)
-{
-	if (!w) return;
-	if (w->top) prm(w->top);
-	if (w->cursor) prm(w->cursor);
-	if (w->b) brm(w->b);
-	joe_free(w);
-}
+/* zig_c_bw_orphit_impl / is_sole_errbuf / rm_*: owned by Zig `bwOrphit`/`bwrm` */
 
 /* Path A field helpers for Zig-owned bwgen/bwgenh mark setup. */
 void zig_c_bw_ensure_lattr_db(BW *w)

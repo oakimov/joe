@@ -29,7 +29,7 @@
 //! `-1`; `defatr` computed in Zig; dead prepare/hide/subst/urls/table/after
 //! bridges removed).
 //! Lifecycle uses `zig_bw_bwmove` / `zig_bw_bwresz` / `zig_bw_bwmk` / `zig_bw_bwrm` /
-//! `zig_bw_orphit` / `zig_bw_calclincols` (Zig-owned `bwMkInit`; thin wrappers abort on `-1`).
+//! `zig_bw_orphit` / `zig_bw_calclincols` (Zig-owned `bwMkInit`/`bwOrphit`/`bwrm`; thin wrappers abort on `-1`).
 //! Non-paint helpers use `zig_bw_get_file_pos` / `zig_bw_set_file_pos` /
 //! `zig_bw_save_file_pos` / `zig_bw_load_file_pos` / `zig_bw_set_file_pos_all` /
 //! `zig_bw_vtmaster` / `zig_bw_ustat` / `zig_bw_ucrawlr` / `zig_bw_ucrawll` /
@@ -101,6 +101,7 @@ extern var vrtn: c_int;
 
 extern fn parse(syntax: ?*HighSyntax, line: ?*P, h_state: HighlightState, charmap: ?*Charmap) HighlightState;
 extern fn pdup(p: ?*P, tr: [*:0]const u8) ?*P;
+extern fn pdupown(p: ?*P, owner: ?*?*P, tr: [*:0]const u8) ?*P;
 extern fn prm(p: ?*P) void;
 extern fn pnextl(p: ?*P) ?*P;
 extern fn pgetb(p: ?*P) c_int;
@@ -3457,11 +3458,13 @@ comptime {
     if (@sizeOf(VtRec) != 1168) @compileError("VtRec size mismatch");
 }
 
-extern fn zig_c_bw_orphit_impl(bw: ?*BW) void;
 extern var staen: c_int;
+extern var errbuf: ?*B;
 extern fn rmkbd(k: ?*Kbd) void;
 extern fn mkkbd(kmap: ?*Kmap) ?*Kbd;
 extern fn kmap_getcontext(name: ?[*:0]const u8) ?*Kmap;
+extern fn brm(b: ?*B) void;
+extern fn set_file_pos(name: ?[*:0]const u8, pos: i64) void;
 
 fn asBw(w: ?*BW) *BwRec {
     return @ptrCast(@alignCast(w.?));
@@ -3536,9 +3539,39 @@ fn bwMkInit(w_in: ?*BW, window_in: ?*W, b_in: ?*B, prompt: c_int) c_int {
     return 0;
 }
 
-extern fn zig_c_bw_is_sole_errbuf(w: ?*BW) c_int;
-extern fn zig_c_bw_rm_save_pos(w: ?*BW) void;
-extern fn zig_c_bw_rm_release(w: ?*BW) void;
+fn bwOrphit(bw_in: ?*BW) void {
+    if (bw_in == null) return;
+    const w = asBw(bw_in);
+    const b = w.b orelse return;
+    b.count += 1;
+    b.orphan = 1;
+    _ = pdupown(@ptrCast(w.cursor), @ptrCast(&b.oldcur), "orphit");
+    _ = pdupown(@ptrCast(w.top), @ptrCast(&b.oldtop), "orphit");
+}
+
+fn bwIsSoleErrbuf(w_in: ?*BW) bool {
+    if (w_in == null or errbuf == null) return false;
+    const w = asBw(w_in);
+    return w.b != null and @intFromPtr(w.b) == @intFromPtr(errbuf) and w.b.?.count == 1;
+}
+
+fn bwRmSavePos(w_in: ?*BW) void {
+    if (w_in == null) return;
+    const w = asBw(w_in);
+    const b = w.b orelse return;
+    const cur = w.cursor orelse return;
+    const name: ?[*:0]const u8 = if (b.name) |n| @ptrCast(n) else null;
+    set_file_pos(name, cur.line);
+}
+
+fn bwRmRelease(w_in: ?*BW) void {
+    if (w_in == null) return;
+    const w = asBw(w_in);
+    if (w.top) |top| prm(@ptrCast(top));
+    if (w.cursor) |cur| prm(@ptrCast(cur));
+    if (w.b) |b| brm(@ptrCast(b));
+    joe_free(@ptrCast(w));
+}
 
 /// Path A lifecycle: set BW origin. Returns `0` on success, `-1` to fall back.
 pub export fn zig_bw_bwmove(w: ?*BW, x: isize, y: isize) c_int {
@@ -3573,19 +3606,19 @@ pub export fn zig_bw_bwmk(window: ?*W, b: ?*B, prompt: c_int, out_bw: ?*?*BW) c_
 /// Path A lifecycle: orphan buffer before `bwrm` when needed.
 pub export fn zig_bw_orphit(bw: ?*BW) c_int {
     if (bw == null) return -1;
-    zig_c_bw_orphit_impl(bw);
+    bwOrphit(bw);
     return 0;
 }
 
 /// Path A lifecycle: destroy BW (errbuf orphan, save pos, release).
 pub export fn zig_bw_bwrm(w: ?*BW) c_int {
     if (w == null) return -1;
-    if (zig_c_bw_is_sole_errbuf(w) != 0) {
-        // Use impl directly to avoid re-entering gated `orphit`.
-        zig_c_bw_orphit_impl(w);
+    if (bwIsSoleErrbuf(w)) {
+        // Use impl directly to avoid re-entering public `orphit`.
+        bwOrphit(w);
     }
-    zig_c_bw_rm_save_pos(w);
-    zig_c_bw_rm_release(w);
+    bwRmSavePos(w);
+    bwRmRelease(w);
     return 0;
 }
 

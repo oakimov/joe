@@ -10,9 +10,9 @@
 //! Window paint loops use `zig_bw_bwgen` (loops call C `getto`/`lgen`/`gennum`
 //! so Path A body/gutter bridges still apply).
 //! Thin `bwgen` entry uses `zig_bw_bwgen_entry` (lattr/viewmode/mark setup + loops +
-//! Feature 1.10 cursor; C fallback retained).
+//! Feature 1.10 cursor; Zig-owned mark setup via thin C field accessors).
 //! Hex dump paint uses `zig_bw_bwgenh` (loop calls C `genfield`).
-//! Thin `bwgenh` entry uses `zig_bw_bwgenh_entry` (mark setup + hex paint; C fallback retained).
+//! Thin `bwgenh` entry uses `zig_bw_bwgenh_entry` (Zig-owned mark setup + hex paint).
 //! Table region detect uses `zig_bw_table_detect` → `table.layoutAt` (fills C widths/aligns).
 //! Cursor follow/scroll uses `zig_bw_bwfllwt` / `zig_bw_bwfllwh` (C scroll helpers).
 //! Post-edit window scroll uses `zig_bw_bwins` / `zig_bw_bwdel`.
@@ -1918,14 +1918,11 @@ fn paintOneRow(ctx: anytype, y: isize, p_in: ?*P) ?*P {
 }
 
 
-extern fn zig_c_bw_bwgen_setup(
-    w: ?*BW,
-    from: ?*i64,
-    to: ?*i64,
-    fromline: ?*i64,
-    toline: ?*i64,
-    dosquare: ?*c_int,
-) c_int;
+extern fn zig_c_bw_ensure_lattr_db(w: ?*BW) void;
+extern fn zig_c_bw_sync_viewmode(w: ?*BW) void;
+extern fn zig_c_bw_get_err(w: ?*BW) ?*P;
+extern fn zig_c_bw_same_buf(w: ?*BW, p: ?*P) c_int;
+extern fn zig_c_bw_is_maint_cur(w: ?*BW) c_int;
 extern fn zig_c_bw_get_scrn(w: ?*BW) ?*SCRN;
 extern fn zig_c_bw_get_x(w: ?*BW) isize;
 extern fn zig_c_bw_scr_w(w: ?*BW) isize;
@@ -1938,6 +1935,129 @@ extern fn zig_c_bw_get_h(w: ?*BW) isize;
 extern fn zig_c_bw_get_w(w: ?*BW) isize;
 extern fn zig_c_bw_get_offset(w: ?*BW) i64;
 extern fn zig_c_bw_set_cursor_xcol(w: ?*BW, xcol: i64) void;
+
+extern fn markv(r: c_int) c_int;
+extern var markb: ?*P;
+extern var markk: ?*P;
+extern var marking: c_int;
+
+const BwgenMarkRange = struct {
+    from: i64 = 0,
+    to: i64 = 0,
+    fromline: i64 = 0,
+    toline: i64 = 0,
+    dosquare: c_int = 0,
+};
+
+fn dirtyMarkingUpdtab(w: ?*BW) void {
+    if (marking == 0 or zig_c_bw_is_maint_cur(w) == 0) return;
+    const t = zig_c_bw_get_scrn(w) orelse return;
+    const updtab = zig_c_bw_scrn_updtab(t) orelse return;
+    const y = zig_c_bw_get_y(w);
+    const h = zig_c_bw_get_h(w);
+    if (h <= 0) return;
+    zig_c_bw_msetI(updtab + @as(usize, @intCast(y)), 1, h);
+}
+
+/// Linear/square mark range only (no errbuf). Shared by `bwgen`/`bwgenh` setup.
+fn resolveMarkRange(w: ?*BW) BwgenMarkRange {
+    var r = BwgenMarkRange{};
+
+    if (markv(0) != 0 and zig_c_bw_same_buf(w, markk) != 0) {
+        const mb = markb orelse return r;
+        const mk = markk orelse return r;
+        if (square != 0) {
+            r.from = zig_c_bw_pxcol(mb);
+            r.to = zig_c_bw_pxcol(mk);
+            r.dosquare = 1;
+            r.fromline = zig_c_bw_pline_no(mb);
+            r.toline = zig_c_bw_pline_no(mk);
+        } else {
+            r.from = zig_c_bw_pbyte(mb);
+            r.to = zig_c_bw_pbyte(mk);
+        }
+        return r;
+    }
+
+    if (marking != 0 and zig_c_bw_is_maint_cur(w) != 0) {
+        const mb = markb orelse return r;
+        const cursor = zig_c_bw_get_cursor(w) orelse return r;
+        if (zig_c_bw_same_buf(w, mb) == 0) return r;
+        const cur_byte = zig_c_bw_pbyte(cursor);
+        const mb_byte = zig_c_bw_pbyte(mb);
+        if (cur_byte == mb_byte or r.from != 0) return r;
+        if (square != 0) {
+            const cur_xcol = zig_c_bw_pxcol(cursor);
+            const mb_xcol = zig_c_bw_pxcol(mb);
+            const cur_line = zig_c_bw_pline_no(cursor);
+            const mb_line = zig_c_bw_pline_no(mb);
+            r.from = @min(cur_xcol, mb_xcol);
+            r.to = @max(cur_xcol, mb_xcol);
+            r.fromline = @min(cur_line, mb_line);
+            r.toline = @max(cur_line, mb_line);
+            r.dosquare = 1;
+        } else {
+            r.from = @min(cur_byte, mb_byte);
+            r.to = @max(cur_byte, mb_byte);
+        }
+    }
+    return r;
+}
+
+fn resolveBwgenMarks(w: ?*BW) BwgenMarkRange {
+    if (zig_c_bw_get_err(w)) |err| {
+        var r = BwgenMarkRange{};
+        const tmp = pdup(err, "bwgen") orelse return r;
+        defer prm(tmp);
+        zig_c_bw_p_goto_bol(tmp);
+        r.from = zig_c_bw_pbyte(tmp);
+        _ = pnextl(tmp);
+        r.to = zig_c_bw_pbyte(tmp);
+        return r;
+    }
+    return resolveMarkRange(w);
+}
+
+fn bwgenSetup(
+    w: ?*BW,
+    from: *i64,
+    to: *i64,
+    fromline: *i64,
+    toline: *i64,
+    dosquare: *c_int,
+) c_int {
+    if (w == null) return -1;
+    if (zig_c_bw_get_scrn(w) == null) return -1;
+
+    zig_c_bw_ensure_lattr_db(w);
+    zig_c_bw_sync_viewmode(w);
+
+    const marks = resolveBwgenMarks(w);
+    from.* = marks.from;
+    to.* = marks.to;
+    fromline.* = marks.fromline;
+    toline.* = marks.toline;
+    dosquare.* = marks.dosquare;
+    dirtyMarkingUpdtab(w);
+    return 0;
+}
+
+fn bwgenhSetup(w: ?*BW, from: *i64, to: *i64) c_int {
+    if (w == null) return -1;
+    if (zig_c_bw_get_scrn(w) == null) return -1;
+
+    const marks = resolveMarkRange(w);
+    // Hex dump ignores square marks (former C zeroed the range).
+    if (marks.dosquare != 0) {
+        from.* = 0;
+        to.* = 0;
+    } else {
+        from.* = marks.from;
+        to.* = marks.to;
+    }
+    dirtyMarkingUpdtab(w);
+    return 0;
+}
 
 fn applyBwgenViewCursor(w: ?*BW) void {
     if (zig_c_bw_get_viewmode(w) == 0) return;
@@ -1955,7 +2075,7 @@ fn applyBwgenViewCursor(w: ?*BW) void {
 }
 
 /// Thin `bwgen` entry (Path A): lattr/viewmode/mark setup + paint loops +
-/// Feature 1.10 cursor. C keeps the full `bwgen` fallback body.
+/// Feature 1.10 cursor. Mark setup is Zig-owned (thin C field accessors).
 ///
 /// Returns `0` on success, `-1` to fall back to C `bwgen`.
 pub export fn zig_bw_bwgen_entry(w: ?*BW, linums: c_int, linchg: c_int) c_int {
@@ -1966,9 +2086,8 @@ pub export fn zig_bw_bwgen_entry(w: ?*BW, linums: c_int, linchg: c_int) c_int {
     var fromline: i64 = 0;
     var toline: i64 = 0;
     var dosquare: c_int = 0;
-    if (zig_c_bw_bwgen_setup(w, &from, &to, &fromline, &toline, &dosquare) < 0)
+    if (bwgenSetup(w, &from, &to, &fromline, &toline, &dosquare) < 0)
         return -1;
-
     const t = zig_c_bw_get_scrn(w) orelse return -1;
     const scrn = zig_c_bw_scrn_cells(t) orelse return -1;
     const attr_base = zig_c_bw_scrn_attr(t) orelse return -1;
@@ -2143,15 +2262,14 @@ pub export fn zig_bw_bwgenh(
     return 0;
 }
 
-extern fn zig_c_bw_bwgenh_setup(w: ?*BW, from: ?*i64, to: ?*i64) c_int;
-/// Thin `bwgenh` entry (Path A): mark setup + hex paint.
-/// C keeps the full `bwgenh` fallback body. Returns `0` or `-1` fallback.
+/// Thin `bwgenh` entry (Path A): Zig-owned mark setup + hex paint.
+/// Returns `0` or `-1` fallback.
 pub export fn zig_bw_bwgenh_entry(w: ?*BW) c_int {
     if (w == null) return -1;
 
     var from: i64 = 0;
     var to: i64 = 0;
-    if (zig_c_bw_bwgenh_setup(w, &from, &to) < 0) return -1;
+    if (bwgenhSetup(w, &from, &to) < 0) return -1;
 
     const t = zig_c_bw_get_scrn(w) orelse return -1;
     const scrn = zig_c_bw_scrn_cells(t) orelse return -1;

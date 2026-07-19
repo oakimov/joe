@@ -33,7 +33,7 @@
 //! Non-paint helpers use `zig_bw_get_file_pos` / `zig_bw_set_file_pos` /
 //! `zig_bw_save_file_pos` / `zig_bw_load_file_pos` / `zig_bw_set_file_pos_all` /
 //! `zig_bw_vtmaster` / `zig_bw_ustat` / `zig_bw_ucrawlr` / `zig_bw_ucrawll` /
-//! `zig_bw_init_visiblews` (Zig-owned file_pos LRU; C keeps TW window walk).
+//! `zig_bw_init_visiblews` (Zig-owned file_pos LRU + TW window walk; orphans via `set_file_pos_orphaned`).
 //! Feature 2.1 residual simple pipe substitute uses `zig_bw_table_simple`.
 //! Non-UTF-8 (byte) charmaps paint via `lgenLine` byte-mode.
 //! Thin C wrappers abort when a Zig export returns `-1` (OOM / oversize / hard fail).
@@ -3409,12 +3409,23 @@ const BwRec = extern struct {
     saved: BwSaved,
 };
 
+/// C `struct screen` layout (see `joe/w.h`); size-checked against live ABI.
+const ScreenRec = extern struct {
+    t: ?*SCRN,
+    wind: isize,
+    topwin: ?*WinRec,
+    curwin: ?*WinRec,
+    w: isize,
+    h: isize,
+};
+
 comptime {
     if (@sizeOf(WinRec) != 200) @compileError("WinRec size mismatch");
     if (@sizeOf(BwRec) != 488) @compileError("BwRec size mismatch");
     if (@sizeOf(GapB) != 632) @compileError("GapB size mismatch");
     if (@sizeOf(GapP) != 112) @compileError("GapP size mismatch");
     if (@sizeOf(GapOptions) != 344) @compileError("GapOptions size mismatch");
+    if (@sizeOf(ScreenRec) != 48) @compileError("ScreenRec size mismatch");
 }
 
 extern fn zig_c_bw_orphit_impl(bw: ?*BW) void;
@@ -3434,6 +3445,13 @@ fn asWin(w: ?*W) *WinRec {
 fn asB(b: ?*B) *GapB {
     return @ptrCast(@alignCast(b.?));
 }
+
+fn asScreen(t: ?*Screen) *ScreenRec {
+    return @ptrCast(@alignCast(t.?));
+}
+
+extern var watomtw: Watom;
+extern fn set_file_pos_orphaned() void;
 
 /// JOE `bwmk` body: bind window/buffer, reclaim orphan cursors or pdup bof, kbd.
 fn bwMkInit(w_in: ?*BW, window_in: ?*W, b_in: ?*B, prompt: c_int) c_int {
@@ -3571,7 +3589,6 @@ pub export fn zig_bw_calclincols(bw: ?*BW) c_int {
 
 const FILE = std.c.FILE;
 
-extern fn zig_c_bw_file_pos_all(t: ?*Screen) void;
 extern fn zig_c_bw_vtmaster_impl(t: ?*Screen, b: ?*B) ?*BW;
 extern fn zig_c_bw_ustat_impl(w: ?*W) c_int;
 extern fn zig_c_bw_wind_bw(w: ?*W, out: ?*?*BW) c_int;
@@ -3698,7 +3715,25 @@ pub export fn zig_bw_load_file_pos(f: ?*FILE) c_int {
 /// Path A non-paint: snapshot positions for all TW windows + orphans.
 pub export fn zig_bw_set_file_pos_all(t: ?*Screen) c_int {
     if (t == null) return -1;
-    zig_c_bw_file_pos_all(t);
+    const screen = asScreen(t);
+    var w = screen.topwin orelse return 0;
+    const start = w;
+    while (true) {
+        if (w.watom == &watomtw) {
+            if (w.object) |obj| {
+                const bw: *BwRec = @ptrCast(@alignCast(obj));
+                if (bw.b) |b| {
+                    if (bw.cursor) |cur| {
+                        const name: ?[*:0]const u8 = if (b.name) |n| @ptrCast(n) else null;
+                        _ = zig_bw_set_file_pos(name, cur.line);
+                    }
+                }
+            }
+        }
+        w = w.link.next orelse break;
+        if (w == start) break;
+    }
+    set_file_pos_orphaned();
     return 0;
 }
 

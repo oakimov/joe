@@ -638,23 +638,7 @@ int restore_file_pos;
 
 char *ustat_line;
 
-/* Path A: window walk for Zig-owned file_pos DB (+ orphaned buffers). */
-void zig_c_bw_file_pos_all(Screen *t)
-{
-	W *w;
-	if (!t || !t->topwin)
-		return;
-	w = t->topwin;
-	do {
-		if (w->watom == &watomtw) {
-			BW *bw = (BW *)w->object;
-			if (bw && bw->b && bw->cursor)
-				zig_bw_set_file_pos(bw->b->name, bw->cursor->line);
-		}
-		w = w->link.next;
-	} while (w != t->topwin);
-	set_file_pos_orphaned();
-}
+/* zig_c_bw_file_pos_all: owned by Zig `zig_bw_set_file_pos_all` */
 
 BW *zig_c_bw_vtmaster_impl(Screen *t, B *b)
 {

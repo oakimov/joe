@@ -29,7 +29,7 @@
 //! `-1`; `defatr` computed in Zig; dead prepare/hide/subst/urls/table/after
 //! bridges removed).
 //! Lifecycle uses `zig_bw_bwmove` / `zig_bw_bwresz` / `zig_bw_bwmk` / `zig_bw_bwrm` /
-//! `zig_bw_orphit` / `zig_bw_calclincols` (thin wrappers abort on Zig `-1`).
+//! `zig_bw_orphit` / `zig_bw_calclincols` (Zig-owned `bwMkInit`; thin wrappers abort on `-1`).
 //! Non-paint helpers use `zig_bw_get_file_pos` / `zig_bw_set_file_pos` /
 //! `zig_bw_save_file_pos` / `zig_bw_load_file_pos` / `zig_bw_set_file_pos_all` /
 //! `zig_bw_vtmaster` / `zig_bw_ustat` / `zig_bw_ucrawlr` / `zig_bw_ucrawll` /
@@ -3337,9 +3337,158 @@ extern fn zig_c_bw_dirty_grown_rows(w: ?*BW, old_h: isize, new_h: isize) void;
 extern fn zig_c_bw_resz_vt_if_master(w: ?*BW, wi: isize, he: isize) void;
 extern fn zig_c_bw_get_linums(w: ?*BW) c_int;
 extern fn zig_c_bw_b_eof_line(w: ?*BW) i64;
-extern fn zig_c_bw_alloc() ?*BW;
-extern fn zig_c_bw_mk_init(w: ?*BW, window: ?*W, b: ?*B, prompt: c_int) c_int;
+const gap_types = @import("gapbuffer/types.zig");
+const GapB = gap_types.B;
+const GapP = gap_types.P;
+const GapOptions = gap_types.OPTIONS;
+
+const Kbd = opaque {};
+const Kmap = opaque {};
+const Watom = opaque {};
+
+const WinLink = extern struct {
+    next: ?*WinRec,
+    prev: ?*WinRec,
+};
+
+/// C `struct window` layout (see `joe/w.h`); size-checked against live ABI.
+const WinRec = extern struct {
+    link: WinLink,
+    t: ?*Screen,
+    x: isize,
+    y: isize,
+    w: isize,
+    h: isize,
+    ny: isize,
+    nh: isize,
+    reqh: isize,
+    fixed: isize,
+    hh: isize,
+    win: ?*WinRec,
+    main: ?*WinRec,
+    orgwin: ?*WinRec,
+    curx: isize,
+    cury: isize,
+    kbd: ?*Kbd,
+    watom: ?*const Watom,
+    object: ?*anyopaque,
+    msgt: ?[*:0]const u8,
+    msgb: ?[*:0]const u8,
+    huh: ?[*:0]const u8,
+    notify: ?*c_int,
+    bstack: ?*anyopaque,
+};
+
+const BwSaved = extern struct {
+    ww: c_int,
+    ai: c_int,
+    sp: c_int,
+};
+
+/// C `struct bw` layout (see `joe/bw.h`); size-checked against live ABI.
+const BwRec = extern struct {
+    parent: ?*WinRec,
+    b: ?*GapB,
+    top: ?*GapP,
+    cursor: ?*GapP,
+    offset: i64,
+    t: ?*Screen,
+    h: isize,
+    w: isize,
+    x: isize,
+    y: isize,
+    o: GapOptions,
+    object: ?*anyopaque,
+    lincols: c_int,
+    curlin: i64,
+    top_changed: c_int,
+    db: ?*anyopaque,
+    shell_flag: c_int,
+    pasting: c_int,
+    last_viewmode: c_int,
+    saved: BwSaved,
+};
+
+comptime {
+    if (@sizeOf(WinRec) != 200) @compileError("WinRec size mismatch");
+    if (@sizeOf(BwRec) != 488) @compileError("BwRec size mismatch");
+    if (@sizeOf(GapB) != 632) @compileError("GapB size mismatch");
+    if (@sizeOf(GapP) != 112) @compileError("GapP size mismatch");
+    if (@sizeOf(GapOptions) != 344) @compileError("GapOptions size mismatch");
+}
+
 extern fn zig_c_bw_orphit_impl(bw: ?*BW) void;
+extern var staen: c_int;
+extern fn rmkbd(k: ?*Kbd) void;
+extern fn mkkbd(kmap: ?*Kmap) ?*Kbd;
+extern fn kmap_getcontext(name: ?[*:0]const u8) ?*Kmap;
+
+fn asBw(w: ?*BW) *BwRec {
+    return @ptrCast(@alignCast(w.?));
+}
+
+fn asWin(w: ?*W) *WinRec {
+    return @ptrCast(@alignCast(w.?));
+}
+
+fn asB(b: ?*B) *GapB {
+    return @ptrCast(@alignCast(b.?));
+}
+
+/// JOE `bwmk` body: bind window/buffer, reclaim orphan cursors or pdup bof, kbd.
+fn bwMkInit(w_in: ?*BW, window_in: ?*W, b_in: ?*B, prompt: c_int) c_int {
+    if (w_in == null or window_in == null or b_in == null) return -1;
+    const w = asBw(w_in);
+    const window = asWin(window_in);
+    const b = asB(b_in);
+
+    w.parent = window;
+    w.b = b;
+    if (prompt != 0 or (window.y == 0 and staen != 0) or window.h < 2) {
+        w.y = window.y;
+        w.h = window.h;
+    } else {
+        w.y = window.y + 1;
+        w.h = window.h - 1;
+    }
+    if (b.oldcur != null) {
+        w.top = b.oldtop;
+        b.oldtop = null;
+        if (w.top) |top| top.owner = null;
+        w.cursor = b.oldcur;
+        b.oldcur = null;
+        if (w.cursor) |cur| cur.owner = null;
+    } else {
+        const top = pdup(@ptrCast(b.bof), "bwmk");
+        const cur = pdup(@ptrCast(b.bof), "bwmk");
+        if (top == null or cur == null) return -1;
+        w.top = @ptrCast(@alignCast(top));
+        w.cursor = @ptrCast(@alignCast(cur));
+    }
+    w.t = window.t;
+    w.object = null;
+    w.offset = 0;
+    w.o = b.o;
+    w.lincols = 0;
+    w.curlin = 0;
+    w.x = window.x;
+    w.w = window.w;
+    if (window == window.main) {
+        rmkbd(window.kbd);
+        const ctx: ?[*:0]const u8 = if (w.o.context) |c| @ptrCast(c) else null;
+        window.kbd = mkkbd(kmap_getcontext(ctx));
+    }
+    if (w.top) |top| top.xcol = 0;
+    if (w.cursor) |cur| cur.xcol = 0;
+    w.top_changed = 1;
+    w.db = null;
+    w.shell_flag = 0;
+    w.pasting = 0;
+    w.last_viewmode = 0;
+    w.saved = .{ .ww = 0, .ai = 0, .sp = 0 };
+    return 0;
+}
+
 extern fn zig_c_bw_is_sole_errbuf(w: ?*BW) c_int;
 extern fn zig_c_bw_rm_save_pos(w: ?*BW) void;
 extern fn zig_c_bw_rm_release(w: ?*BW) void;
@@ -3364,9 +3513,10 @@ pub export fn zig_bw_bwresz(w: ?*BW, wi: isize, he: isize) c_int {
 /// Path A lifecycle: allocate + init BW. On success writes `*out_bw` and returns `0`.
 pub export fn zig_bw_bwmk(window: ?*W, b: ?*B, prompt: c_int, out_bw: ?*?*BW) c_int {
     if (window == null or b == null or out_bw == null) return -1;
-    const w = zig_c_bw_alloc() orelse return -1;
-    if (zig_c_bw_mk_init(w, window, b, prompt) < 0) {
-        joe_free(w);
+    const mem = joe_malloc(@sizeOf(BwRec)) orelse return -1;
+    const w: ?*BW = @ptrCast(mem);
+    if (bwMkInit(w, window, b, prompt) < 0) {
+        joe_free(mem);
         return -1;
     }
     out_bw.?.* = w;

@@ -481,57 +481,7 @@ off_t zig_c_bw_b_eof_line(BW *w)
 	return (w && w->b && w->b->eof) ? w->b->eof->line : 0;
 }
 
-BW *zig_c_bw_alloc(void)
-{
-	return (BW *)joe_malloc(SIZEOF(BW));
-}
-
-int zig_c_bw_mk_init(BW *w, W *window, B *b, int prompt)
-{
-	if (!w || !window || !b) return -1;
-
-	w->parent = window;
-	w->b = b;
-	if (prompt || (!window->y && staen) || window->h < 2) {
-		w->y = window->y;
-		w->h = window->h;
-	} else {
-		w->y = window->y + 1;
-		w->h = window->h - 1;
-	}
-	if (b->oldcur) {
-		w->top = b->oldtop;
-		b->oldtop = NULL;
-		w->top->owner = NULL;
-		w->cursor = b->oldcur;
-		b->oldcur = NULL;
-		w->cursor->owner = NULL;
-	} else {
-		w->top = pdup(b->bof, "bwmk");
-		w->cursor = pdup(b->bof, "bwmk");
-		if (!w->top || !w->cursor) return -1;
-	}
-	w->t = window->t;
-	w->object = NULL;
-	w->offset = 0;
-	w->o = w->b->o;
-	w->lincols = 0;
-	w->curlin = 0;
-	w->x = window->x;
-	w->w = window->w;
-	if (window == window->main) {
-		rmkbd(window->kbd);
-		window->kbd = mkkbd(kmap_getcontext(w->o.context));
-	}
-	w->top->xcol = 0;
-	w->cursor->xcol = 0;
-	w->top_changed = 1;
-	w->db = 0;
-	w->shell_flag = 0;
-	w->pasting = 0;
-	w->last_viewmode = 0;
-	return 0;
-}
+/* zig_c_bw_alloc / zig_c_bw_mk_init: owned by Zig `bwMkInit` */
 
 void zig_c_bw_orphit_impl(BW *bw)
 {

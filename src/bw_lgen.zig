@@ -7,8 +7,8 @@
 //! path). Feature 2.2 padded table rows use `zig_bw_table_row` → `render.table.paintRow`
 //! with widths/aligns from Path A detect or C. Line-number gutters use
 //! `zig_bw_gennum` (JOE `" %21lld "` trailing `lincols`; past-EOF blanks).
-//! Window paint loops use `zig_bw_bwgen` (loops call C `getto`/`lgen`/`gennum`
-//! so Path A body/gutter bridges still apply).
+//! Window paint loops use `zig_bw_bwgen` (Zig `bwGetto` + C `lgen`/`gennum`
+//! bridges for body/gutter).
 //! Thin `bwgen` entry uses `zig_bw_bwgen_entry` (lattr/viewmode/mark setup + loops +
 //! Feature 1.10 cursor; Zig-owned mark setup via thin C field accessors).
 //! Hex dump paint uses `zig_bw_bwgenh` (loop calls C `genfield`).
@@ -145,13 +145,49 @@ extern fn zig_c_bw_pset(d: ?*P, s: ?*P) void;
 extern fn zig_c_bw_pline(p: ?*P, line: i64) void;
 extern fn zig_c_bw_pgoto(p: ?*P, loc: i64) void;
 extern fn zig_c_bw_pbkwd(p: ?*P, n: i64) void;
-extern fn zig_c_bw_getto(p: ?*P, cur: ?*P, top: ?*P, line: i64) ?*P;
+extern fn pprevl(p: ?*P) ?*P;
 extern fn zig_c_bw_nscrldn(t: ?*SCRN, top: isize, bot: isize, amnt: isize) void;
 extern fn zig_c_bw_nscrlup(t: ?*SCRN, top: isize, bot: isize, amnt: isize) void;
 extern fn zig_c_bw_msetI(dest: ?[*]c_int, c: c_int, sz: isize) void;
 extern var opt_mid: c_int;
 extern var opt_left: c_int;
 extern var opt_right: c_int;
+
+/// JOE `getto`: move/allocate a `P` to bol of `line`.
+/// When `p_in` is null, pdup the closer of `cur`/`top` (by line distance).
+fn bwGetto(p_in: ?*P, cur: ?*P, top: ?*P, line: i64) ?*P {
+    var p = p_in;
+    if (p == null) {
+        const cur_p = cur orelse return null;
+        const top_p = top orelse return null;
+        var best = cur_p;
+        var dist: i64 = std.math.maxInt(i64);
+        const cur_line = zig_c_bw_pline_no(cur_p);
+        const d_cur = if (line >= cur_line) line - cur_line else cur_line - line;
+        if (d_cur < dist) {
+            dist = d_cur;
+            best = cur_p;
+        }
+        const top_line = zig_c_bw_pline_no(top_p);
+        const d_top = if (line >= top_line) line - top_line else top_line - line;
+        if (d_top < dist) {
+            best = top_p;
+        }
+        p = pdup(best, "getto") orelse return null;
+        zig_c_bw_p_goto_bol(p);
+    }
+    const pp = p orelse return null;
+    while (line > zig_c_bw_pline_no(pp)) {
+        if (pnextl(pp) == null) break;
+    }
+    if (line < zig_c_bw_pline_no(pp)) {
+        while (line < zig_c_bw_pline_no(pp)) {
+            _ = pprevl(pp);
+        }
+        zig_c_bw_p_goto_bol(pp);
+    }
+    return pp;
+}
 
 /// JOE `gennum` line-number gutter → hybrid `outatr`.
 ///
@@ -380,7 +416,7 @@ pub export fn zig_bw_bwfllwt(
             cur_line - @divTrunc(win_h, 2)
         else
             cur_line - (win_h - 1);
-        const newtop = zig_c_bw_getto(null, cursor, top, target) orelse return -1;
+        const newtop = bwGetto(null, cursor, top, target) orelse return -1;
         const new_line = zig_c_bw_pline_no(newtop);
         const delta = new_line - top_line;
         if (delta < win_h) {
@@ -1776,7 +1812,7 @@ extern fn zig_c_bw_gennum(
     compose: ?[*]c_int,
 ) void;
 extern fn zig_c_bw_get_highlight_state(w: ?*BW, p: ?*P, line: i64) HighlightState;
-/// JOE `bwgen` paint loops → C `getto` / `gennum` / `lgen`.
+/// JOE `bwgen` paint loops → Zig `bwGetto` / C `gennum` / `lgen`.
 ///
 /// Prefer `zig_bw_bwgen_entry` for full setup+loops+cursor. This owns the two
 /// screen-row loops (cursor→bottom, then top→cursor) plus `prm` of the walk
@@ -1890,7 +1926,7 @@ fn paintOneRow(ctx: anytype, y: isize, p_in: ?*P) ?*P {
     if (ctx.linchg == 0 and ctx.updtab[@intCast(y)] == 0) return p_in;
 
     const buf_line = ctx.top_line + y - ctx.win_y;
-    const p = zig_c_bw_getto(p_in, ctx.cursor, ctx.top, buf_line);
+    const p = bwGetto(p_in, ctx.cursor, ctx.top, buf_line);
     const st = zig_c_bw_get_highlight_state(ctx.w, p, buf_line);
     var use_from = ctx.from;
     var use_to = ctx.to;

@@ -97,37 +97,7 @@ int vspace = 0;
 int vtab = 0;
 int vrtn = 0;
 
-static P *getto(P *p, P *cur, P *top, off_t line)
-{
-
-	if (p == NULL) {
-		P *best = cur;
-		off_t dist = MAXOFF;
-		off_t d;
-
-		d = (line >= cur->line ? line - cur->line : cur->line - line);
-		if (d < dist) {
-			dist = d;
-			best = cur;
-		}
-		d = (line >= top->line ? line - top->line : top->line - line);
-		if (d < dist) {
-			dist = d;
-			best = top;
-		}
-		p = pdup(best, "getto");
-		p_goto_bol(p);
-	}
-	while (line > p->line)
-		if (!pnextl(p))
-			break;
-	if (line < p->line) {
-		while (line < p->line)
-			pprevl(p);
-		p_goto_bol(p);
-	}
-	return p;
-}
+/* getto: owned by Zig `bwGetto` in src/bw_lgen.zig */
 
 /* Recenter cursor on vertical scroll if true */
 int opt_mid = 0;
@@ -427,11 +397,6 @@ int zig_c_bw_read_line(P *anchor, off_t line, unsigned char *buf, int buf_cap)
 	}
 	prm(tmp);
 	return ll;
-}
-
-P *zig_c_bw_getto(P *p, P *cur, P *top, off_t line)
-{
-	return getto(p, cur, top, line);
 }
 
 int zig_c_bw_lgen(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,

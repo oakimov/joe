@@ -33,7 +33,7 @@
 //! Non-paint helpers use `zig_bw_get_file_pos` / `zig_bw_set_file_pos` /
 //! `zig_bw_save_file_pos` / `zig_bw_load_file_pos` / `zig_bw_set_file_pos_all` /
 //! `zig_bw_vtmaster` / `zig_bw_ustat` / `zig_bw_ucrawlr` / `zig_bw_ucrawll` /
-//! `zig_bw_init_visiblews` (Zig-owned file_pos LRU + TW window walk; orphans via `set_file_pos_orphaned`).
+//! `zig_bw_init_visiblews` (Zig-owned file_pos LRU + TW walk/`vtmaster`; orphans via `set_file_pos_orphaned`).
 //! Feature 2.1 residual simple pipe substitute uses `zig_bw_table_simple`.
 //! Non-UTF-8 (byte) charmaps paint via `lgenLine` byte-mode.
 //! Thin C wrappers abort when a Zig export returns `-1` (OOM / oversize / hard fail).
@@ -3419,6 +3419,33 @@ const ScreenRec = extern struct {
     h: isize,
 };
 
+/// C `struct utf8_sm` (see `joe/utf8.h`).
+const Utf8SmRec = extern struct {
+    buf: [8]u8,
+    ptr: isize,
+    state: c_int,
+    accu: c_int,
+};
+
+/// C `struct vt_context` (see `joe/vt.h`); size-checked against live ABI.
+const VtRec = extern struct {
+    state: c_int,
+    buf: [1024]u8,
+    bufx: isize,
+    argv: [3]isize,
+    argc: isize,
+    top: ?*anyopaque,
+    height: isize,
+    width: isize,
+    regn_top: isize,
+    regn_bot: isize,
+    vtcur: ?*GapP,
+    b: ?*GapB,
+    kbd: ?*Kbd,
+    attr: c_int,
+    utf8_sm: Utf8SmRec,
+};
+
 comptime {
     if (@sizeOf(WinRec) != 200) @compileError("WinRec size mismatch");
     if (@sizeOf(BwRec) != 488) @compileError("BwRec size mismatch");
@@ -3426,6 +3453,8 @@ comptime {
     if (@sizeOf(GapP) != 112) @compileError("GapP size mismatch");
     if (@sizeOf(GapOptions) != 344) @compileError("GapOptions size mismatch");
     if (@sizeOf(ScreenRec) != 48) @compileError("ScreenRec size mismatch");
+    if (@sizeOf(Utf8SmRec) != 24) @compileError("Utf8SmRec size mismatch");
+    if (@sizeOf(VtRec) != 1168) @compileError("VtRec size mismatch");
 }
 
 extern fn zig_c_bw_orphit_impl(bw: ?*BW) void;
@@ -3589,7 +3618,6 @@ pub export fn zig_bw_calclincols(bw: ?*BW) c_int {
 
 const FILE = std.c.FILE;
 
-extern fn zig_c_bw_vtmaster_impl(t: ?*Screen, b: ?*B) ?*BW;
 extern fn zig_c_bw_ustat_impl(w: ?*W) c_int;
 extern fn zig_c_bw_wind_bw(w: ?*W, out: ?*?*BW) c_int;
 extern fn zig_c_bw_set_offset(w: ?*BW, off: i64) void;
@@ -3738,9 +3766,34 @@ pub export fn zig_bw_set_file_pos_all(t: ?*Screen) c_int {
 }
 
 /// Path A non-paint: VT/TW master BW for buffer `b`. Writes `*out` (may be null).
-pub export fn zig_bw_vtmaster(t: ?*Screen, b: ?*B, out: ?*?*BW) c_int {
-    if (t == null or b == null or out == null) return -1;
-    out.?.* = zig_c_bw_vtmaster_impl(t, b);
+pub export fn zig_bw_vtmaster(t: ?*Screen, b_in: ?*B, out: ?*?*BW) c_int {
+    if (t == null or b_in == null or out == null) return -1;
+    const screen = asScreen(t);
+    const b = asB(b_in);
+    var master: ?*BW = null;
+    var w = screen.topwin orelse {
+        out.?.* = null;
+        return 0;
+    };
+    const start = w;
+    while (true) {
+        if (w.watom == &watomtw and w.y != -1) {
+            if (w.object) |obj| {
+                const bw: *BwRec = @ptrCast(@alignCast(obj));
+                if (bw.b == b) {
+                    // C: (!b->vt || b->vt->vtcur->byte == bw->cursor->byte)
+                    const match = if (b.vt) |vt_ptr| blk: {
+                        const vt: *VtRec = @ptrCast(@alignCast(vt_ptr));
+                        break :blk vt.vtcur.?.byte == bw.cursor.?.byte;
+                    } else true;
+                    if (match) master = @ptrCast(bw);
+                }
+            }
+        }
+        w = w.link.next orelse break;
+        if (w == start) break;
+    }
+    out.?.* = master;
     return 0;
 }
 

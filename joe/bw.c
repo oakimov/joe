@@ -640,20 +640,7 @@ char *ustat_line;
 
 /* zig_c_bw_file_pos_all: owned by Zig `zig_bw_set_file_pos_all` */
 
-BW *zig_c_bw_vtmaster_impl(Screen *t, B *b)
-{
-	W *w = t->topwin;
-	BW *m = 0;
-	do {
-		if (w->watom == &watomtw) {
-			BW *bw = (BW *)w->object;
-			if (bw && w->y != -1 && bw->b == b && (!b->vt || b->vt->vtcur->byte == bw->cursor->byte))
-				m = bw;
-		}
-		w = w->link.next;
-	} while (w != t->topwin);
-	return m;
-}
+/* zig_c_bw_vtmaster_impl: owned by Zig `zig_bw_vtmaster` */
 
 int zig_c_bw_ustat_impl(W *w)
 {

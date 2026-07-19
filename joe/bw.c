@@ -748,102 +748,26 @@ BW *bwmk(W *window, B *b, int prompt)
 }
 
 
-/* Database of last file positions */
-
-#define MAX_FILE_POS 20 /* Maximum number of file positions we track */
-
-static struct file_pos {
-	LINK(struct file_pos) link;
-	char *name;
-	off_t line;
-} file_pos = { { &file_pos, &file_pos }, NULL, 0 };
-
-static int file_pos_count;
-
-static struct file_pos *find_file_pos(const char *name)
-{
-	struct file_pos *p;
-	for (p = file_pos.link.next; p != &file_pos; p = p->link.next)
-		if (!zcmp(p->name, name)) {
-			promote(struct file_pos,link,&file_pos,p);
-			return p;
-		}
-	p = (struct file_pos *)malloc(SIZEOF(struct file_pos));
-	p->name = zdup(name);
-	p->line = 0;
-	enquef(struct file_pos,link,&file_pos,p);
-	if (++file_pos_count == MAX_FILE_POS) {
-		free(deque_f(struct file_pos,link,file_pos.link.prev));
-		--file_pos_count;
-	}
-	return p;
-}
-
+/* restore_file_pos: Zig file_pos DB reads this global. */
 int restore_file_pos;
 
 char *ustat_line;
 
-/* Path A helpers for non-paint exports. Keep file_pos list + window walks in C. */
-off_t zig_c_bw_file_pos_get(const char *name)
-{
-	if (name && restore_file_pos) {
-		struct file_pos *p = find_file_pos(name);
-		return p->line;
-	}
-	return 0;
-}
-
-void zig_c_bw_file_pos_set(const char *name, off_t pos)
-{
-	if (name) {
-		struct file_pos *p = find_file_pos(name);
-		p->line = pos;
-	}
-}
-
-void zig_c_bw_file_pos_save(FILE *f)
-{
-	struct file_pos *p;
-	for (p = file_pos.link.prev; p != &file_pos; p = p->link.prev) {
-#ifdef HAVE_LONG_LONG
-		fprintf(f,"	%lld ",(long long)p->line);
-#else
-		fprintf(f,"	%ld ",(long)p->line);
-#endif
-		emit_string(f,p->name,zlen(p->name));
-		fprintf(f,"\n");
-	}
-	fprintf(f,"done\n");
-}
-
-void zig_c_bw_file_pos_load(FILE *f)
-{
-	char buf[1024];
-	while (fgets(buf,SIZEOF(buf)-1,f) && zcmp(buf,"done\n")) {
-		const char *p = buf;
-		off_t pos;
-		char name[1024];
-		parse_ws(&p,'#');
-		if (!parse_off_t(&p, &pos)) {
-			parse_ws(&p, '#');
-			if (parse_string(&p, name, SIZEOF(name)) > 0) {
-				/* Use C setter so gate-off and Zig paths share one list. */
-				zig_c_bw_file_pos_set(name, pos);
-			}
-		}
-	}
-}
-
+/* Path A: window walk for Zig-owned file_pos DB (+ orphaned buffers). */
 void zig_c_bw_file_pos_all(Screen *t)
 {
-	W *w = t->topwin;
+	W *w;
+	if (!t || !t->topwin)
+		return;
+	w = t->topwin;
 	do {
 		if (w->watom == &watomtw) {
 			BW *bw = (BW *)w->object;
-			zig_c_bw_file_pos_set(bw->b->name, bw->cursor->line);
+			if (bw && bw->b && bw->cursor)
+				zig_bw_set_file_pos(bw->b->name, bw->cursor->line);
 		}
 		w = w->link.next;
-	} while(w != t->topwin);
+	} while (w != t->topwin);
 	set_file_pos_orphaned();
 }
 

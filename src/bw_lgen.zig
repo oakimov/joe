@@ -29,14 +29,14 @@
 //! `-1`; `defatr` computed in Zig; dead prepare/hide/subst/urls/table/after
 //! bridges removed).
 //! Lifecycle uses `zig_bw_bwmove` / `zig_bw_bwresz` / `zig_bw_bwmk` / `zig_bw_bwrm` /
-//! `zig_bw_orphit` / `zig_bw_calclincols` (C fallback retained).
+//! `zig_bw_orphit` / `zig_bw_calclincols` (thin wrappers abort on Zig `-1`).
 //! Non-paint helpers use `zig_bw_get_file_pos` / `zig_bw_set_file_pos` /
 //! `zig_bw_save_file_pos` / `zig_bw_load_file_pos` / `zig_bw_set_file_pos_all` /
 //! `zig_bw_vtmaster` / `zig_bw_ustat` / `zig_bw_ucrawlr` / `zig_bw_ucrawll` /
-//! `zig_bw_init_visiblews` (C fallback retained).
+//! `zig_bw_init_visiblews` (Zig-owned file_pos LRU; C keeps TW window walk).
 //! Feature 2.1 residual simple pipe substitute uses `zig_bw_table_simple`.
 //! Non-UTF-8 (byte) charmaps paint via `lgenLine` byte-mode.
-//! Falls back to C only when a Zig export returns `-1` (OOM / oversize / hard fail).
+//! Thin C wrappers abort when a Zig export returns `-1` (OOM / oversize / hard fail).
 //!
 //! Hybrid `syntax.parse` fills `attr_buf` **per character** (`pgetc`); native
 //! `lgenLine` expects **per-byte** attrs — this bridge expands before paint.
@@ -3366,10 +3366,6 @@ pub export fn zig_bw_calclincols(bw: ?*BW) c_int {
 
 const FILE = std.c.FILE;
 
-extern fn zig_c_bw_file_pos_get(name: ?[*:0]const u8) i64;
-extern fn zig_c_bw_file_pos_set(name: ?[*:0]const u8, pos: i64) void;
-extern fn zig_c_bw_file_pos_save(f: ?*FILE) void;
-extern fn zig_c_bw_file_pos_load(f: ?*FILE) void;
 extern fn zig_c_bw_file_pos_all(t: ?*Screen) void;
 extern fn zig_c_bw_vtmaster_impl(t: ?*Screen, b: ?*B) ?*BW;
 extern fn zig_c_bw_ustat_impl(w: ?*W) c_int;
@@ -3380,31 +3376,117 @@ extern fn zig_c_bw_pcol(w: ?*BW, xcol: i64) void;
 extern fn zig_c_bw_updall() void;
 extern fn zig_c_bw_locale_utf8() c_int;
 extern fn zig_c_bw_from_uni(cp: c_int) c_int;
+extern fn zdup(s: [*:0]const u8) ?[*:0]u8;
+extern fn emit_string(f: ?*anyopaque, s: [*:0]const u8, len: isize) void;
+extern fn parse_ws(pp: *[*c]const u8, cmt: c_int) c_int;
+extern fn parse_off_t(pp: *[*c]const u8, buf: *i64) c_int;
+extern fn parse_string(pp: *[*c]const u8, buf: [*]u8, len: isize) isize;
+extern fn fprintf(f: ?*anyopaque, fmt: [*:0]const u8, ...) c_int;
+extern fn fgets(buf: [*]u8, len: c_int, f: ?*anyopaque) ?*anyopaque;
+extern var restore_file_pos: c_int;
+
+const max_file_pos: usize = 20;
+
+const FilePosEntry = struct {
+    name: [*:0]u8,
+    line: i64,
+};
+
+var file_pos_buf: [max_file_pos]FilePosEntry = undefined;
+var file_pos_len: usize = 0;
+
+fn filePosFreeEntry(e: FilePosEntry) void {
+    joe_free(@ptrCast(e.name));
+}
+
+fn filePosNameEq(a: [*:0]const u8, b: [*:0]const u8) bool {
+    return std.mem.orderZ(u8, a, b) == .eq;
+}
+
+/// Find or create an LRU entry. Index 0 = newest. Matches C: after insert, if
+/// length reaches `MAX_FILE_POS` (20), evict oldest (leaving 19).
+fn filePosFindOrCreate(name: [*:0]const u8) error{OutOfMemory}!usize {
+    var i: usize = 0;
+    while (i < file_pos_len) : (i += 1) {
+        if (filePosNameEq(file_pos_buf[i].name, name)) {
+            if (i != 0) {
+                const e = file_pos_buf[i];
+                var j = i;
+                while (j > 0) : (j -= 1) {
+                    file_pos_buf[j] = file_pos_buf[j - 1];
+                }
+                file_pos_buf[0] = e;
+            }
+            return 0;
+        }
+    }
+    const dup = zdup(name) orelse return error.OutOfMemory;
+    // Shift right; len is at most 19 before insert (eviction keeps it there).
+    var j = file_pos_len;
+    while (j > 0) : (j -= 1) {
+        file_pos_buf[j] = file_pos_buf[j - 1];
+    }
+    file_pos_buf[0] = .{ .name = @ptrCast(dup), .line = 0 };
+    file_pos_len += 1;
+    if (file_pos_len == max_file_pos) {
+        file_pos_len -= 1;
+        filePosFreeEntry(file_pos_buf[file_pos_len]);
+    }
+    return 0;
+}
 
 /// Path A non-paint: get restored file position. Writes `*out` and returns `0`, or `-1` fallback.
 pub export fn zig_bw_get_file_pos(name: ?[*:0]const u8, out: ?*i64) c_int {
     if (out == null) return -1;
-    out.?.* = zig_c_bw_file_pos_get(name);
+    out.?.* = 0;
+    const n = name orelse return 0;
+    if (restore_file_pos == 0) return 0;
+    const idx = filePosFindOrCreate(n) catch return -1;
+    out.?.* = file_pos_buf[idx].line;
     return 0;
 }
 
-/// Path A non-paint: set restored file position.
+/// Path A non-paint: set restored file position (Zig-owned LRU DB).
 pub export fn zig_bw_set_file_pos(name: ?[*:0]const u8, pos: i64) c_int {
-    zig_c_bw_file_pos_set(name, pos);
+    const n = name orelse return 0;
+    const idx = filePosFindOrCreate(n) catch return -1;
+    file_pos_buf[idx].line = pos;
     return 0;
 }
 
-/// Path A non-paint: save file-pos database.
+/// Path A non-paint: save file-pos database (oldest → newest, then `done`).
 pub export fn zig_bw_save_file_pos(f: ?*FILE) c_int {
-    if (f == null) return -1;
-    zig_c_bw_file_pos_save(f);
+    const fp = f orelse return -1;
+    var i = file_pos_len;
+    while (i > 0) {
+        i -= 1;
+        const e = file_pos_buf[i];
+        _ = fprintf(@ptrCast(fp), "\t%lld ", @as(c_longlong, @intCast(e.line)));
+        emit_string(@ptrCast(fp), e.name, @intCast(std.mem.len(e.name)));
+        _ = fprintf(@ptrCast(fp), "\n");
+    }
+    _ = fprintf(@ptrCast(fp), "done\n");
     return 0;
 }
 
-/// Path A non-paint: load file-pos database.
+/// Path A non-paint: load file-pos database until `done`.
 pub export fn zig_bw_load_file_pos(f: ?*FILE) c_int {
-    if (f == null) return -1;
-    zig_c_bw_file_pos_load(f);
+    const fp = f orelse return -1;
+    var buf: [1024]u8 = undefined;
+    while (fgets(@ptrCast(&buf), @intCast(buf.len - 1), @ptrCast(fp)) != null) {
+        const line = std.mem.sliceTo(@as([*:0]u8, @ptrCast(&buf)), 0);
+        if (std.mem.eql(u8, line, "done\n")) break;
+        var p: [*c]const u8 = @ptrCast(&buf);
+        _ = parse_ws(&p, '#');
+        var pos: i64 = 0;
+        if (parse_off_t(&p, &pos) == 0) {
+            _ = parse_ws(&p, '#');
+            var name_buf: [1024]u8 = undefined;
+            if (parse_string(&p, &name_buf, name_buf.len) > 0) {
+                _ = zig_bw_set_file_pos(@ptrCast(&name_buf), pos);
+            }
+        }
+    }
     return 0;
 }
 

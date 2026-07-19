@@ -834,6 +834,7 @@ The build is always working — start with a binary that compiles and runs, then
 - ✅ Path A mark-setup port: deleted `zig_c_bw_bwgen_setup` / `zig_c_bw_bwgenh_setup`; Zig `bwgenSetup`/`bwgenhSetup` own errbuf/mark/square/dirty-updtab (+ lattr/viewmode for text); thin C accessors `zig_c_bw_{ensure_lattr_db,sync_viewmode,get_err,same_buf,is_maint_cur}`; soak **197/197**; `joe/bw.c` ~1054 lines
 - ✅ Path A file_pos LRU port: Zig owns `file_pos_buf`/`filePosFindOrCreate` + get/set/save/load; deleted C `find_file_pos` list + `zig_c_bw_file_pos_{get,set,save,load}`; C keeps only `zig_c_bw_file_pos_all` (TW walk + `set_file_pos_orphaned`); soak **196/196**; `joe/bw.c` ~978 lines
 - ✅ Path A `getto` port: Zig `bwGetto` owns line navigation (pdup closer of cur/top + pnextl/pprevl); deleted C `getto` + `zig_c_bw_getto`; soak **196/196**; `joe/bw.c` ~943 lines
+- ✅ Path A `read_line` port: Zig `bwReadLine` owns table-scan line reads; deleted C `zig_c_bw_read_line` + unused VIEWMODE caps; soak **196/196**; `joe/bw.c` ~914 lines
 - At this point: fully functional editor with markdown viewmode
 
 ### Phase 7: File I/O & Commands (3-4 weeks) — NOT STARTED

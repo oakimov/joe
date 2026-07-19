@@ -196,10 +196,6 @@ static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, pt
 
 /* Path A owns viewmode tables in Zig (`zig_bw_vm_*`). */
 
-/* Caps used by `zig_c_bw_read_line` to avoid OOM on huge lines. */
-#define VIEWMODE_MAX_LINE_BYTES (1024 * 1024)
-#define VIEWMODE_TABLE_SCAN_MAX_BYTES (16 * 1024)
-
 off_t viewmode_display_col(off_t buf_line, off_t buf_offset)
 {
 	return zig_bw_vm_display_col(buf_line, buf_offset);
@@ -371,33 +367,7 @@ off_t zig_c_bw_eof_line(P *p)
 	return (p && p->b && p->b->eof) ? p->b->eof->line : -1;
 }
 
-/* Read line `line` (no newline) into buf. Returns len, -2 if too long, -1 on error. */
-int zig_c_bw_read_line(P *anchor, off_t line, unsigned char *buf, int buf_cap)
-{
-	P *tmp;
-	int ll = 0;
-	int ch;
-
-	if (!anchor || !anchor->b || !buf || buf_cap <= 0 || line < 0)
-		return -1;
-	if (!anchor->b->eof || line > anchor->b->eof->line)
-		return -1;
-
-	tmp = pdup(anchor, "zig_c_bw_read_line");
-	if (!tmp)
-		return -1;
-	pline(tmp, line);
-	p_goto_bol(tmp);
-	while ((ch = pgetb(tmp)) != NO_MORE_DATA && ch != '\n') {
-		if (ll >= VIEWMODE_TABLE_SCAN_MAX_BYTES || ll >= buf_cap) {
-			prm(tmp);
-			return -2;
-		}
-		buf[ll++] = (unsigned char)ch;
-	}
-	prm(tmp);
-	return ll;
-}
+/* zig_c_bw_read_line: owned by Zig `bwReadLine` */
 
 int zig_c_bw_lgen(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
 	ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,

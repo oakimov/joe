@@ -134,7 +134,26 @@ extern fn genfield(
 extern fn zig_c_bw_pbyte(p: ?*P) i64;
 extern fn zig_c_bw_eof_line(p: ?*P) i64;
 /// Read buffer line into `buf` (no newline). Returns len, -2 if too long, -1 on error/EOF-past.
-extern fn zig_c_bw_read_line(anchor: ?*P, line: i64, buf: ?[*]u8, buf_cap: c_int) c_int;
+/// Matches C `zig_c_bw_read_line` / `VIEWMODE_TABLE_SCAN_MAX_BYTES` (16KiB) hard cap.
+fn bwReadLine(anchor: ?*P, line: i64, buf: ?[*]u8, buf_cap: c_int) c_int {
+    const scan_max: c_int = 16 * 1024;
+    if (anchor == null or buf == null or buf_cap <= 0 or line < 0) return -1;
+    const eof = zig_c_bw_eof_line(anchor);
+    if (eof < 0 or line > eof) return -1;
+    const tmp = pdup(anchor, "zig_c_bw_read_line") orelse return -1;
+    defer prm(tmp);
+    zig_c_bw_pline(tmp, line);
+    zig_c_bw_p_goto_bol(tmp);
+    var ll: c_int = 0;
+    while (true) {
+        const ch = pgetb(tmp);
+        if (ch == NO_MORE_DATA or ch == '\n') break;
+        if (ll >= scan_max or ll >= buf_cap) return -2;
+        buf.?[@intCast(ll)] = @intCast(ch);
+        ll += 1;
+    }
+    return ll;
+}
 extern fn zig_c_bw_pline_no(p: ?*P) i64;
 extern fn zig_c_bw_pxcol(p: ?*P) i64;
 extern fn zig_c_bw_set_xcol(p: ?*P, xcol: i64) void;
@@ -300,7 +319,7 @@ pub export fn zig_bw_table_detect(
     var li: i64 = back_lim;
     while (li <= fwd_lim) : (li += 1) {
         var tmp: [16 * 1024]u8 = undefined;
-        const rc = zig_c_bw_read_line(anchor, li, &tmp, @intCast(tmp.len));
+        const rc = bwReadLine(anchor, li, &tmp, @intCast(tmp.len));
         const slice: []const u8 = blk: {
             if (rc == -2) {
                 // Too long: not a table line (breaks regions), store non-pipe marker.

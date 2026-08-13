@@ -33,7 +33,7 @@
 //! Non-paint helpers use `zig_bw_get_file_pos` / `zig_bw_set_file_pos` /
 //! `zig_bw_save_file_pos` / `zig_bw_load_file_pos` / `zig_bw_set_file_pos_all` /
 //! `zig_bw_vtmaster` / `zig_bw_ustat` / `zig_bw_ucrawlr` / `zig_bw_ucrawll` /
-//! `zig_bw_init_visiblews` (Zig-owned file_pos LRU + TW walk/`vtmaster`; orphans via `set_file_pos_orphaned`).
+//! `zig_bw_init_visiblews` (Zig-owned file_pos LRU + TW walk/`vtmaster`/`ustat`/`windBw`; orphans via `set_file_pos_orphaned`).
 //! Feature 2.1 residual simple pipe substitute uses `zig_bw_table_simple`.
 //! Non-UTF-8 (byte) charmaps paint via `lgenLine` byte-mode.
 //! Thin C wrappers abort when a Zig export returns `-1` (OOM / oversize / hard fail).
@@ -3345,7 +3345,24 @@ const GapOptions = gap_types.OPTIONS;
 
 const Kbd = opaque {};
 const Kmap = opaque {};
-const Watom = opaque {};
+
+const TYPETW: c_int = 0x0100;
+const TYPEPW: c_int = 0x0200;
+
+/// C `struct watom` (see `joe/w.h`); only `what` is read here.
+const Watom = extern struct {
+    context: ?*anyopaque,
+    disp: ?*anyopaque,
+    follow: ?*anyopaque,
+    abort: ?*anyopaque,
+    rtn: ?*anyopaque,
+    type: ?*anyopaque,
+    resize: ?*anyopaque,
+    move: ?*anyopaque,
+    ins: ?*anyopaque,
+    del: ?*anyopaque,
+    what: c_int,
+};
 
 const WinLink = extern struct {
     next: ?*WinRec,
@@ -3456,6 +3473,7 @@ comptime {
     if (@sizeOf(ScreenRec) != 48) @compileError("ScreenRec size mismatch");
     if (@sizeOf(Utf8SmRec) != 24) @compileError("Utf8SmRec size mismatch");
     if (@sizeOf(VtRec) != 1168) @compileError("VtRec size mismatch");
+    if (@sizeOf(Watom) != 88) @compileError("Watom size mismatch");
 }
 
 extern var staen: c_int;
@@ -3651,8 +3669,10 @@ pub export fn zig_bw_calclincols(bw: ?*BW) c_int {
 
 const FILE = std.c.FILE;
 
-extern fn zig_c_bw_ustat_impl(w: ?*W) c_int;
-extern fn zig_c_bw_wind_bw(w: ?*W, out: ?*?*BW) c_int;
+extern var ustat_line: [*c]u8;
+extern fn brch(p: ?*P) c_int;
+extern fn stagen(stalin: [*c]u8, bw: ?*BW, s: [*:0]const u8, fill: u8) [*c]u8;
+extern fn msgnw(w: ?*W, s: [*c]const u8) void;
 extern fn zig_c_bw_set_offset(w: ?*BW, off: i64) void;
 extern fn zig_c_bw_get_cursor_xcol(w: ?*BW) i64;
 extern fn zig_c_bw_pcol(w: ?*BW, xcol: i64) void;
@@ -3830,11 +3850,39 @@ pub export fn zig_bw_vtmaster(t: ?*Screen, b_in: ?*B, out: ?*?*BW) c_int {
     return 0;
 }
 
+/// JOE `WIND_BW`: require TW/PW window and return its BW object.
+fn windBw(w_in: ?*W) ?*BW {
+    if (w_in == null) return null;
+    const win = asWin(w_in);
+    const wa = win.watom orelse return null;
+    if ((wa.what & (TYPETW | TYPEPW)) == 0) return null;
+    return @ptrCast(win.object);
+}
+
+/// JOE `ustat` body: format status message for current BW and show via `msgnw`.
+fn bwUstat(w_in: ?*W) c_int {
+    const bw_ptr = windBw(w_in) orelse return -1;
+    const bw = asBw(bw_ptr);
+    const c = brch(@ptrCast(bw.cursor));
+    const msg: [*:0]const u8 = if (c == NO_MORE_DATA) blk: {
+        if (bw.o.zmsg) |m| break :blk @ptrCast(m);
+        break :blk "** Line %r Col %c Offset %o(0x%O) **";
+    } else blk: {
+        if (bw.o.smsg) |m| break :blk @ptrCast(m);
+        break :blk "** Line %r Col %c Offset %o(0x%O) %e %a(0x%A) Width %w **";
+    };
+    const msg_len = std.mem.len(msg);
+    const fill: u8 = if (msg_len != 0) msg[msg_len - 1] else ' ';
+    ustat_line = stagen(ustat_line, bw_ptr, msg, fill);
+    msgnw(@ptrCast(bw.parent), ustat_line);
+    return 0;
+}
+
 /// Path A non-paint: status-line command. Writes command rc to `*out_rc`.
 pub export fn zig_bw_ustat(w: ?*W, k: c_int, out_rc: ?*c_int) c_int {
     _ = k;
     if (w == null or out_rc == null) return -1;
-    out_rc.?.* = zig_c_bw_ustat_impl(w);
+    out_rc.?.* = bwUstat(w);
     return 0;
 }
 
@@ -3842,8 +3890,8 @@ pub export fn zig_bw_ustat(w: ?*W, k: c_int, out_rc: ?*c_int) c_int {
 pub export fn zig_bw_ucrawlr(w: ?*W, k: c_int, out_rc: ?*c_int) c_int {
     _ = k;
     if (w == null or out_rc == null) return -1;
-    var bw: ?*BW = null;
-    if (zig_c_bw_wind_bw(w, &bw) < 0) {
+    const bw = windBw(w);
+    if (bw == null) {
         out_rc.?.* = -1;
         return 0;
     }
@@ -3869,8 +3917,8 @@ pub export fn zig_bw_ucrawlr(w: ?*W, k: c_int, out_rc: ?*c_int) c_int {
 pub export fn zig_bw_ucrawll(w: ?*W, k: c_int, out_rc: ?*c_int) c_int {
     _ = k;
     if (w == null or out_rc == null) return -1;
-    var bw: ?*BW = null;
-    if (zig_c_bw_wind_bw(w, &bw) < 0) {
+    const bw = windBw(w);
+    if (bw == null) {
         out_rc.?.* = -1;
         return 0;
     }

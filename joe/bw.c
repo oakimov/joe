@@ -615,35 +615,7 @@ char *ustat_line;
 
 /* zig_c_bw_vtmaster_impl: owned by Zig `zig_bw_vtmaster` */
 
-int zig_c_bw_ustat_impl(W *w)
-{
-	BW *bw;
-	int c;
-	const char *msg;
-	WIND_BW(bw, w);
-	c = brch(bw->cursor);
-
-	if (c == NO_MORE_DATA) {
-		if (bw->o.zmsg) msg = bw->o.zmsg;
-		else msg = "** Line %r Col %c Offset %o(0x%O) **";
-	} else {
-		if (bw->o.smsg) msg = bw->o.smsg;
-		else msg = "** Line %r Col %c Offset %o(0x%O) %e %a(0x%A) Width %w **";
-	}
-
-	ustat_line = stagen(ustat_line, bw, msg, (char)(zlen(msg) ? msg[zlen(msg) - 1] : ' '));
-	msgnw(bw->parent, ustat_line);
-	return 0;
-}
-
-int zig_c_bw_wind_bw(W *w, BW **out)
-{
-	if (!w || !out) return -1;
-	if (!(w->watom->what & (TYPETW | TYPEPW)))
-		return -1;
-	*out = (BW *)w->object;
-	return 0;
-}
+/* zig_c_bw_ustat_impl / zig_c_bw_wind_bw: owned by Zig `bwUstat`/`windBw` */
 
 ptrdiff_t zig_c_bw_get_w(BW *w) { return w ? w->w : 0; }
 off_t zig_c_bw_get_offset(BW *w) { return w ? w->offset : 0; }

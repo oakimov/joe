@@ -148,17 +148,7 @@ void bwfllw(W *w)
    If the state is not known, it is computed and the state for all
    of the remaining lines of the window are also recalculated. */
 
-static HIGHLIGHT_STATE get_highlight_state(BW *w, P *p, off_t line)
-{
-	HIGHLIGHT_STATE state;
-
-	if(!w->o.highlight || !w->o.syntax) {
-		invalidate_state(&state);
-		return state;
-	}
-
-	return lattr_get(w->db, w->o.syntax, p, line); /* FIXME: lattr database should be a in vfile */
-}
+/* get_highlight_state: owned by Zig `zig_c_bw_get_highlight_state` */
 
 /* Scroll a buffer window after an insert occurred.  'flg' is set to 1 if
  * the first line was split
@@ -281,55 +271,17 @@ void bwgenh(BW *w)
 
 /* C helpers for Zig Path A `zig_bw_bwgen` / `zig_bw_bwgenh` / follow.
  * Typed BW/W/P field accessors + resize owned by Zig. */
-int zig_c_bw_pisbol(P *p)
-{
-	return p ? pisbol(p) : 1;
-}
 
-void zig_c_bw_p_goto_bol(P *p)
-{
-	if (p)
-		p_goto_bol(p);
-}
 
-void zig_c_bw_pset(P *d, P *s)
-{
-	if (d && s)
-		pset(d, s);
-}
 
-void zig_c_bw_pline(P *p, off_t line)
-{
-	if (p)
-		pline(p, line);
-}
 
-void zig_c_bw_pgoto(P *p, off_t loc)
-{
-	if (p)
-		pgoto(p, loc);
-}
 
-void zig_c_bw_pbkwd(P *p, off_t n)
-{
-	if (p)
-		pbkwd(p, n);
-}
 
-void zig_c_bw_nscrldn(SCRN *t, ptrdiff_t top, ptrdiff_t bot, ptrdiff_t amnt)
-{
-	nscrldn(t, top, bot, amnt);
-}
 
-void zig_c_bw_nscrlup(SCRN *t, ptrdiff_t top, ptrdiff_t bot, ptrdiff_t amnt)
-{
-	nscrlup(t, top, bot, amnt);
-}
 
-void zig_c_bw_msetI(int *dest, int c, ptrdiff_t sz)
-{
-	msetI(dest, c, sz);
-}
+
+/* Remaining C bridges: viewmode dispatch for lgen/gennum only.
+ * P-nav/SCRN/lattr/locale helpers owned by Zig. */
 
 /* zig_c_bw_read_line: owned by Zig `bwReadLine` */
 
@@ -346,21 +298,10 @@ void zig_c_bw_gennum(BW *w, int (*screen)[COMPOSE], int *attr, SCRN *t,
 	gennum(w, screen, attr, t, y, comp);
 }
 
-HIGHLIGHT_STATE zig_c_bw_get_highlight_state(BW *w, P *p, off_t line)
-{
-	return get_highlight_state(w, p, line);
-}
 
 /* Path A helpers for zig_bw_lgen_view_entry / bwgen entry.
  * Zig owns viewmode tables (`zig_bw_vm_*`). `lgen_core` is Zig-entry-only. */
 
-int *zig_c_bw_get_palette(SCRN *t, int *out_len)
-{
-	if (out_len) *out_len = 0;
-	if (!t || !t->palette) return NULL;
-	if (out_len) *out_len = 256;
-	return t->palette;
-}
 
 /* zig_c_bw_alloc / zig_c_bw_mk_init: owned by Zig `bwMkInit` */
 
@@ -369,43 +310,11 @@ int *zig_c_bw_get_palette(SCRN *t, int *out_len)
 /* Typed BW/W/P field accessors + resize: owned by Zig (see src/bw_lgen.zig). */
 
 /* Path A field helpers for Zig-owned bwgen/bwgenh mark setup. */
-void zig_c_bw_ensure_lattr_db(BW *w)
-{
-	if (!w)
-		return;
-	if (w->o.highlight && w->o.syntax && (!w->db || w->db->syn != w->o.syntax))
-		w->db = find_lattr_db(w->b, w->o.syntax);
-}
 
-void zig_c_bw_sync_viewmode(BW *w)
-{
-	if (!w || !w->t || !w->t->t)
-		return;
-	if (w->o.viewmode != w->last_viewmode) {
-		scrn_invalidate(w->t->t);
-		w->last_viewmode = w->o.viewmode;
-	}
-}
 
-int (*zig_c_bw_scrn_cells(SCRN *t))[COMPOSE]
-{
-	return t ? t->scrn : NULL;
-}
 
-int *zig_c_bw_scrn_attr(SCRN *t)
-{
-	return t ? t->attr : NULL;
-}
 
-int *zig_c_bw_scrn_updtab(SCRN *t)
-{
-	return t ? t->updtab : NULL;
-}
 
-int *zig_c_bw_scrn_compose(SCRN *t)
-{
-	return t ? t->compose : NULL;
-}
 
 void bwgen(BW *w, int linums, int linchg)
 {
@@ -455,22 +364,8 @@ char *ustat_line;
 
 /* zig_c_bw_ustat_impl / zig_c_bw_wind_bw: owned by Zig `bwUstat`/`windBw` */
 
-void zig_c_bw_pcol(BW *w, off_t xcol)
-{
-	if (w && w->cursor)
-		pcol(w->cursor, xcol);
-}
-void zig_c_bw_updall(void) { updall(); }
 
-int zig_c_bw_locale_utf8(void)
-{
-	return (locale_map && locale_map->type) ? 1 : 0;
-}
 
-int zig_c_bw_from_uni(int cp)
-{
-	return locale_map ? from_uni(locale_map, cp) : -1;
-}
 
 off_t get_file_pos(const char *name)
 {

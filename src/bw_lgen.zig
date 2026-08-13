@@ -33,7 +33,7 @@
 //! Non-paint helpers use `zig_bw_get_file_pos` / `zig_bw_set_file_pos` /
 //! `zig_bw_save_file_pos` / `zig_bw_load_file_pos` / `zig_bw_set_file_pos_all` /
 //! `zig_bw_vtmaster` / `zig_bw_ustat` / `zig_bw_ucrawlr` / `zig_bw_ucrawll` /
-//! `zig_bw_init_visiblews` (Zig-owned file_pos LRU + TW walk/`vtmaster`/`ustat`/`windBw` + typed BW/W/P field accessors + resize; orphans via `set_file_pos_orphaned`).
+//! `zig_bw_init_visiblews` (Zig-owned file_pos LRU + TW walk/`vtmaster`/`ustat`/`windBw` + typed BW/W/P/SCRN accessors + resize + P-nav/lattr helpers; orphans via `set_file_pos_orphaned`).
 //! Feature 2.1 residual simple pipe substitute uses `zig_bw_table_simple`.
 //! Non-UTF-8 (byte) charmaps paint via `lgenLine` byte-mode.
 //! Thin C wrappers abort when a Zig export returns `-1` (OOM / oversize / hard fail).
@@ -153,16 +153,7 @@ fn bwReadLine(anchor: ?*P, line: i64, buf: ?[*]u8, buf_cap: c_int) c_int {
     }
     return ll;
 }
-extern fn zig_c_bw_pisbol(p: ?*P) c_int;
-extern fn zig_c_bw_p_goto_bol(p: ?*P) void;
-extern fn zig_c_bw_pset(d: ?*P, s: ?*P) void;
-extern fn zig_c_bw_pline(p: ?*P, line: i64) void;
-extern fn zig_c_bw_pgoto(p: ?*P, loc: i64) void;
-extern fn zig_c_bw_pbkwd(p: ?*P, n: i64) void;
 extern fn pprevl(p: ?*P) ?*P;
-extern fn zig_c_bw_nscrldn(t: ?*SCRN, top: isize, bot: isize, amnt: isize) void;
-extern fn zig_c_bw_nscrlup(t: ?*SCRN, top: isize, bot: isize, amnt: isize) void;
-extern fn zig_c_bw_msetI(dest: ?[*]c_int, c: c_int, sz: isize) void;
 extern var opt_mid: c_int;
 extern var opt_left: c_int;
 extern var opt_right: c_int;
@@ -1450,7 +1441,6 @@ pub export fn zig_bw_vm_cleanup() void {
     vm_last_bw = null;
 }
 
-extern fn zig_c_bw_get_palette(t: ?*SCRN, out_len: ?*c_int) ?[*]c_int;
 
 
 // Match C bg_* / curlinmask (BG_COLOR is identity in scrn.h).
@@ -1815,7 +1805,6 @@ extern fn zig_c_bw_gennum(
     y: isize,
     compose: ?[*]c_int,
 ) void;
-extern fn zig_c_bw_get_highlight_state(w: ?*BW, p: ?*P, line: i64) HighlightState;
 /// JOE `bwgen` paint loops → Zig `bwGetto` / C `gennum` / `lgen`.
 ///
 /// Prefer `zig_bw_bwgen_entry` for full setup+loops+cursor. This owns the two
@@ -1958,12 +1947,6 @@ fn paintOneRow(ctx: anytype, y: isize, p_in: ?*P) ?*P {
 }
 
 
-extern fn zig_c_bw_ensure_lattr_db(w: ?*BW) void;
-extern fn zig_c_bw_sync_viewmode(w: ?*BW) void;
-extern fn zig_c_bw_scrn_cells(t: ?*SCRN) ?[*][COMPOSE]c_int;
-extern fn zig_c_bw_scrn_attr(t: ?*SCRN) ?[*]c_int;
-extern fn zig_c_bw_scrn_updtab(t: ?*SCRN) ?[*]c_int;
-extern fn zig_c_bw_scrn_compose(t: ?*SCRN) ?[*]c_int;
 
 extern fn markv(r: c_int) c_int;
 extern var markb: ?*P;
@@ -3638,6 +3621,121 @@ fn zig_c_bw_resz_vt_if_master(bw: ?*BW, wi: isize, he: isize) void {
     ttstsz(b.out, wi, he);
 }
 
+const ScrnRec = @import("scrn.zig").SCRN;
+fn asScrn(t: ?*SCRN) *ScrnRec {
+    return @ptrCast(@alignCast(t.?));
+}
+
+const LattrDb = extern struct {
+    next: ?*LattrDb,
+    syn: ?*anyopaque,
+};
+
+extern fn pisbol(p: ?*P) c_int;
+extern fn p_goto_bol(p: ?*P) ?*P;
+extern fn pset(d: ?*P, s: ?*P) ?*P;
+extern fn pline(p: ?*P, line: i64) ?*P;
+extern fn pgoto(p: ?*P, loc: i64) ?*P;
+extern fn pbkwd(p: ?*P, n: i64) ?*P;
+extern fn pcol(p: ?*P, goalcol: i64) ?*P;
+extern fn nscrldn(t: ?*SCRN, top: isize, bot: isize, amnt: isize) void;
+extern fn nscrlup(t: ?*SCRN, top: isize, bot: isize, amnt: isize) void;
+extern fn msetI(dest: ?*anyopaque, c: c_int, sz: isize) ?*anyopaque;
+extern fn updall() void;
+extern fn scrn_invalidate(t: ?*SCRN) void;
+extern fn find_lattr_db(b: ?*B, y: ?*anyopaque) ?*LattrDb;
+extern fn lattr_get(db: ?*anyopaque, syn: ?*anyopaque, p: ?*P, line: isize) HighlightState;
+extern var locale_map: ?*Charmap;
+extern fn from_uni(cset: ?*Charmap, c: c_int) c_int;
+
+fn zig_c_bw_pisbol(p: ?*P) c_int {
+    return if (p != null) pisbol(p) else 1;
+}
+fn zig_c_bw_p_goto_bol(p: ?*P) void {
+    if (p != null) _ = p_goto_bol(p);
+}
+fn zig_c_bw_pset(d: ?*P, s: ?*P) void {
+    if (d != null and s != null) _ = pset(d, s);
+}
+fn zig_c_bw_pline(p: ?*P, line: i64) void {
+    if (p != null) _ = pline(p, line);
+}
+fn zig_c_bw_pgoto(p: ?*P, loc: i64) void {
+    if (p != null) _ = pgoto(p, loc);
+}
+fn zig_c_bw_pbkwd(p: ?*P, n: i64) void {
+    if (p != null) _ = pbkwd(p, n);
+}
+fn zig_c_bw_pcol(w: ?*BW, xcol: i64) void {
+    if (w == null) return;
+    if (asBw(w).cursor) |cur| _ = pcol(@ptrCast(cur), xcol);
+}
+fn zig_c_bw_nscrldn(t: ?*SCRN, top: isize, bot: isize, amnt: isize) void {
+    nscrldn(t, top, bot, amnt);
+}
+fn zig_c_bw_nscrlup(t: ?*SCRN, top: isize, bot: isize, amnt: isize) void {
+    nscrlup(t, top, bot, amnt);
+}
+fn zig_c_bw_msetI(dest: ?[*]c_int, c: c_int, sz: isize) void {
+    _ = msetI(@ptrCast(dest), c, sz);
+}
+fn zig_c_bw_updall() void {
+    updall();
+}
+fn zig_c_bw_scrn_cells(t: ?*SCRN) ?[*][COMPOSE]c_int {
+    return if (t) |tt| @ptrCast(asScrn(tt).scrn) else null;
+}
+fn zig_c_bw_scrn_attr(t: ?*SCRN) ?[*]c_int {
+    return if (t) |tt| asScrn(tt).attr else null;
+}
+fn zig_c_bw_scrn_updtab(t: ?*SCRN) ?[*]c_int {
+    return if (t) |tt| asScrn(tt).updtab else null;
+}
+fn zig_c_bw_scrn_compose(t: ?*SCRN) ?[*]c_int {
+    return if (t) |tt| asScrn(tt).compose else null;
+}
+fn zig_c_bw_get_palette(t: ?*SCRN, out_len: ?*c_int) ?[*]c_int {
+    if (out_len) |ol| ol.* = 0;
+    if (t == null) return null;
+    const pal = asScrn(t).palette;
+    if (pal == null) return null;
+    if (out_len) |ol| ol.* = 256;
+    return pal;
+}
+fn zig_c_bw_ensure_lattr_db(w: ?*BW) void {
+    if (w == null) return;
+    const bw = asBw(w);
+    if (bw.o.highlight == 0 or bw.o.syntax == null) return;
+    const need = if (bw.db) |db_ptr| blk: {
+        const db: *LattrDb = @ptrCast(@alignCast(db_ptr));
+        break :blk db.syn != bw.o.syntax;
+    } else true;
+    if (need) bw.db = @ptrCast(find_lattr_db(@ptrCast(bw.b), bw.o.syntax));
+}
+fn zig_c_bw_sync_viewmode(w: ?*BW) void {
+    if (w == null) return;
+    const bw = asBw(w);
+    const scrn = zig_c_bw_get_scrn(w) orelse return;
+    if (bw.o.viewmode != bw.last_viewmode) {
+        scrn_invalidate(scrn);
+        bw.last_viewmode = bw.o.viewmode;
+    }
+}
+fn zig_c_bw_get_highlight_state(w: ?*BW, p: ?*P, line: i64) HighlightState {
+    const invalid = HighlightState{ .stack = null, .delim_stack = null, .saved_s = null, .state = -1 };
+    if (w == null) return invalid;
+    const bw = asBw(w);
+    if (bw.o.highlight == 0 or bw.o.syntax == null) return invalid;
+    return lattr_get(bw.db, bw.o.syntax, p, @intCast(line));
+}
+fn zig_c_bw_locale_utf8() c_int {
+    const lm = locale_map orelse return 0;
+    return if (lm.@"type" != 0) 1 else 0;
+}
+fn zig_c_bw_from_uni(cp: c_int) c_int {
+    return if (locale_map) |lm| from_uni(lm, cp) else -1;
+}
+
 extern var watomtw: Watom;
 extern fn set_file_pos_orphaned() void;
 
@@ -3811,10 +3909,6 @@ extern var ustat_line: [*c]u8;
 extern fn brch(p: ?*P) c_int;
 extern fn stagen(stalin: [*c]u8, bw: ?*BW, s: [*:0]const u8, fill: u8) [*c]u8;
 extern fn msgnw(w: ?*W, s: [*c]const u8) void;
-extern fn zig_c_bw_pcol(w: ?*BW, xcol: i64) void;
-extern fn zig_c_bw_updall() void;
-extern fn zig_c_bw_locale_utf8() c_int;
-extern fn zig_c_bw_from_uni(cp: c_int) c_int;
 extern fn zdup(s: [*:0]const u8) ?[*:0]u8;
 extern fn emit_string(f: ?*anyopaque, s: [*:0]const u8, len: isize) void;
 extern fn parse_ws(pp: *[*c]const u8, cmt: c_int) c_int;

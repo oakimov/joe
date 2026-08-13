@@ -41,7 +41,7 @@ pub fn build(b: *std.Build) void {
     terminal_mod.addLibraryPath(.{ .cwd_relative = "/opt/local/lib" });
 
     // ── Zig-native rendering pipeline (Phase 6) ─────────────────
-    // Parallel to `joe/bw.c` lgen/bwgen; not wired into live joe yet.
+    // Native render pipeline (parallel Path A lives in bw_lgen.zig).
     const render_mod = b.createModule(.{
         .root_source_file = b.path("src/render/root.zig"),
         .target = target,
@@ -87,7 +87,7 @@ pub fn build(b: *std.Build) void {
         .files = &.{
             // REMOVED: joe/b.c — replaced by src/gapbuffer.zig
             // REMOVED: joe/blocks.c — replaced by src/blocks.zig
-            "joe/bw.c",
+            // REMOVED: joe/bw.c — replaced by src/bw_lgen.zig JOE bw.h ABI exports
             // REMOVED: joe/cmd.c — replaced by src/cmd.zig
             // REMOVED: joe/hash.c — replaced by src/hash.zig
             "joe/help.c",

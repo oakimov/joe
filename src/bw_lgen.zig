@@ -1,3 +1,4 @@
+//! Always-on live bridge + JOE `bw.h` C ABI exports.
 //! Gated live bridge: JOE `lgen_core` / Feature 2.2 table rows / `gennum` → Zig paint.
 //!
 //! Path A is always on: plain buffer lines
@@ -94,10 +95,14 @@ const HighlightState = extern struct {
 
 extern var attr_buf: [*c]c_int;
 extern var attr_size: c_int;
-extern var vwsatr: c_int;
-extern var vspace: c_int;
-extern var vtab: c_int;
-extern var vrtn: c_int;
+export var vwsatr: c_int = DIM;
+export var vspace: c_int = 0;
+export var vtab: c_int = 0;
+export var vrtn: c_int = 0;
+export var selectatr: c_int = INVERSE;
+export var selectmask: c_int = ~INVERSE;
+export var vwsmask: c_int = ~(DIM | FG_MASK);
+export var dspasis: c_int = 0;
 
 extern fn parse(syntax: ?*HighSyntax, line: ?*P, h_state: HighlightState, charmap: ?*Charmap) HighlightState;
 extern fn pdup(p: ?*P, tr: [*:0]const u8) ?*P;
@@ -154,9 +159,9 @@ fn bwReadLine(anchor: ?*P, line: i64, buf: ?[*]u8, buf_cap: c_int) c_int {
     return ll;
 }
 extern fn pprevl(p: ?*P) ?*P;
-extern var opt_mid: c_int;
-extern var opt_left: c_int;
-extern var opt_right: c_int;
+export var opt_mid: c_int = 0;
+export var opt_left: c_int = 8;
+export var opt_right: c_int = 8;
 
 /// JOE `getto`: move/allocate a `P` to bol of `line`.
 /// When `p_in` is null, pdup the closer of `cur`/`top` (by line distance).
@@ -1445,11 +1450,11 @@ pub export fn zig_bw_vm_cleanup() void {
 
 // Match C bg_* / curlinmask (BG_COLOR is identity in scrn.h).
 extern var bg_text: c_int;
-extern var bg_curlin: c_int;
-extern var bg_linum: c_int;
-extern var bg_curlinum: c_int;
+export var bg_curlin: c_int = 0;
+export var bg_linum: c_int = 0;
+export var bg_curlinum: c_int = 0;
 extern var bg_cursor: c_int;
-extern var curlinmask: c_int;
+export var curlinmask: c_int = -1;
 
 /// Default line attribute: hiline current-line blend, else `bg_text`.
 fn viewDefatr(bw: ?*BW, buf_line: i64) c_int {
@@ -2093,7 +2098,7 @@ fn paintOneRow(ctx: anytype, y: isize, p_in: ?*P) ?*P {
 extern fn markv(r: c_int) c_int;
 extern var markb: ?*P;
 extern var markk: ?*P;
-extern var marking: c_int;
+export var marking: c_int = 0;
 
 const BwgenMarkRange = struct {
     from: i64 = 0,
@@ -3574,7 +3579,6 @@ extern fn rmkbd(k: ?*Kbd) void;
 extern fn mkkbd(kmap: ?*Kmap) ?*Kbd;
 extern fn kmap_getcontext(name: ?[*:0]const u8) ?*Kmap;
 extern fn brm(b: ?*B) void;
-extern fn set_file_pos(name: ?[*:0]const u8, pos: i64) void;
 
 fn asBw(w: ?*BW) *BwRec {
     return @ptrCast(@alignCast(w.?));
@@ -4047,7 +4051,7 @@ pub export fn zig_bw_calclincols(bw: ?*BW) c_int {
 
 const FILE = std.c.FILE;
 
-extern var ustat_line: [*c]u8;
+export var ustat_line: [*c]u8 = null;
 extern fn brch(p: ?*P) c_int;
 extern fn stagen(stalin: [*c]u8, bw: ?*BW, s: [*:0]const u8, fill: u8) [*c]u8;
 extern fn msgnw(w: ?*W, s: [*c]const u8) void;
@@ -4058,7 +4062,7 @@ extern fn parse_off_t(pp: *[*c]const u8, buf: *i64) c_int;
 extern fn parse_string(pp: *[*c]const u8, buf: [*]u8, len: isize) isize;
 extern fn fprintf(f: ?*anyopaque, fmt: [*:0]const u8, ...) c_int;
 extern fn fgets(buf: [*]u8, len: c_int, f: ?*anyopaque) ?*anyopaque;
-extern var restore_file_pos: c_int;
+export var restore_file_pos: c_int = 0;
 
 const max_file_pos: usize = 20;
 
@@ -4372,4 +4376,177 @@ pub export fn zig_bw_init_visiblews() c_int {
         }
     }
     return 0;
+}
+
+
+// ---------------------------------------------------------------------------
+// Public JOE C ABI for `joe/bw.h` (formerly abort-wrappers in `joe/bw.c`).
+// ---------------------------------------------------------------------------
+
+pub export fn bwfllwh(thew: ?*W) void {
+    if (thew == null) pathAAbort("Path A: zig_bw_bwfllwh -1\n");
+    const win = asWin(thew);
+    const w: ?*BW = @ptrCast(win.object);
+    const bw = asBw(w);
+    const top = bw.top orelse pathAAbort("Path A: zig_bw_bwfllwh -1\n");
+    const cursor = bw.cursor orelse pathAAbort("Path A: zig_bw_bwfllwh -1\n");
+    const scrn = zig_c_bw_get_scrn(w) orelse pathAAbort("Path A: zig_bw_bwfllwh -1\n");
+    const updtab = zig_c_bw_scrn_updtab(scrn) orelse pathAAbort("Path A: zig_bw_bwfllwh -1\n");
+    if (zig_bw_bwfllwh(@ptrCast(top), @ptrCast(cursor), scrn, updtab, bw.y, bw.h, bw.w, &bw.offset) >= 0)
+        return;
+    pathAAbort("Path A: zig_bw_bwfllwh -1\n");
+}
+
+pub export fn bwfllwt(thew: ?*W) void {
+    if (thew == null) pathAAbort("Path A: zig_bw_bwfllwt -1\n");
+    const win = asWin(thew);
+    const w: ?*BW = @ptrCast(win.object);
+    const bw = asBw(w);
+    const top = bw.top orelse pathAAbort("Path A: zig_bw_bwfllwt -1\n");
+    const cursor = bw.cursor orelse pathAAbort("Path A: zig_bw_bwfllwt -1\n");
+    const scrn = zig_c_bw_get_scrn(w) orelse pathAAbort("Path A: zig_bw_bwfllwt -1\n");
+    const updtab = zig_c_bw_scrn_updtab(scrn) orelse pathAAbort("Path A: zig_bw_bwfllwt -1\n");
+    if (zig_bw_bwfllwt(@ptrCast(top), @ptrCast(cursor), scrn, updtab, bw.y, bw.h, bw.w, &bw.offset, &bw.curlin, bw.o.hiline) >= 0)
+        return;
+    pathAAbort("Path A: zig_bw_bwfllwt -1\n");
+}
+
+pub export fn bwfllw(w: ?*W) void {
+    if (w == null) pathAAbort("Path A: bwfllw -1\n");
+    const bw = asBw(@ptrCast(asWin(w).object));
+    if (bw.o.hex != 0) bwfllwh(w) else bwfllwt(w);
+}
+
+pub export fn bwins(w: ?*BW, l: i64, n: i64, flg: c_int) void {
+    if (w == null) pathAAbort("Path A: zig_bw_bwins -1\n");
+    const bw = asBw(w);
+    const scrn = zig_c_bw_get_scrn(w) orelse pathAAbort("Path A: zig_bw_bwins -1\n");
+    const updtab = zig_c_bw_scrn_updtab(scrn) orelse pathAAbort("Path A: zig_bw_bwins -1\n");
+    const srec = asScrn(scrn);
+    const top = bw.top orelse pathAAbort("Path A: zig_bw_bwins -1\n");
+    const b = bw.b orelse pathAAbort("Path A: zig_bw_bwins -1\n");
+    const eof = b.eof orelse pathAAbort("Path A: zig_bw_bwins -1\n");
+    const do_hl: c_int = if (bw.o.highlight != 0 and bw.o.syntax != null) 1 else 0;
+    if (zig_bw_bwins(scrn, updtab, srec.sary, srec.li, bw.y, bw.h, top.line, eof.line, l, n, flg, do_hl) >= 0)
+        return;
+    pathAAbort("Path A: zig_bw_bwins -1\n");
+}
+
+pub export fn bwdel(w: ?*BW, l: i64, n: i64, flg: c_int) void {
+    if (w == null) pathAAbort("Path A: zig_bw_bwdel -1\n");
+    const bw = asBw(w);
+    const scrn = zig_c_bw_get_scrn(w) orelse pathAAbort("Path A: zig_bw_bwdel -1\n");
+    const updtab = zig_c_bw_scrn_updtab(scrn) orelse pathAAbort("Path A: zig_bw_bwdel -1\n");
+    const top = bw.top orelse pathAAbort("Path A: zig_bw_bwdel -1\n");
+    const b = bw.b orelse pathAAbort("Path A: zig_bw_bwdel -1\n");
+    const eof = b.eof orelse pathAAbort("Path A: zig_bw_bwdel -1\n");
+    const do_hl: c_int = if (bw.o.highlight != 0 and bw.o.syntax != null) 1 else 0;
+    if (zig_bw_bwdel(scrn, updtab, bw.y, bw.h, top.line, eof.line, l, n, flg, do_hl) >= 0)
+        return;
+    pathAAbort("Path A: zig_bw_bwdel -1\n");
+}
+
+pub export fn viewmode_display_col(buf_line: i64, buf_offset: i64) i64 {
+    return zig_bw_vm_display_col(buf_line, buf_offset);
+}
+
+pub export fn viewmode_cleanup() void {
+    zig_bw_vm_cleanup();
+}
+
+pub export fn bwgenh(w: ?*BW) void {
+    if (zig_bw_bwgenh_entry(w) >= 0) return;
+    pathAAbort("Path A: zig_bw_bwgenh_entry returned -1\n");
+}
+
+pub export fn bwgen(w: ?*BW, linums: c_int, linchg: c_int) void {
+    if (zig_bw_bwgen_entry(w, linums, linchg) >= 0) return;
+    pathAAbort("Path A: zig_bw_bwgen_entry returned -1\n");
+}
+
+pub export fn bwmove(w: ?*BW, x: isize, y: isize) void {
+    if (zig_bw_bwmove(w, x, y) >= 0) return;
+    pathAAbort("Path A: zig_bw_bwmove -1\n");
+}
+
+pub export fn bwresz(w: ?*BW, wi: isize, he: isize) void {
+    if (zig_bw_bwresz(w, wi, he) >= 0) return;
+    pathAAbort("Path A: zig_bw_bwresz -1\n");
+}
+
+pub export fn bwmk(window: ?*W, b: ?*B, prompt: c_int) ?*BW {
+    var zw: ?*BW = null;
+    if (zig_bw_bwmk(window, b, prompt, &zw) >= 0) return zw;
+    pathAAbort("Path A: zig_bw_bwmk -1\n");
+}
+
+pub export fn get_file_pos(name: ?[*:0]const u8) i64 {
+    var zpos: i64 = 0;
+    if (zig_bw_get_file_pos(name, &zpos) >= 0) return zpos;
+    pathAAbort("Path A: zig_bw_get_file_pos -1\n");
+}
+
+pub export fn set_file_pos(name: ?[*:0]const u8, pos: i64) void {
+    if (zig_bw_set_file_pos(name, pos) >= 0) return;
+    pathAAbort("Path A: zig_bw_set_file_pos -1\n");
+}
+
+pub export fn save_file_pos(f: ?*FILE) void {
+    if (zig_bw_save_file_pos(f) >= 0) return;
+    pathAAbort("Path A: zig_bw_save_file_pos -1\n");
+}
+
+pub export fn load_file_pos(f: ?*FILE) void {
+    if (zig_bw_load_file_pos(f) >= 0) return;
+    pathAAbort("Path A: zig_bw_load_file_pos -1\n");
+}
+
+pub export fn set_file_pos_all(t: ?*Screen) void {
+    if (zig_bw_set_file_pos_all(t) >= 0) return;
+    pathAAbort("Path A: zig_bw_set_file_pos_all -1\n");
+}
+
+pub export fn vtmaster(t: ?*Screen, b: ?*B) ?*BW {
+    var zm: ?*BW = null;
+    if (zig_bw_vtmaster(t, b, &zm) >= 0) return zm;
+    pathAAbort("Path A: zig_bw_vtmaster -1\n");
+}
+
+pub export fn bwrm(w: ?*BW) void {
+    if (zig_bw_bwrm(w) >= 0) return;
+    pathAAbort("Path A: zig_bw_bwrm -1\n");
+}
+
+pub export fn ustat(w: ?*W, k: c_int) c_int {
+    var zrc: c_int = 0;
+    if (zig_bw_ustat(w, k, &zrc) >= 0) return zrc;
+    pathAAbort("Path A: zig_bw_ustat -1\n");
+}
+
+pub export fn ucrawlr(w: ?*W, k: c_int) c_int {
+    var zrc: c_int = 0;
+    if (zig_bw_ucrawlr(w, k, &zrc) >= 0) return zrc;
+    pathAAbort("Path A: zig_bw_ucrawlr -1\n");
+}
+
+pub export fn ucrawll(w: ?*W, k: c_int) c_int {
+    var zrc: c_int = 0;
+    if (zig_bw_ucrawll(w, k, &zrc) >= 0) return zrc;
+    pathAAbort("Path A: zig_bw_ucrawll -1\n");
+}
+
+pub export fn orphit(bw: ?*BW) void {
+    if (zig_bw_orphit(bw) >= 0) return;
+    pathAAbort("Path A: zig_bw_orphit -1\n");
+}
+
+pub export fn calclincols(bw: ?*BW) c_int {
+    const z = zig_bw_calclincols(bw);
+    if (z >= 0) return z;
+    pathAAbort("Path A: zig_bw_calclincols -1\n");
+}
+
+pub export fn init_visiblews() void {
+    if (zig_bw_init_visiblews() >= 0) return;
+    pathAAbort("Path A: zig_bw_init_visiblews -1\n");
 }

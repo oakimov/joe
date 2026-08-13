@@ -270,11 +270,6 @@ static void gennum(BW *w, int (*screen)[COMPOSE], int *attr, SCRN *t, ptrdiff_t 
 	abort();
 }
 
-int zig_c_bw_get_hiline(BW *w)
-{
-	return (w && w->o.hiline) ? 1 : 0;
-}
-
 void bwgenh(BW *w)
 {
 	if (zig_bw_bwgenh_entry(w) >= 0)
@@ -284,34 +279,8 @@ void bwgenh(BW *w)
 }
 
 
-/* C helpers for Zig Path A `zig_bw_bwgen` / `zig_bw_bwgenh` / follow. */
-off_t zig_c_bw_pbyte(P *p)
-{
-	return p ? p->byte : 0;
-}
-
-off_t zig_c_bw_pline_no(P *p)
-{
-	return p ? p->line : -1;
-}
-
-off_t zig_c_bw_pxcol(P *p)
-{
-	return p ? p->xcol : 0;
-}
-
-void zig_c_bw_set_xcol(P *p, off_t xcol)
-{
-	if (!p) return;
-	p->xcol = xcol;
-	p->valcol = 1;
-}
-
-P *zig_c_bw_bof(P *p)
-{
-	return (p && p->b) ? p->b->bof : NULL;
-}
-
+/* C helpers for Zig Path A `zig_bw_bwgen` / `zig_bw_bwgenh` / follow.
+ * Typed BW/W/P field accessors + resize owned by Zig. */
 int zig_c_bw_pisbol(P *p)
 {
 	return p ? pisbol(p) : 1;
@@ -362,11 +331,6 @@ void zig_c_bw_msetI(int *dest, int c, ptrdiff_t sz)
 	msetI(dest, c, sz);
 }
 
-off_t zig_c_bw_eof_line(P *p)
-{
-	return (p && p->b && p->b->eof) ? p->b->eof->line : -1;
-}
-
 /* zig_c_bw_read_line: owned by Zig `bwReadLine` */
 
 int zig_c_bw_lgen(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
@@ -390,43 +354,6 @@ HIGHLIGHT_STATE zig_c_bw_get_highlight_state(BW *w, P *p, off_t line)
 /* Path A helpers for zig_bw_lgen_view_entry / bwgen entry.
  * Zig owns viewmode tables (`zig_bw_vm_*`). `lgen_core` is Zig-entry-only. */
 
-P *zig_c_bw_get_top(BW *bw)
-{
-	return bw ? bw->top : NULL;
-}
-
-P *zig_c_bw_get_cursor(BW *bw)
-{
-	return bw ? bw->cursor : NULL;
-}
-
-ptrdiff_t zig_c_bw_get_y(BW *bw)
-{
-	return bw ? bw->y : 0;
-}
-
-off_t zig_c_bw_get_top_line(BW *bw)
-{
-	return (bw && bw->top) ? bw->top->line : 0;
-}
-
-int zig_c_bw_get_tab(BW *bw)
-{
-	int tab = bw ? bw->o.tab : 8;
-	return tab <= 0 ? 8 : tab;
-}
-
-struct high_syntax *zig_c_bw_get_syntax(BW *bw)
-{
-	return bw ? bw->o.syntax : NULL;
-}
-
-struct charmap *zig_c_bw_get_charmap(BW *bw)
-{
-	return (bw && bw->b) ? bw->b->o.charmap : NULL;
-}
-
-
 int *zig_c_bw_get_palette(SCRN *t, int *out_len)
 {
 	if (out_len) *out_len = 0;
@@ -435,55 +362,11 @@ int *zig_c_bw_get_palette(SCRN *t, int *out_len)
 	return t->palette;
 }
 
-/* Path A helpers for lifecycle exports. */
-void zig_c_bw_set_pos(BW *w, ptrdiff_t x, ptrdiff_t y)
-{
-	if (!w) return;
-	w->x = x;
-	w->y = y;
-}
-
-ptrdiff_t zig_c_bw_get_h(BW *w)
-{
-	return w ? w->h : 0;
-}
-
-void zig_c_bw_set_size(BW *w, ptrdiff_t wi, ptrdiff_t he)
-{
-	if (!w) return;
-	w->w = wi;
-	w->h = he;
-}
-
-void zig_c_bw_dirty_grown_rows(BW *w, ptrdiff_t old_h, ptrdiff_t new_h)
-{
-	if (!w || !w->t || !w->t->t || w->y == -1) return;
-	if (new_h > old_h)
-		msetI(w->t->t->updtab + w->y + old_h, 1, new_h - old_h);
-}
-
-void zig_c_bw_resz_vt_if_master(BW *w, ptrdiff_t wi, ptrdiff_t he)
-{
-	if (!w || !w->b || !w->parent) return;
-	if (w->b->vt && w->b->pid && w == vtmaster(w->parent->t, w->b)) {
-		vt_resize(w->b->vt, w->top, he, wi);
-		ttstsz(w->b->out, wi, he);
-	}
-}
-
-int zig_c_bw_get_linums(BW *w)
-{
-	return (w && w->o.linums) ? 1 : 0;
-}
-
-off_t zig_c_bw_b_eof_line(BW *w)
-{
-	return (w && w->b && w->b->eof) ? w->b->eof->line : 0;
-}
-
 /* zig_c_bw_alloc / zig_c_bw_mk_init: owned by Zig `bwMkInit` */
 
 /* zig_c_bw_orphit_impl / is_sole_errbuf / rm_*: owned by Zig `bwOrphit`/`bwrm` */
+
+/* Typed BW/W/P field accessors + resize: owned by Zig (see src/bw_lgen.zig). */
 
 /* Path A field helpers for Zig-owned bwgen/bwgenh mark setup. */
 void zig_c_bw_ensure_lattr_db(BW *w)
@@ -504,36 +387,6 @@ void zig_c_bw_sync_viewmode(BW *w)
 	}
 }
 
-P *zig_c_bw_get_err(BW *w)
-{
-	return (w && w->b == errbuf && w->b->err) ? w->b->err : NULL;
-}
-
-int zig_c_bw_same_buf(BW *w, P *p)
-{
-	return (w && p && p->b == w->b) ? 1 : 0;
-}
-
-int zig_c_bw_is_maint_cur(BW *w)
-{
-	return (w && maint && maint->curwin && w == (BW *)maint->curwin->object) ? 1 : 0;
-}
-
-SCRN *zig_c_bw_get_scrn(BW *w)
-{
-	return (w && w->t) ? w->t->t : NULL;
-}
-
-ptrdiff_t zig_c_bw_get_x(BW *w)
-{
-	return w ? w->x : 0;
-}
-
-ptrdiff_t zig_c_bw_scr_w(BW *w)
-{
-	return (w && w->t) ? w->t->w : 0;
-}
-
 int (*zig_c_bw_scrn_cells(SCRN *t))[COMPOSE]
 {
 	return t ? t->scrn : NULL;
@@ -552,21 +405,6 @@ int *zig_c_bw_scrn_updtab(SCRN *t)
 int *zig_c_bw_scrn_compose(SCRN *t)
 {
 	return t ? t->compose : NULL;
-}
-
-int zig_c_bw_get_viewmode(BW *w)
-{
-	return (w && w->o.viewmode) ? 1 : 0;
-}
-
-int zig_c_bw_get_visiblews(BW *w)
-{
-	return (w && w->o.visiblews) ? 1 : 0;
-}
-
-int zig_c_bw_get_ansi(BW *w)
-{
-	return (w && w->o.ansi) ? 1 : 0;
 }
 
 void bwgen(BW *w, int linums, int linchg)
@@ -617,17 +455,6 @@ char *ustat_line;
 
 /* zig_c_bw_ustat_impl / zig_c_bw_wind_bw: owned by Zig `bwUstat`/`windBw` */
 
-ptrdiff_t zig_c_bw_get_w(BW *w) { return w ? w->w : 0; }
-off_t zig_c_bw_get_offset(BW *w) { return w ? w->offset : 0; }
-void zig_c_bw_set_offset(BW *w, off_t off) { if (w) w->offset = off; }
-off_t zig_c_bw_get_cursor_xcol(BW *w) { return (w && w->cursor) ? w->cursor->xcol : 0; }
-void zig_c_bw_set_cursor_xcol(BW *w, off_t xcol)
-{
-	if (w && w->cursor) {
-		w->cursor->xcol = xcol;
-		w->cursor->valcol = 1;
-	}
-}
 void zig_c_bw_pcol(BW *w, off_t xcol)
 {
 	if (w && w->cursor)

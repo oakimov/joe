@@ -33,7 +33,7 @@
 //! Non-paint helpers use `zig_bw_get_file_pos` / `zig_bw_set_file_pos` /
 //! `zig_bw_save_file_pos` / `zig_bw_load_file_pos` / `zig_bw_set_file_pos_all` /
 //! `zig_bw_vtmaster` / `zig_bw_ustat` / `zig_bw_ucrawlr` / `zig_bw_ucrawll` /
-//! `zig_bw_init_visiblews` (Zig-owned file_pos LRU + TW walk/`vtmaster`/`ustat`/`windBw`; orphans via `set_file_pos_orphaned`).
+//! `zig_bw_init_visiblews` (Zig-owned file_pos LRU + TW walk/`vtmaster`/`ustat`/`windBw` + typed BW/W/P field accessors + resize; orphans via `set_file_pos_orphaned`).
 //! Feature 2.1 residual simple pipe substitute uses `zig_bw_table_simple`.
 //! Non-UTF-8 (byte) charmaps paint via `lgenLine` byte-mode.
 //! Thin C wrappers abort when a Zig export returns `-1` (OOM / oversize / hard fail).
@@ -132,8 +132,6 @@ extern fn genfield(
     flg: c_int,
     fmt: ?[*]c_int,
 ) void;
-extern fn zig_c_bw_pbyte(p: ?*P) i64;
-extern fn zig_c_bw_eof_line(p: ?*P) i64;
 /// Read buffer line into `buf` (no newline). Returns len, -2 if too long, -1 on error/EOF-past.
 /// Matches C `zig_c_bw_read_line` / `VIEWMODE_TABLE_SCAN_MAX_BYTES` (16KiB) hard cap.
 fn bwReadLine(anchor: ?*P, line: i64, buf: ?[*]u8, buf_cap: c_int) c_int {
@@ -155,10 +153,6 @@ fn bwReadLine(anchor: ?*P, line: i64, buf: ?[*]u8, buf_cap: c_int) c_int {
     }
     return ll;
 }
-extern fn zig_c_bw_pline_no(p: ?*P) i64;
-extern fn zig_c_bw_pxcol(p: ?*P) i64;
-extern fn zig_c_bw_set_xcol(p: ?*P, xcol: i64) void;
-extern fn zig_c_bw_bof(p: ?*P) ?*P;
 extern fn zig_c_bw_pisbol(p: ?*P) c_int;
 extern fn zig_c_bw_p_goto_bol(p: ?*P) void;
 extern fn zig_c_bw_pset(d: ?*P, s: ?*P) void;
@@ -1456,18 +1450,8 @@ pub export fn zig_bw_vm_cleanup() void {
     vm_last_bw = null;
 }
 
-extern fn zig_c_bw_get_top(bw: ?*BW) ?*P;
-extern fn zig_c_bw_get_cursor(bw: ?*BW) ?*P;
-extern fn zig_c_bw_get_y(bw: ?*BW) isize;
-extern fn zig_c_bw_get_top_line(bw: ?*BW) i64;
-extern fn zig_c_bw_get_tab(bw: ?*BW) c_int;
-extern fn zig_c_bw_get_syntax(bw: ?*BW) ?*HighSyntax;
-extern fn zig_c_bw_get_charmap(bw: ?*BW) ?*Charmap;
 extern fn zig_c_bw_get_palette(t: ?*SCRN, out_len: ?*c_int) ?[*]c_int;
 
-extern fn zig_c_bw_get_visiblews(bw: ?*BW) c_int;
-extern fn zig_c_bw_get_ansi(bw: ?*BW) c_int;
-extern fn zig_c_bw_get_hiline(w: ?*BW) c_int;
 
 // Match C bg_* / curlinmask (BG_COLOR is identity in scrn.h).
 extern var bg_text: c_int;
@@ -1976,21 +1960,10 @@ fn paintOneRow(ctx: anytype, y: isize, p_in: ?*P) ?*P {
 
 extern fn zig_c_bw_ensure_lattr_db(w: ?*BW) void;
 extern fn zig_c_bw_sync_viewmode(w: ?*BW) void;
-extern fn zig_c_bw_get_err(w: ?*BW) ?*P;
-extern fn zig_c_bw_same_buf(w: ?*BW, p: ?*P) c_int;
-extern fn zig_c_bw_is_maint_cur(w: ?*BW) c_int;
-extern fn zig_c_bw_get_scrn(w: ?*BW) ?*SCRN;
-extern fn zig_c_bw_get_x(w: ?*BW) isize;
-extern fn zig_c_bw_scr_w(w: ?*BW) isize;
 extern fn zig_c_bw_scrn_cells(t: ?*SCRN) ?[*][COMPOSE]c_int;
 extern fn zig_c_bw_scrn_attr(t: ?*SCRN) ?[*]c_int;
 extern fn zig_c_bw_scrn_updtab(t: ?*SCRN) ?[*]c_int;
 extern fn zig_c_bw_scrn_compose(t: ?*SCRN) ?[*]c_int;
-extern fn zig_c_bw_get_viewmode(w: ?*BW) c_int;
-extern fn zig_c_bw_get_h(w: ?*BW) isize;
-extern fn zig_c_bw_get_w(w: ?*BW) isize;
-extern fn zig_c_bw_get_offset(w: ?*BW) i64;
-extern fn zig_c_bw_set_cursor_xcol(w: ?*BW, xcol: i64) void;
 
 extern fn markv(r: c_int) c_int;
 extern var markb: ?*P;
@@ -3332,12 +3305,6 @@ test "bwgen square mark line scope matches C" {
     try std.testing.expect(buf_line2 >= fromline and buf_line2 <= toline);
 }
 
-extern fn zig_c_bw_set_pos(w: ?*BW, x: isize, y: isize) void;
-extern fn zig_c_bw_set_size(w: ?*BW, wi: isize, he: isize) void;
-extern fn zig_c_bw_dirty_grown_rows(w: ?*BW, old_h: isize, new_h: isize) void;
-extern fn zig_c_bw_resz_vt_if_master(w: ?*BW, wi: isize, he: isize) void;
-extern fn zig_c_bw_get_linums(w: ?*BW) c_int;
-extern fn zig_c_bw_b_eof_line(w: ?*BW) i64;
 const gap_types = @import("gapbuffer/types.zig");
 const GapB = gap_types.B;
 const GapP = gap_types.P;
@@ -3498,6 +3465,177 @@ fn asB(b: ?*B) *GapB {
 
 fn asScreen(t: ?*Screen) *ScreenRec {
     return @ptrCast(@alignCast(t.?));
+}
+
+fn asP(p: ?*P) *GapP {
+    return @ptrCast(@alignCast(p.?));
+}
+
+extern var maint: ?*Screen;
+extern fn vt_resize(vt: ?*anyopaque, top: ?*P, height: isize, width: isize) void;
+extern fn ttstsz(fd: c_int, w: isize, h: isize) void;
+
+fn zig_c_bw_pbyte(p: ?*P) i64 {
+    return if (p) |pp| asP(pp).byte else 0;
+}
+fn zig_c_bw_pline_no(p: ?*P) i64 {
+    return if (p) |pp| asP(pp).line else -1;
+}
+fn zig_c_bw_pxcol(p: ?*P) i64 {
+    return if (p) |pp| asP(pp).xcol else 0;
+}
+fn zig_c_bw_set_xcol(p: ?*P, xcol: i64) void {
+    if (p == null) return;
+    const pp = asP(p);
+    pp.xcol = xcol;
+    pp.valcol = 1;
+}
+fn zig_c_bw_bof(p: ?*P) ?*P {
+    if (p == null) return null;
+    const b = asP(p).b orelse return null;
+    return @ptrCast(b.bof);
+}
+fn zig_c_bw_eof_line(p: ?*P) i64 {
+    if (p == null) return -1;
+    const b = asP(p).b orelse return -1;
+    const eof = b.eof orelse return -1;
+    return eof.line;
+}
+
+fn zig_c_bw_get_top(bw: ?*BW) ?*P {
+    return if (bw) |w| @ptrCast(asBw(w).top) else null;
+}
+fn zig_c_bw_get_cursor(bw: ?*BW) ?*P {
+    return if (bw) |w| @ptrCast(asBw(w).cursor) else null;
+}
+fn zig_c_bw_get_y(bw: ?*BW) isize {
+    return if (bw) |w| asBw(w).y else 0;
+}
+fn zig_c_bw_get_x(bw: ?*BW) isize {
+    return if (bw) |w| asBw(w).x else 0;
+}
+fn zig_c_bw_get_h(bw: ?*BW) isize {
+    return if (bw) |w| asBw(w).h else 0;
+}
+fn zig_c_bw_get_w(bw: ?*BW) isize {
+    return if (bw) |w| asBw(w).w else 0;
+}
+fn zig_c_bw_get_offset(bw: ?*BW) i64 {
+    return if (bw) |w| asBw(w).offset else 0;
+}
+fn zig_c_bw_set_offset(bw: ?*BW, off: i64) void {
+    if (bw) |w| asBw(w).offset = off;
+}
+fn zig_c_bw_get_top_line(bw: ?*BW) i64 {
+    if (bw == null) return 0;
+    return if (asBw(bw).top) |top| top.line else 0;
+}
+fn zig_c_bw_get_tab(bw: ?*BW) c_int {
+    if (bw == null) return 8;
+    const tab = asBw(bw).o.tab;
+    return if (tab <= 0) 8 else @intCast(tab);
+}
+fn zig_c_bw_get_syntax(bw: ?*BW) ?*HighSyntax {
+    return if (bw) |w| @ptrCast(asBw(w).o.syntax) else null;
+}
+fn zig_c_bw_get_charmap(bw: ?*BW) ?*Charmap {
+    if (bw == null) return null;
+    const b = asBw(bw).b orelse return null;
+    return @ptrCast(b.o.charmap);
+}
+fn zig_c_bw_get_hiline(bw: ?*BW) c_int {
+    return if (bw != null and asBw(bw).o.hiline != 0) 1 else 0;
+}
+fn zig_c_bw_get_linums(bw: ?*BW) c_int {
+    return if (bw != null and asBw(bw).o.linums != 0) 1 else 0;
+}
+fn zig_c_bw_get_viewmode(bw: ?*BW) c_int {
+    return if (bw != null and asBw(bw).o.viewmode != 0) 1 else 0;
+}
+fn zig_c_bw_get_visiblews(bw: ?*BW) c_int {
+    return if (bw != null and asBw(bw).o.visiblews != 0) 1 else 0;
+}
+fn zig_c_bw_get_ansi(bw: ?*BW) c_int {
+    return if (bw != null and asBw(bw).o.ansi != 0) 1 else 0;
+}
+fn zig_c_bw_b_eof_line(bw: ?*BW) i64 {
+    if (bw == null) return 0;
+    const b = asBw(bw).b orelse return 0;
+    const eof = b.eof orelse return 0;
+    return eof.line;
+}
+fn zig_c_bw_get_scrn(bw: ?*BW) ?*SCRN {
+    if (bw == null) return null;
+    const t = asBw(bw).t orelse return null;
+    return asScreen(@ptrCast(t)).t;
+}
+fn zig_c_bw_scr_w(bw: ?*BW) isize {
+    if (bw == null) return 0;
+    const t = asBw(bw).t orelse return 0;
+    return asScreen(@ptrCast(t)).w;
+}
+fn zig_c_bw_get_err(bw: ?*BW) ?*P {
+    if (bw == null or errbuf == null) return null;
+    const b = asBw(bw).b orelse return null;
+    if (@intFromPtr(b) != @intFromPtr(errbuf)) return null;
+    return @ptrCast(b.err);
+}
+fn zig_c_bw_same_buf(bw: ?*BW, p: ?*P) c_int {
+    if (bw == null or p == null) return 0;
+    const pb = asP(p).b;
+    return if (pb != null and @intFromPtr(pb) == @intFromPtr(asBw(bw).b)) 1 else 0;
+}
+fn zig_c_bw_is_maint_cur(bw: ?*BW) c_int {
+    if (bw == null or maint == null) return 0;
+    const curwin = asScreen(maint).curwin orelse return 0;
+    const obj = curwin.object orelse return 0;
+    return if (@intFromPtr(obj) == @intFromPtr(bw)) 1 else 0;
+}
+fn zig_c_bw_get_cursor_xcol(bw: ?*BW) i64 {
+    if (bw == null) return 0;
+    return if (asBw(bw).cursor) |cur| cur.xcol else 0;
+}
+fn zig_c_bw_set_cursor_xcol(bw: ?*BW, xcol: i64) void {
+    if (bw == null) return;
+    if (asBw(bw).cursor) |cur| {
+        cur.xcol = xcol;
+        cur.valcol = 1;
+    }
+}
+fn zig_c_bw_set_pos(bw: ?*BW, x: isize, y: isize) void {
+    if (bw == null) return;
+    const w = asBw(bw);
+    w.x = x;
+    w.y = y;
+}
+fn zig_c_bw_set_size(bw: ?*BW, wi: isize, he: isize) void {
+    if (bw == null) return;
+    const w = asBw(bw);
+    w.w = wi;
+    w.h = he;
+}
+fn zig_c_bw_dirty_grown_rows(bw: ?*BW, old_h: isize, new_h: isize) void {
+    if (bw == null) return;
+    const w = asBw(bw);
+    if (w.y == -1) return;
+    const scrn = zig_c_bw_get_scrn(bw) orelse return;
+    const updtab = zig_c_bw_scrn_updtab(scrn) orelse return;
+    if (new_h > old_h) {
+        const dest = updtab + @as(usize, @intCast(w.y + old_h));
+        zig_c_bw_msetI(dest, 1, new_h - old_h);
+    }
+}
+fn zig_c_bw_resz_vt_if_master(bw: ?*BW, wi: isize, he: isize) void {
+    if (bw == null) return;
+    const w = asBw(bw);
+    const b = w.b orelse return;
+    const parent = w.parent orelse return;
+    if (b.vt == null or b.pid == 0) return;
+    var master: ?*BW = null;
+    if (zig_bw_vtmaster(@ptrCast(parent.t), @ptrCast(b), &master) < 0) return;
+    if (master == null or @intFromPtr(master) != @intFromPtr(bw)) return;
+    vt_resize(b.vt, @ptrCast(w.top), he, wi);
+    ttstsz(b.out, wi, he);
 }
 
 extern var watomtw: Watom;
@@ -3673,8 +3811,6 @@ extern var ustat_line: [*c]u8;
 extern fn brch(p: ?*P) c_int;
 extern fn stagen(stalin: [*c]u8, bw: ?*BW, s: [*:0]const u8, fill: u8) [*c]u8;
 extern fn msgnw(w: ?*W, s: [*c]const u8) void;
-extern fn zig_c_bw_set_offset(w: ?*BW, off: i64) void;
-extern fn zig_c_bw_get_cursor_xcol(w: ?*BW) i64;
 extern fn zig_c_bw_pcol(w: ?*BW, xcol: i64) void;
 extern fn zig_c_bw_updall() void;
 extern fn zig_c_bw_locale_utf8() c_int;

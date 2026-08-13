@@ -8,17 +8,6 @@
 #include "types.h"
 #include <limits.h>
 
-/* Path A: Zig-native lgen_core body paint (always on; abort on -1). */
-extern int zig_bw_lgen(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
-	ptrdiff_t x0, ptrdiff_t x1, P *p, off_t scr, struct high_syntax *syntax,
-	HIGHLIGHT_STATE st, struct charmap *charmap, int tab, int defatr,
-	int *palette, int palette_len, off_t from, off_t to, off_t line_byte,
-	int viewmode, char *vm_hide, int vm_hide_len, int *vm_subst, int vm_subst_len,
-	char **vm_urls, int vm_urls_len, int visiblews, int square, int ansi);
-/* Path A: Zig gennum line-number gutter. */
-extern int zig_bw_gennum(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
-	int *compose, int lincols, int have_number, off_t line_1based, int atr,
-	struct charmap *charmap);
 /* Path A: Zig bwgen paint loops. */
 extern int zig_bw_bwgen(BW *w, SCRN *t, int (*scrn)[COMPOSE], int *attr_base,
 	int *updtab, int *compose, ptrdiff_t scr_w,
@@ -49,10 +38,6 @@ extern int zig_bw_bwins(SCRN *t, int *updtab, ptrdiff_t *sary, ptrdiff_t li,
 extern int zig_bw_bwdel(SCRN *t, int *updtab,
 	ptrdiff_t y, ptrdiff_t h, off_t top_line, off_t eof_line,
 	off_t l, off_t n, int flg, int do_highlight);
-/* Path A: thin lgen_view entry (prelude + dispatcher + paint cleanup). */
-extern int zig_bw_lgen_view_entry(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
-	ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,
-	HIGHLIGHT_STATE st, BW *bw);
 /* Path A: Zig-owned viewmode statics for Path A. */
 extern off_t zig_bw_vm_display_col(off_t buf_line, off_t buf_offset);
 extern void zig_bw_vm_cleanup(void);
@@ -181,8 +166,8 @@ void bwdel(BW *w, off_t l, off_t n, int flg)
 
 /* Update a single line */
 
-static int lgen_core(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,HIGHLIGHT_STATE st,BW *bw);
-static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,HIGHLIGHT_STATE st,BW *bw);
+/* static lgen/lgen_core/lgen_view/gennum + zig_c_bw_{lgen,gennum}:
+ * owned by Zig `zig_c_bw_lgen` / `zig_c_bw_gennum` (bwLgenCore/View). */
 
 /* Path A owns viewmode tables in Zig (`zig_bw_vm_*`). */
 
@@ -196,69 +181,6 @@ void viewmode_cleanup(void)
 	zig_bw_vm_cleanup();
 }
 
-
-static int lgen(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,HIGHLIGHT_STATE st,BW *bw)
-{
-	/* Markdown view mode transformations are only valid for Markdown syntax. */
-	if (bw->o.viewmode && bw->o.syntax && !zcmp(bw->o.syntax->name, "md"))
-		return lgen_view(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
-	else
-		return lgen_core(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
-}
-
-static int lgen_core(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,HIGHLIGHT_STATE st,BW *bw)
-{
-	/* Path A always-on: Zig-native body paint. */
-	if (p && p->b && p->b->o.charmap) {
-		int defatr = (bw->o.hiline && bw->cursor->line == y - bw->y + bw->top->line)
-			? (bg_text & curlinmask) | bg_curlin
-			: bg_text;
-		int z = zig_bw_lgen(t, y, screen, attr, x, w, p, scr,
-			bw->o.syntax, st, p->b->o.charmap, p->b->o.tab, BG_COLOR(defatr),
-			t->palette, t->palette ? 256 : 0, from, to, p->byte,
-			0, NULL, 0, NULL, 0, NULL, 0,
-			bw->o.visiblews, square, bw->o.ansi);
-		if (z >= 0)
-			return z;
-	}
-	fprintf(stderr, "Path A: zig_bw_lgen -1\n");
-	abort();
-}
-
-
-/* Markdown view mode rendering */
-/* Features 1.3-1.8: Hide/transform markdown delimiters in view mode */
-static int lgen_view(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr, ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,HIGHLIGHT_STATE st,BW *bw)
-{
-	if (st.state == -1 || !bw->o.syntax || zcmp(bw->o.syntax->name, "md"))
-		return lgen_core(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
-
-	/* Path A always-on: Zig owns prelude + chrome + paint. */
-	int z = zig_bw_lgen_view_entry(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
-	if (z >= 0)
-		return z;
-	fprintf(stderr, "Path A: zig_bw_lgen_view_entry returned %d\n", z);
-	abort();
-}
-
-static void gennum(BW *w, int (*screen)[COMPOSE], int *attr, SCRN *t, ptrdiff_t y, int *comp)
-{
-	off_t lin = w->top->line + y - w->y;
-	int atr = (w->o.hiline && lin == w->cursor->line) ? bg_curlinum : bg_linum;
-
-	/* Path A always-on: Zig-native line-number gutter. */
-	if (w->lincols > 0) {
-		int have_number = (lin <= w->b->eof->line);
-		off_t line_1based = have_number ? (lin + 1) : 0;
-		int zret = zig_bw_gennum(t, y, screen, attr, comp, w->lincols,
-			have_number, line_1based, BG_COLOR(atr),
-			w->b && w->b->o.charmap ? w->b->o.charmap : NULL);
-		if (zret >= 0)
-			return;
-	}
-	fprintf(stderr, "Path A: zig_bw_gennum -1\n");
-	abort();
-}
 
 void bwgenh(BW *w)
 {
@@ -280,27 +202,7 @@ void bwgenh(BW *w)
 
 
 
-/* Remaining C bridges: viewmode dispatch for lgen/gennum only.
- * P-nav/SCRN/lattr/locale helpers owned by Zig. */
-
-/* zig_c_bw_read_line: owned by Zig `bwReadLine` */
-
-int zig_c_bw_lgen(SCRN *t, ptrdiff_t y, int (*screen)[COMPOSE], int *attr,
-	ptrdiff_t x, ptrdiff_t w, P *p, off_t scr, off_t from, off_t to,
-	HIGHLIGHT_STATE st, BW *bw)
-{
-	return lgen(t, y, screen, attr, x, w, p, scr, from, to, st, bw);
-}
-
-void zig_c_bw_gennum(BW *w, int (*screen)[COMPOSE], int *attr, SCRN *t,
-	ptrdiff_t y, int *comp)
-{
-	gennum(w, screen, attr, t, y, comp);
-}
-
-
-/* Path A helpers for zig_bw_lgen_view_entry / bwgen entry.
- * Zig owns viewmode tables (`zig_bw_vm_*`). `lgen_core` is Zig-entry-only. */
+/* zig_c_bw_lgen / zig_c_bw_gennum: owned by Zig. */
 
 
 /* zig_c_bw_alloc / zig_c_bw_mk_init: owned by Zig `bwMkInit` */

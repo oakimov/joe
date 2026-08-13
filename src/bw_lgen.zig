@@ -42,7 +42,7 @@
 //! `lgenLine` expects **per-byte** attrs — this bridge expands before paint.
 //! `ansi_parse` temporarily clears `o.ansi`, so ESC bytes stay as normal chars
 //! in `attr_buf`; Path A strips JOE `ansi_decode` spans (ESC…letter) after
-//! attr/mark apply so colors stay aligned. When `viewmode!=0`, C `lgen_view`
+//! attr/mark apply so colors stay aligned. When `viewmode!=0`, Zig `bwLgenView`/`lgen_view`
 //! already parsed+mutated `attr_buf` — do **not** re-parse. Linear marks use
 //! raw byte offsets (before strip); square marks use post-strip display
 //! columns. Default `selectatr=INVERSE`. Visible whitespace uses C
@@ -1783,7 +1783,27 @@ pub export fn zig_bw_table_simple(
 
 
 extern var have: c_int;
-extern fn zig_c_bw_lgen(
+
+/// C `struct high_syntax` prefix — only `name` is needed for viewmode dispatch.
+const HighSyntaxRec = extern struct {
+    next: ?*HighSyntaxRec,
+    name: ?[*:0]u8,
+};
+
+fn syntaxNameIsMd(syn: ?*HighSyntax) bool {
+    if (syn == null) return false;
+    const rec: *const HighSyntaxRec = @ptrCast(@alignCast(syn.?));
+    const name = rec.name orelse return false;
+    return std.mem.eql(u8, std.mem.span(name), "md");
+}
+
+fn pathAAbort(comptime msg: []const u8) noreturn {
+    std.debug.print("{s}", .{msg});
+    std.process.abort();
+}
+
+/// JOE static `lgen_core`: Zig-native body paint via `zig_bw_lgen`.
+fn bwLgenCore(
     t: ?*SCRN,
     y: isize,
     screen: ?[*][COMPOSE]c_int,
@@ -1796,15 +1816,137 @@ extern fn zig_c_bw_lgen(
     to: i64,
     st: HighlightState,
     bw: ?*BW,
-) c_int;
-extern fn zig_c_bw_gennum(
+) c_int {
+    if (p == null or bw == null) pathAAbort("Path A: zig_bw_lgen -1\n");
+    const pp = asP(p);
+    const b = pp.b orelse pathAAbort("Path A: zig_bw_lgen -1\n");
+    const charmap: ?*Charmap = @ptrCast(b.o.charmap);
+    if (charmap == null) pathAAbort("Path A: zig_bw_lgen -1\n");
+
+    const top_line = if (asBw(bw).top) |top| top.line else 0;
+    const buf_line = y - asBw(bw).y + top_line;
+    const defatr = viewDefatr(bw, buf_line);
+    const tab: c_int = @intCast(b.o.tab);
+    const syntax = zig_c_bw_get_syntax(bw);
+    const palette = zig_c_bw_get_palette(t, null);
+    const pal_len: c_int = if (palette != null) 256 else 0;
+
+    const z = zig_bw_lgen(
+        t,
+        y,
+        screen,
+        attr_row,
+        x,
+        w,
+        p,
+        scr,
+        syntax,
+        st,
+        charmap,
+        tab,
+        defatr, // BG_COLOR identity
+        palette,
+        pal_len,
+        from,
+        to,
+        pp.byte,
+        0,
+        null,
+        0,
+        null,
+        0,
+        null,
+        0,
+        asBw(bw).o.visiblews,
+        square,
+        asBw(bw).o.ansi,
+    );
+    if (z >= 0) return z;
+    pathAAbort("Path A: zig_bw_lgen -1\n");
+}
+
+/// JOE static `lgen_view`: Markdown viewmode entry or fall back to core.
+fn bwLgenView(
+    t: ?*SCRN,
+    y: isize,
+    screen: ?[*][COMPOSE]c_int,
+    attr_row: ?[*]c_int,
+    x: isize,
+    w: isize,
+    p: ?*P,
+    scr: i64,
+    from: i64,
+    to: i64,
+    st: HighlightState,
+    bw: ?*BW,
+) c_int {
+    const syn = zig_c_bw_get_syntax(bw);
+    if (st.state == -1 or syn == null or !syntaxNameIsMd(syn)) {
+        return bwLgenCore(t, y, screen, attr_row, x, w, p, scr, from, to, st, bw);
+    }
+    const z = zig_bw_lgen_view_entry(t, y, screen, attr_row, x, w, p, scr, from, to, st, bw);
+    if (z >= 0) return z;
+    pathAAbort("Path A: zig_bw_lgen_view_entry returned -1\n");
+}
+
+/// JOE static `lgen` dispatcher (viewmode+md → view, else core).
+fn zig_c_bw_lgen(
+    t: ?*SCRN,
+    y: isize,
+    screen: ?[*][COMPOSE]c_int,
+    attr_row: ?[*]c_int,
+    x: isize,
+    w: isize,
+    p: ?*P,
+    scr: i64,
+    from: i64,
+    to: i64,
+    st: HighlightState,
+    bw: ?*BW,
+) c_int {
+    if (bw != null and asBw(bw).o.viewmode != 0 and syntaxNameIsMd(zig_c_bw_get_syntax(bw))) {
+        return bwLgenView(t, y, screen, attr_row, x, w, p, scr, from, to, st, bw);
+    }
+    return bwLgenCore(t, y, screen, attr_row, x, w, p, scr, from, to, st, bw);
+}
+
+/// JOE static `gennum` → Zig `zig_bw_gennum`.
+fn zig_c_bw_gennum(
     w: ?*BW,
     screen: ?[*][COMPOSE]c_int,
     attr_row: ?[*]c_int,
     t: ?*SCRN,
     y: isize,
     compose: ?[*]c_int,
-) void;
+) void {
+    if (w == null) pathAAbort("Path A: zig_bw_gennum -1\n");
+    const bw = asBw(w);
+    const top = bw.top orelse pathAAbort("Path A: zig_bw_gennum -1\n");
+    const cur = bw.cursor orelse pathAAbort("Path A: zig_bw_gennum -1\n");
+    const lin = top.line + y - bw.y;
+    const atr: c_int = if (bw.o.hiline != 0 and lin == cur.line) bg_curlinum else bg_linum;
+    if (bw.lincols > 0) {
+        const b = bw.b orelse pathAAbort("Path A: zig_bw_gennum -1\n");
+        const eof_line = if (b.eof) |e| e.line else @as(i64, -1);
+        const have_number: c_int = if (lin <= eof_line) 1 else 0;
+        const line_1based: i64 = if (have_number != 0) lin + 1 else 0;
+        const charmap: ?*Charmap = @ptrCast(b.o.charmap);
+        const z = zig_bw_gennum(
+            t,
+            y,
+            screen,
+            attr_row,
+            compose,
+            bw.lincols,
+            have_number,
+            line_1based,
+            atr,
+            charmap,
+        );
+        if (z >= 0) return;
+    }
+    pathAAbort("Path A: zig_bw_gennum -1\n");
+}
 /// JOE `bwgen` paint loops → Zig `bwGetto` / C `gennum` / `lgen`.
 ///
 /// Prefer `zig_bw_bwgen_entry` for full setup+loops+cursor. This owns the two

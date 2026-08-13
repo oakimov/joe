@@ -152,6 +152,12 @@ extern fn pisbol(p: ?*GapP) c_int;
 extern fn piseol(p: ?*GapP) c_int;
 extern fn pisindent(p: ?*GapP) i64;
 extern fn joe_isblank(map: ?*anyopaque, c: c_int) c_int;
+extern fn nscrldn(t: ?*anyopaque, top: isize, bot: isize, amnt: isize) void;
+extern fn nscrlup(t: ?*anyopaque, top: isize, bot: isize, amnt: isize) void;
+extern fn umpgup(w: ?*anyopaque, k: c_int) c_int;
+extern fn umpgdn(w: ?*anyopaque, k: c_int) c_int;
+extern var menu_above: c_int;
+extern var watommenu: Watom;
 
 const NO_MORE_DATA: c_int = -256;
 
@@ -568,4 +574,229 @@ pub export fn unedge(w: ?*anyopaque, k: c_int) c_int {
     if (pgetc(cur) == NO_MORE_DATA) return -1;
     while (pisedge(cur) != 1) _ = pgetc(cur);
     return 0;
+}
+
+const ScreenRec = extern struct {
+    t: ?*anyopaque,
+    wind: isize,
+    topwin: ?*WinRec,
+    curwin: ?*WinRec,
+    w: isize,
+    h: isize,
+};
+
+fn scrnOf(bw: *BwRec) ?*anyopaque {
+    const parent = bw.parent orelse return null;
+    const scr: *ScreenRec = @ptrCast(@alignCast(parent.t orelse return null));
+    return scr.t;
+}
+
+/// Scroll buffer window up `n` lines.
+pub export fn scrup(bw_in: ?*anyopaque, n: isize, flg: c_int) void {
+    const bw = asBw(bw_in);
+    const top = bw.top orelse return;
+    const cur = bw.cursor orelse return;
+    var scrollamnt: isize = 0;
+    var cursoramnt: isize = 0;
+
+    if (bw.o.hex != 0) {
+        if (@divTrunc(top.byte, 16) >= n) {
+            scrollamnt = n;
+            cursoramnt = n;
+        } else if (@divTrunc(top.byte, 16) != 0) {
+            scrollamnt = @intCast(@divTrunc(top.byte, 16));
+            cursoramnt = scrollamnt;
+        } else if (flg != 0) {
+            cursoramnt = @intCast(@divTrunc(cur.byte, 16));
+        } else if (@divTrunc(cur.byte, 16) >= n) {
+            cursoramnt = n;
+        }
+    } else {
+        if (top.line >= n) {
+            scrollamnt = n;
+            cursoramnt = n;
+        } else if (top.line != 0) {
+            scrollamnt = @intCast(top.line);
+            cursoramnt = scrollamnt;
+        } else if (flg != 0) {
+            cursoramnt = @intCast(cur.line);
+        } else if (cur.line >= n) {
+            cursoramnt = n;
+        }
+    }
+
+    if (bw.o.hex != 0) {
+        _ = pbkwd(top, scrollamnt * 16);
+        _ = pbkwd(cur, cursoramnt * 16);
+        const parent = bw.parent orelse return;
+        if (parent.y != -1) {
+            if (scrnOf(bw)) |t| nscrldn(t, bw.y, bw.y + bw.h, scrollamnt);
+        }
+    } else {
+        var x: isize = 0;
+        while (x != scrollamnt) : (x += 1) _ = pprevl(top);
+        _ = p_goto_bol(top);
+        x = 0;
+        while (x != cursoramnt) : (x += 1) _ = pprevl(cur);
+        _ = p_goto_bol(cur);
+        _ = pcol(cur, cur.xcol);
+        const parent = bw.parent orelse return;
+        if (parent.y != -1) {
+            if (scrnOf(bw)) |t| nscrldn(t, bw.y, bw.y + bw.h, scrollamnt);
+        }
+    }
+}
+
+/// Scroll buffer window down `n` lines.
+pub export fn scrdn(bw_in: ?*anyopaque, n: isize, flg: c_int) void {
+    const bw = asBw(bw_in);
+    const top = bw.top orelse return;
+    const cur = bw.cursor orelse return;
+    const b = top.b orelse return;
+    const eof = b.eof orelse return;
+    var scrollamnt: isize = 0;
+    var cursoramnt: isize = 0;
+
+    if (bw.o.hex != 0) {
+        if (@divTrunc(eof.byte, 16) < @divTrunc(top.byte, 16) + bw.h) {
+            cursoramnt = @intCast(@divTrunc(eof.byte, 16) - @divTrunc(cur.byte, 16));
+            if (flg == 0 and cursoramnt > n) cursoramnt = n;
+        } else if (@divTrunc(eof.byte, 16) - (@divTrunc(top.byte, 16) + bw.h) >= n) {
+            cursoramnt = n;
+            scrollamnt = n;
+        } else {
+            cursoramnt = @intCast(@divTrunc(eof.byte, 16) - (@divTrunc(top.byte, 16) + bw.h) + 1);
+            scrollamnt = cursoramnt;
+        }
+    } else {
+        if (eof.line < top.line + bw.h) {
+            cursoramnt = @intCast(eof.line - cur.line);
+            if (flg == 0 and cursoramnt > n) cursoramnt = n;
+        } else if (eof.line - (top.line + bw.h) >= n) {
+            cursoramnt = n;
+            scrollamnt = n;
+        } else {
+            cursoramnt = @intCast(eof.line - (top.line + bw.h) + 1);
+            scrollamnt = cursoramnt;
+        }
+    }
+
+    if (bw.o.hex != 0) {
+        _ = pfwrd(top, 16 * scrollamnt);
+        _ = pfwrd(cur, 16 * cursoramnt);
+        const parent = bw.parent orelse return;
+        if (parent.y != -1) {
+            if (scrnOf(bw)) |t| nscrlup(t, bw.y, bw.y + bw.h, scrollamnt);
+        }
+    } else {
+        var x: isize = 0;
+        while (x != scrollamnt) : (x += 1) _ = pnextl(top);
+        x = 0;
+        while (x != cursoramnt) : (x += 1) _ = pnextl(cur);
+        _ = pcol(cur, cur.xcol);
+        const parent = bw.parent orelse return;
+        if (parent.y != -1) {
+            if (scrnOf(bw)) |t| nscrlup(t, bw.y, bw.y + bw.h, scrollamnt);
+        }
+    }
+}
+
+fn menuPageTarget(w_in: ?*anyopaque) ?*anyopaque {
+    const win = asWin(w_in);
+    if (menu_above != 0) {
+        const prev = win.link.prev orelse return null;
+        if (prev.watom == &watommenu and prev.win == win) return prev;
+    } else {
+        const next = win.link.next orelse return null;
+        if (next.watom == &watommenu and next.win == win) return next;
+    }
+    return null;
+}
+
+fn mainBw(bw: *BwRec) ?*BwRec {
+    const parent = bw.parent orelse return null;
+    const main_win = parent.main orelse return null;
+    return @ptrCast(@alignCast(main_win.object orelse return null));
+}
+
+/// Page up (or menu page-up when a menu is attached).
+pub export fn upgup(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    var bw = windBw(w) orelse return -1;
+    if (menuPageTarget(w)) |mw| return umpgup(mw, 0);
+    bw = mainBw(bw) orelse return -1;
+    const cur = bw.cursor orelse return -1;
+    if (if (bw.o.hex != 0) cur.byte < 16 else cur.line == 0) return -1;
+    if (pgamnt < 0) {
+        scrup(bw, @divTrunc(bw.h, 2) + @mod(bw.h, 2), 1);
+    } else if (pgamnt < bw.h) {
+        scrup(bw, bw.h - pgamnt, 1);
+    } else {
+        scrup(bw, 1, 1);
+    }
+    return 0;
+}
+
+/// Page down (or menu page-down when a menu is attached).
+pub export fn upgdn(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    var bw = windBw(w) orelse return -1;
+    if (menuPageTarget(w)) |mw| return umpgdn(mw, 0);
+    bw = mainBw(bw) orelse return -1;
+    const cur = bw.cursor orelse return -1;
+    const b = bw.b orelse return -1;
+    const eof = b.eof orelse return -1;
+    if (if (bw.o.hex != 0) @divTrunc(cur.byte, 16) == @divTrunc(eof.byte, 16) else cur.line == eof.line) return -1;
+    if (pgamnt < 0) {
+        scrdn(bw, @divTrunc(bw.h, 2) + @mod(bw.h, 2), 1);
+    } else if (pgamnt < bw.h) {
+        scrdn(bw, bw.h - pgamnt, 1);
+    } else {
+        scrdn(bw, 1, 1);
+    }
+    return 0;
+}
+
+/// Scroll up one line; cursor moves with the scroll.
+pub export fn uupslide(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const top = bw.top orelse return -1;
+    const cur = bw.cursor orelse return -1;
+    const can = if (bw.o.hex != 0) @divTrunc(top.byte, 16) != 0 else top.line != 0;
+    if (can) {
+        const at_bot = if (bw.o.hex != 0)
+            @divTrunc(top.byte, 16) + bw.h - 1 != @divTrunc(cur.byte, 16)
+        else
+            top.line + bw.h - 1 != cur.line;
+        if (at_bot) _ = udnarw(w, 0);
+        scrup(bw, 1, 0);
+        return 0;
+    }
+    return uuparw(w, 0);
+}
+
+/// Scroll down one line; cursor moves with the scroll.
+pub export fn udnslide(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const top = bw.top orelse return -1;
+    const cur = bw.cursor orelse return -1;
+    const b = top.b orelse return -1;
+    const eof = b.eof orelse return -1;
+    // Preserve C quirk: hex branch uses `top->line/16`, not `top->byte/16`.
+    const can = if (bw.o.hex != 0)
+        @divTrunc(top.line, 16) + bw.h <= @divTrunc(eof.byte, 16)
+    else
+        top.line + bw.h <= eof.line;
+    if (can) {
+        const at_top = if (bw.o.hex != 0)
+            @divTrunc(top.byte, 16) != @divTrunc(cur.byte, 16)
+        else
+            top.line != cur.line;
+        if (at_top) _ = uuparw(w, 0);
+        scrdn(bw, 1, 0);
+        return 0;
+    }
+    return udnarw(w, 0);
 }

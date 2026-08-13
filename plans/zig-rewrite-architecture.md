@@ -844,11 +844,12 @@ The build is always working — start with a binary that compiles and runs, then
 - ✅ Path A remaining helper-bridge port: Zig owns P-nav/`pcol`, SCRN field accessors + `nscrl*`/`msetI`/`updall`, lattr/viewmode/`get_highlight_state`, locale/`from_uni`; C keeps only `zig_c_bw_lgen`/`zig_c_bw_gennum` viewmode dispatch; soak **196/196**; `joe/bw.c` ~501 lines
 - ✅ Path A lgen/gennum dispatch port: Zig `zig_c_bw_lgen`/`zig_c_bw_gennum` own viewmode+md dispatch, `lgen_core`/`lgen_view`/`gennum` bodies; deleted C statics + last `zig_c_bw_*` bridges; soak **196/196**; `joe/bw.c` ~403 lines
 - ✅ Path A `bw.c` removal: Zig exports JOE `bw.h` ABI (`bwgen`/`bwmk`/`bwfllw*`/`file_pos*`/`ustat`/…) + former `bw.c` globals; removed `joe/bw.c` from the link; soak **196/196**; live `bw` is zero-C
+- ✅ Path A `uedit` motion slice: Zig `src/uedit.zig` exports `pgamnt` + `u_goto_{bol,eol,bof,eof}` + `uuparw`/`udnarw` + `utos`/`ubos`; deleted matching C bodies; remaining `joe/uedit.c` still linked
 - At this point: fully functional editor with markdown viewmode
 
-### Phase 7: File I/O & Commands (3-4 weeks) — NOT STARTED
+### Phase 7: File I/O & Commands (3-4 weeks) — IN PROGRESS (Path A uedit)
 - ⬜ `fileio.zig` — load, save, UTF-16 conversion
-- ⬜ `edit.zig` — all edit commands (uedit, ublock, uformat)
+- 🚧 `edit.zig` / `src/uedit.zig` — Path A live edit commands (`uedit` motions first; then left/right/home/word, deletes, type, quote, marks, paste; then `ublock`/`uformat`)
 - ⬜ `search.zig` — search/replace
 - ⬜ Shell window, tags, math, error navigation
 - At this point: feature-complete in Zig

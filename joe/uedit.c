@@ -7,26 +7,8 @@
  */
 #include "types.h"
 
-/***************/
-/* Global options */
-int pgamnt = -1;		/* No. of PgUp/PgDn lines to keep */
-
-/*
- * Move cursor to beginning of line
- */
-int u_goto_bol(W *w, int k)
-{
-	BW *bw;
-	WIND_BW(bw, w);
-	if (bw->o.hex) {
-		pbkwd(bw->cursor,bw->cursor->byte%16);
-	} else {
-		p_goto_bol(bw->cursor);
-	}
-	if (!bw->o.hex)
-		bw->cursor->xcol = piscol(bw->cursor);
-	return 0;
-}
+/* Path A: `pgamnt`, `u_goto_{bol,eol,bof,eof}`, `uuparw`/`udnarw`, `utos`/`ubos`
+ * live in src/uedit.zig (JOE uedit.h ABI exports). */
 
 /*
  * Move cursor to first non-whitespace character, unless it is
@@ -64,53 +46,6 @@ int uhome(W *w, int k)
 	bw->cursor->xcol = piscol(bw->cursor);
 	if (bw->o.viewmode)
 		bw->cursor->valcol = 0;
-	return 0;
-}
-
-/*
- * Move cursor to end of line
- */
-int u_goto_eol(W *w, int k)
-{
-	BW *bw;
-	WIND_BW(bw, w);
-	if (bw->o.hex) {
-		if (bw->cursor->byte + 15 - bw->cursor->byte%16 > bw->b->eof->byte)
-			pset(bw->cursor,bw->b->eof);
-		else
-			pfwrd(bw->cursor, 15 - bw->cursor->byte%16);
-	} else {
-		p_goto_eol(bw->cursor);
-		bw->cursor->xcol = piscol(bw->cursor);
-	}
-	if (bw->o.viewmode)
-		bw->cursor->valcol = 0;
-	return 0;
-}
-
-/*
- * Move cursor to beginning of file
- */
-int u_goto_bof(W *w, int k)
-{
-	BW *bw;
-	WIND_BW(bw, w);
-	p_goto_bof(bw->cursor);
-	return 0;
-}
-
-/*
- * Move cursor to end of file
- */
-int u_goto_eof(W *w, int k)
-{
-	BW *bw;
-	WIND_BW(bw, w);
-	if (bw->b->vt && bw->b->pid) {
-		pset(bw->cursor, bw->b->vt->vtcur);
-	} else {
-		p_goto_eof(bw->cursor);
-	}
 	return 0;
 }
 
@@ -1149,89 +1084,6 @@ int utomatch(W *w, int k)
 	}
 
 	return tomatch_char(bw, c, f, dir);
-}
-
-/* Move cursor up */
-
-int uuparw(W *w, int k)
-{
-	BW *bw;
-	WIND_BW(bw, w);
-	if (bw->o.hex) {
-		if (bw->cursor->byte<16)
-			return -1;
-		else {
-			pbkwd(bw->cursor, 16);
-			return 0;
-		}
-	}
-	if (bw->cursor->line) {
-		pprevl(bw->cursor);
-		pcol(bw->cursor, bw->cursor->xcol);
-		return 0;
-	} else
-		return -1;
-}
-
-/* Move cursor down */
-
-int udnarw(W *w, int k)
-{
-	BW *bw;
-	WIND_BW(bw, w);
-	if (bw->o.hex) {
-		if (bw->cursor->byte+16 <= bw->b->eof->byte) {
-			pfwrd(bw->cursor, 16);
-			return 0;
-		} else if (bw->cursor->byte != bw->b->eof->byte) {
-			pset(bw->cursor, bw->b->eof);
-			return 0;
-		} else {
-			return -1;
-		}
-	}
-	if (bw->cursor->line != bw->b->eof->line) {
-		pnextl(bw->cursor);
-		pcol(bw->cursor, bw->cursor->xcol);
-		return 0;
-	} else if(bw->o.picture) {
-		p_goto_eol(bw->cursor);
-		binsc(bw->cursor,'\n');
-		pgetc(bw->cursor);
-		pcol(bw->cursor, bw->cursor->xcol);
-		return 0;
-	} else
-		return -1;
-}
-
-/* Move cursor to top of window */
-
-int utos(W *w, int k)
-{
-	off_t col;
-	BW *bw;
-	WIND_BW(bw, w);
-	col = bw->cursor->xcol;
-
-	pset(bw->cursor, bw->top);
-	pcol(bw->cursor, col);
-	bw->cursor->xcol = col;
-	return 0;
-}
-
-/* Move cursor to bottom of window */
-
-int ubos(W *w, int k)
-{
-	BW *bw;
-	off_t col;
-	WIND_BW(bw, w);
-	col = bw->cursor->xcol;
-
-	pline(bw->cursor, bw->top->line + bw->h - 1);
-	pcol(bw->cursor, col);
-	bw->cursor->xcol = col;
-	return 0;
 }
 
 /* Scroll buffer window up n lines

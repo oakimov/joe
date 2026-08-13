@@ -134,6 +134,8 @@ extern fn p_goto_eof(p: ?*GapP) ?*GapP;
 extern fn pbkwd(p: ?*GapP, n: i64) ?*GapP;
 extern fn pfwrd(p: ?*GapP, n: i64) ?*GapP;
 extern fn pset(n: ?*GapP, p: ?*GapP) ?*GapP;
+extern fn pdup(p: ?*GapP, tr: [*:0]const u8) ?*GapP;
+extern fn prm(p: ?*GapP) void;
 extern fn pprevl(p: ?*GapP) ?*GapP;
 extern fn pnextl(p: ?*GapP) ?*GapP;
 extern fn pcol(p: ?*GapP, goalcol: i64) ?*GapP;
@@ -141,6 +143,53 @@ extern fn piscol(p: ?*GapP) i64;
 extern fn pline(p: ?*GapP, line: i64) ?*GapP;
 extern fn binsc(p: ?*GapP, c: c_int) ?*GapP;
 extern fn pgetc(p: ?*GapP) c_int;
+extern fn prgetc(p: ?*GapP) c_int;
+extern fn pgetb(p: ?*GapP) c_int;
+extern fn prgetb(p: ?*GapP) c_int;
+extern fn brc(p: ?*GapP) c_int;
+extern fn brch(p: ?*GapP) c_int;
+extern fn pisbol(p: ?*GapP) c_int;
+extern fn piseol(p: ?*GapP) c_int;
+extern fn pisindent(p: ?*GapP) i64;
+extern fn joe_isblank(map: ?*anyopaque, c: c_int) c_int;
+
+const NO_MORE_DATA: c_int = -256;
+
+const PredFn = *const fn (?*FullCharmap, c_int) callconv(.c) c_int;
+/// Prefix of JOE `struct charmap` with predicate slots (see `joe/charmap.h`).
+const FullCharmap = extern struct {
+    next: ?*FullCharmap,
+    name: ?[*:0]const u8,
+    @"type": c_int,
+    is_punct: ?PredFn,
+    is_print: ?PredFn,
+    is_space: ?PredFn,
+    is_alpha_: ?PredFn,
+    is_alnum_: ?PredFn,
+};
+
+fn mapOf(p: *GapP) ?*FullCharmap {
+    const b = p.b orelse return null;
+    return @ptrCast(@alignCast(b.o.charmap));
+}
+
+fn joeIsAlnum(map: ?*FullCharmap, c: c_int) bool {
+    const m = map orelse return false;
+    const f = m.is_alnum_ orelse return false;
+    return f(m, c) != 0;
+}
+
+fn joeIsSpace(map: ?*FullCharmap, c: c_int) bool {
+    const m = map orelse return false;
+    const f = m.is_space orelse return false;
+    return f(m, c) != 0;
+}
+
+fn joeIsPunct(map: ?*FullCharmap, c: c_int) bool {
+    const m = map orelse return false;
+    const f = m.is_punct orelse return false;
+    return f(m, c) != 0;
+}
 
 fn asWin(w: ?*anyopaque) *WinRec {
     return @ptrCast(@alignCast(w.?));
@@ -295,5 +344,228 @@ pub export fn ubos(w: ?*anyopaque, k: c_int) c_int {
     _ = pline(cur, top.line + bw.h - 1);
     _ = pcol(cur, col);
     cur.xcol = col;
+    return 0;
+}
+
+/// Smart home: first non-blank, or bol if already there / `indentfirst`.
+pub export fn uhome(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    if (bw.o.hex != 0) return u_goto_bol(w, 0);
+    const cur = cursorOrNull(bw) orelse return -1;
+    const p = pdup(cur, "uhome") orelse return -1;
+    defer prm(p);
+
+    if (bw.o.indentfirst != 0) {
+        if (bw.o.smarthome != 0 and piscol(p) > pisindent(p)) {
+            _ = p_goto_bol(p);
+            while (joe_isblank(@ptrCast(mapOf(p)), brc(p)) != 0) _ = pgetc(p);
+        } else {
+            _ = p_goto_bol(p);
+        }
+    } else {
+        if (bw.o.smarthome != 0 and piscol(p) == 0 and pisindent(p) != 0) {
+            while (joe_isblank(@ptrCast(mapOf(p)), brc(p)) != 0) _ = pgetc(p);
+        } else {
+            _ = p_goto_bol(p);
+        }
+    }
+
+    _ = pset(cur, p);
+    cur.xcol = piscol(cur);
+    if (bw.o.viewmode != 0) cur.valcol = 0;
+    return 0;
+}
+
+/// Move cursor left (hex / picture / viewmode aware).
+pub export fn u_goto_left(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = cursorOrNull(bw) orelse return -1;
+    if (bw.o.hex != 0) {
+        return if (prgetb(cur) != NO_MORE_DATA) 0 else -1;
+    }
+    if (bw.o.picture != 0) {
+        if (cur.xcol != 0) {
+            cur.xcol -= 1;
+            _ = pcol(cur, cur.xcol);
+            return 0;
+        }
+        return -1;
+    }
+    if (bw.o.viewmode != 0) {
+        if (prgetc(cur) != NO_MORE_DATA) {
+            cur.valcol = 0;
+            return 0;
+        }
+        return -1;
+    }
+    if (cur.xcol != piscol(cur)) {
+        cur.xcol = piscol(cur);
+        return 0;
+    } else if (prgetc(cur) != NO_MORE_DATA) {
+        cur.xcol = piscol(cur);
+        return 0;
+    }
+    return -1;
+}
+
+/// Move cursor right (hex / picture aware).
+pub export fn u_goto_right(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = cursorOrNull(bw) orelse return -1;
+    if (bw.o.hex != 0) {
+        return if (pgetb(cur) != NO_MORE_DATA) 0 else -1;
+    }
+    if (bw.o.picture != 0) {
+        cur.xcol += 1;
+        _ = pcol(cur, cur.xcol);
+        return 0;
+    }
+    var rtn: c_int = -1;
+    if (pgetc(cur) != NO_MORE_DATA) {
+        cur.xcol = piscol(cur);
+        rtn = 0;
+    }
+    if (cur.xcol != piscol(cur)) cur.xcol = piscol(cur);
+    return rtn;
+}
+
+fn pGotoPrev(ptr: *GapP) c_int {
+    const p = pdup(ptr, "p_goto_prev") orelse return -1;
+    defer prm(p);
+    const map = mapOf(ptr);
+    var c = prgetc(p);
+    if (joeIsAlnum(map, c)) {
+        while (joeIsAlnum(map, blk: {
+            c = prgetc(p);
+            break :blk c;
+        })) {}
+        if (c != NO_MORE_DATA) _ = pgetc(p);
+    } else if (joeIsSpace(map, c) or joeIsPunct(map, c)) {
+        while (blk: {
+            c = prgetc(p);
+            break :blk joeIsSpace(map, c) or joeIsPunct(map, c);
+        }) {}
+        if (c != NO_MORE_DATA) _ = pgetc(p);
+        while (joeIsAlnum(map, blk: {
+            c = prgetc(p);
+            break :blk c;
+        })) {}
+        if (c != NO_MORE_DATA) _ = pgetc(p);
+    }
+    _ = pset(ptr, p);
+    return 0;
+}
+
+/// Internal word-back helper (former static in `uedit.c`; still called from C tomatch).
+pub export fn p_goto_prev(ptr: ?*GapP) c_int {
+    const p = ptr orelse return -1;
+    return pGotoPrev(p);
+}
+
+/// Move to previous word (or BOF).
+pub export fn u_goto_prev(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = cursorOrNull(bw) orelse return -1;
+    return pGotoPrev(cur);
+}
+
+fn pGotoNext(ptr: *GapP) c_int {
+    const p = pdup(ptr, "p_goto_next") orelse return -1;
+    defer prm(p);
+    const map = mapOf(ptr);
+    var c = brch(p);
+    var rtn: c_int = -1;
+    if (joeIsAlnum(map, c)) {
+        rtn = 0;
+        while (joeIsAlnum(map, blk: {
+            c = brch(p);
+            break :blk c;
+        })) _ = pgetc(p);
+    } else if (joeIsSpace(map, c) or joeIsPunct(map, c)) {
+        while (joeIsSpace(map, blk: {
+            c = brch(p);
+            break :blk c;
+        }) or joeIsPunct(map, c)) _ = pgetc(p);
+        while (joeIsAlnum(map, blk: {
+            c = brch(p);
+            break :blk c;
+        })) {
+            rtn = 0;
+            _ = pgetc(p);
+        }
+    } else {
+        _ = pgetc(p);
+    }
+    _ = pset(ptr, p);
+    return rtn;
+}
+
+/// Internal word-forward helper (former static in `uedit.c`; still called from C tomatch).
+pub export fn p_goto_next(ptr: ?*GapP) c_int {
+    const p = ptr orelse return -1;
+    return pGotoNext(p);
+}
+
+/// Move to end of next word (or EOF).
+pub export fn u_goto_next(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = cursorOrNull(bw) orelse return -1;
+    return pGotoNext(cur);
+}
+
+fn pboi(p: *GapP) *GapP {
+    _ = p_goto_bol(p);
+    while (joe_isblank(@ptrCast(mapOf(p)), brc(p)) != 0) _ = pgetc(p);
+    return p;
+}
+
+fn pisedge(p: *GapP) c_int {
+    if (pisbol(p) != 0) return -1;
+    if (piseol(p) != 0) return 1;
+    const q = pdup(p, "pisedge") orelse return 0;
+    defer prm(q);
+    _ = pboi(q);
+    if (q.byte == p.byte) return -1;
+    const c = brc(p);
+    if (joe_isblank(@ptrCast(mapOf(p)), c) != 0) {
+        _ = pset(q, p);
+        if (joe_isblank(@ptrCast(mapOf(p)), prgetc(q)) != 0) return 0;
+        if (c == '\t') return 1;
+        _ = pset(q, p);
+        _ = pgetc(q);
+        if (pgetc(q) == ' ') return 1;
+        return 0;
+    } else {
+        _ = pset(q, p);
+        const prev = prgetc(q);
+        if (prev == '\t') return -1;
+        if (prev != ' ') return 0;
+        if (prgetc(q) == ' ') return -1;
+        return 0;
+    }
+}
+
+/// Move left to a whitespace/indent edge.
+pub export fn upedge(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = cursorOrNull(bw) orelse return -1;
+    if (prgetc(cur) == NO_MORE_DATA) return -1;
+    while (pisedge(cur) != -1) _ = prgetc(cur);
+    return 0;
+}
+
+/// Move right to a whitespace/indent edge.
+pub export fn unedge(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = cursorOrNull(bw) orelse return -1;
+    if (pgetc(cur) == NO_MORE_DATA) return -1;
+    while (pisedge(cur) != 1) _ = pgetc(cur);
     return 0;
 }

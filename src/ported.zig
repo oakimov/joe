@@ -48,4 +48,6 @@ comptime {
     _ = @import("uformat.zig");
     // Path A: live ushell → Zig JOE ushell.h ABI exports.
     _ = @import("ushell.zig");
+    // Path A: live utag → Zig JOE utag.h ABI exports.
+    _ = @import("utag.zig");
 }

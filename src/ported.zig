@@ -58,4 +58,6 @@ comptime {
     _ = @import("usearch.zig");
     // Path A: live uerror → Zig JOE uerror.h ABI exports.
     _ = @import("uerror.zig");
+    // Path A: live ufile → Zig JOE ufile.h ABI exports.
+    _ = @import("ufile.zig");
 }

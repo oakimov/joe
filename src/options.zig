@@ -196,8 +196,8 @@ pub extern var utf8_map: [*c]struct_charmap;
 pub extern var locale_msgs: [*c]const u8;
 pub extern var scheme_name: [*c]u8;
 pub extern var xmsg: [*c]u8;
-pub extern var backpath: [*c]u8;
-pub extern var backup_file_suffix: [*c]u8;
+pub extern var backpath: [*c]const u8;
+pub extern var backup_file_suffix: [*c]const u8;
 pub const msgbuf: [*c]u8 = @extern([*c]u8, .{
     .name = "msgbuf",
 });

@@ -96,7 +96,7 @@ pub fn build(b: *std.Build) void {
             "joe/main.c",
             // REMOVED: joe/menu.c — replaced by src/menu.zig
             // REMOVED: joe/path.c — replaced by src/path.zig JOE path.h ABI exports
-            "joe/poshist.c",
+            // REMOVED: joe/poshist.c — replaced by src/poshist.zig JOE poshist.h ABI exports
             // REMOVED: joe/pw.c — replaced by src/pw.zig
             // REMOVED: joe/queue.c — replaced by src/queue.zig
             // REMOVED: joe/qw.c — replaced by src/qw.zig

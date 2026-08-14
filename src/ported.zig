@@ -42,4 +42,6 @@ comptime {
     _ = @import("bw_lgen.zig");
     // Path A: live uedit motion slice → Zig JOE uedit.h ABI exports.
     _ = @import("uedit.zig");
+    // Path A: live ublock mark slice → Zig JOE ublock.h ABI exports.
+    _ = @import("ublock.zig");
 }

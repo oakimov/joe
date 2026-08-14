@@ -1,0 +1,439 @@
+//! Path A live port of JOE highlighted-block commands (`joe/ublock.c`).
+//!
+//! Slice 1: globals + mark stack + mark set/goto/toggle commands.
+//! Remaining `joe/ublock.c` (rect helpers, blkdel/cpy/move, indent, filter,
+//! case) stays linked until later slices.
+
+const std = @import("std");
+const gap_types = @import("gapbuffer/types.zig");
+
+const GapP = gap_types.P;
+const GapB = gap_types.B;
+const GapOptions = gap_types.OPTIONS;
+
+const TYPETW: c_int = 0x0100;
+const TYPEPW: c_int = 0x0200;
+
+export var nowmarking: c_int = 0;
+export var square: c_int = 0;
+export var lightoff: c_int = 0;
+export var markb: ?*GapP = null;
+export var markk: ?*GapP = null;
+export var nstack: c_int = 0;
+export var autoswap: c_int = 0;
+
+extern var marking: c_int;
+
+const Watom = extern struct {
+    context: ?[*:0]const u8,
+    disp: ?*const fn (?*anyopaque, c_int) callconv(.c) void,
+    follow: ?*const fn (?*anyopaque) callconv(.c) void,
+    abort: ?*const fn (?*anyopaque) callconv(.c) c_int,
+    rtn: ?*const fn (?*anyopaque) callconv(.c) c_int,
+    @"type": ?*const fn (?*anyopaque, c_int) callconv(.c) c_int,
+    resize: ?*const fn (?*anyopaque, isize, isize) callconv(.c) void,
+    move: ?*const fn (?*anyopaque, isize, isize) callconv(.c) void,
+    ins: ?*const fn (?*anyopaque, ?*anyopaque, i64, i64, c_int) callconv(.c) void,
+    del: ?*const fn (?*anyopaque, ?*anyopaque, i64, i64, c_int) callconv(.c) void,
+    what: c_int,
+};
+
+const WinLink = extern struct {
+    next: ?*WinRec,
+    prev: ?*WinRec,
+};
+
+const WinRec = extern struct {
+    link: WinLink,
+    t: ?*anyopaque,
+    x: isize,
+    y: isize,
+    w: isize,
+    h: isize,
+    ny: isize,
+    nh: isize,
+    reqh: isize,
+    fixed: isize,
+    hh: isize,
+    win: ?*WinRec,
+    main: ?*WinRec,
+    orgwin: ?*WinRec,
+    curx: isize,
+    cury: isize,
+    kbd: ?*anyopaque,
+    watom: ?*const Watom,
+    object: ?*anyopaque,
+    msgt: ?[*:0]const u8,
+    msgb: ?[*:0]const u8,
+    huh: ?[*:0]const u8,
+    notify: ?*c_int,
+    bstack: ?*anyopaque,
+};
+
+const BwSaved = extern struct {
+    ww: c_int,
+    ai: c_int,
+    sp: c_int,
+};
+
+const BwRec = extern struct {
+    parent: ?*WinRec,
+    b: ?*GapB,
+    top: ?*GapP,
+    cursor: ?*GapP,
+    offset: i64,
+    t: ?*anyopaque,
+    h: isize,
+    w: isize,
+    x: isize,
+    y: isize,
+    o: GapOptions,
+    object: ?*anyopaque,
+    lincols: c_int,
+    curlin: i64,
+    top_changed: c_int,
+    db: ?*anyopaque,
+    shell_flag: c_int,
+    pasting: c_int,
+    last_viewmode: c_int,
+    saved: BwSaved,
+};
+
+comptime {
+    if (@sizeOf(WinRec) != 200) @compileError("WinRec size mismatch");
+    if (@sizeOf(BwRec) != 488) @compileError("BwRec size mismatch");
+    if (@sizeOf(GapP) != 112) @compileError("GapP size mismatch");
+}
+
+const MarkLink = extern struct {
+    next: ?*MarkSav,
+    prev: ?*MarkSav,
+};
+
+const MarkSav = extern struct {
+    link: MarkLink,
+    markb: ?*GapP,
+    markk: ?*GapP,
+};
+
+var markstack: MarkSav = undefined;
+var markfree: MarkSav = undefined;
+var mark_sentinels_ready: bool = false;
+
+extern fn pdup(p: ?*GapP, tr: [*:0]const u8) ?*GapP;
+extern fn pdupown(p: ?*GapP, owner: *?*GapP, tr: [*:0]const u8) ?*GapP;
+extern fn prm(p: ?*GapP) void;
+extern fn pset(n: ?*GapP, p: ?*GapP) ?*GapP;
+extern fn p_goto_bol(p: ?*GapP) ?*GapP;
+extern fn pnextl(p: ?*GapP) ?*GapP;
+extern fn pcol(p: ?*GapP, goalcol: i64) ?*GapP;
+extern fn updall() void;
+extern fn msgnw(w: ?*anyopaque, s: [*c]const u8) void;
+extern fn my_gettext(s: [*c]const u8) [*c]const u8;
+extern fn alitem(list: ?*anyopaque, itemsize: isize) ?*anyopaque;
+
+fn asWin(w: ?*anyopaque) *WinRec {
+    return @ptrCast(@alignCast(w.?));
+}
+
+fn windBw(w_in: ?*anyopaque) ?*BwRec {
+    if (w_in == null) return null;
+    const win = asWin(w_in);
+    const wa = win.watom orelse return null;
+    if ((wa.what & (TYPETW | TYPEPW)) == 0) return null;
+    return @ptrCast(@alignCast(win.object orelse return null));
+}
+
+fn ptrEq(a: anytype, b: anytype) bool {
+    return @intFromPtr(a) == @intFromPtr(b);
+}
+
+fn izqueMark(item: *MarkSav) void {
+    item.link.next = item;
+    item.link.prev = item;
+}
+
+fn ensureMarkSentinels() void {
+    if (mark_sentinels_ready) return;
+    markstack = std.mem.zeroes(MarkSav);
+    markfree = std.mem.zeroes(MarkSav);
+    izqueMark(&markstack);
+    izqueMark(&markfree);
+    mark_sentinels_ready = true;
+}
+
+fn enquebMark(queue: *MarkSav, item: *MarkSav) void {
+    const p = queue.link.prev.?;
+    item.link.next = queue;
+    item.link.prev = queue.link.prev;
+    p.link.next = item;
+    queue.link.prev = item;
+}
+
+fn dequeMark(item: *MarkSav) void {
+    const n = item.link.next.?;
+    const p = item.link.prev.?;
+    p.link.next = item.link.next;
+    n.link.prev = item.link.prev;
+}
+
+fn demoteMark(queue: *MarkSav, item: *MarkSav) void {
+    dequeMark(item);
+    enquebMark(queue, item);
+}
+
+pub export fn upsh(w: ?*anyopaque, k: c_int) c_int {
+    _ = w;
+    _ = k;
+    ensureMarkSentinels();
+    const m: *MarkSav = @ptrCast(@alignCast(alitem(@ptrCast(&markfree), @sizeOf(MarkSav)) orelse return -1));
+    m.markb = null;
+    m.markk = null;
+    if (markk != null) _ = pdupown(markk, &m.markk, "upsh");
+    if (markb != null) _ = pdupown(markb, &m.markb, "upsh");
+    enquebMark(&markstack, m);
+    nstack += 1;
+    return 0;
+}
+
+pub export fn upop(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    ensureMarkSentinels();
+    const m = markstack.link.prev.?;
+    if (!ptrEq(m, &markstack)) {
+        nstack -= 1;
+        prm(markk);
+        prm(markb);
+        markk = m.markk;
+        if (markk) |mk| mk.owner = &markk;
+        markb = m.markb;
+        if (markb) |mb| mb.owner = &markb;
+        demoteMark(&markfree, m);
+        if (lightoff != 0) _ = unmark(w, 0);
+        updall();
+        return 0;
+    }
+    return -1;
+}
+
+/// Return true if markb/markk are valid. If `r` is set, swap when needed.
+pub export fn markv(r: c_int) c_int {
+    if (markb) |mb| {
+        if (markk) |mk| {
+            if (mb.b == mk.b and
+                (if (r == 2) mk.byte >= mb.byte else mk.byte > mb.byte) and
+                (square == 0 or (if (r == 2) mk.xcol >= mb.xcol else mk.xcol > mb.xcol)))
+            {
+                return 1;
+            } else if (autoswap != 0 and r != 0 and mb.b == mk.b and mb.byte > mk.byte and
+                (square == 0 or mk.xcol < mb.xcol))
+            {
+                const p = pdup(mb, "markv");
+                prm(markb);
+                markb = null;
+                _ = pdupown(mk, &markb, "markv");
+                prm(markk);
+                markk = null;
+                _ = pdupown(p, &markk, "markv");
+                prm(p);
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+pub export fn umarkb(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = bw.cursor orelse return -1;
+    _ = pdupown(cur, &markb, "umarkb");
+    if (markb) |mb| mb.xcol = cur.xcol;
+    updall();
+    return 0;
+}
+
+pub export fn udrop(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    prm(markk);
+    if (marking != 0 and markb != null) {
+        prm(markb);
+    } else {
+        _ = umarkb(w, 0);
+    }
+    return 0;
+}
+
+pub export fn ubegin_marking(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = bw.cursor orelse return -1;
+    if (nowmarking != 0) {
+        return 0;
+    } else if (markv(0) != 0 and markb != null and cur.b == markb.?.b) {
+        if (cur.byte == markb.?.byte) {
+            _ = pset(markb, markk);
+            prm(markk);
+            markk = null;
+            nowmarking = 1;
+            return 0;
+        } else if (cur.byte == markk.?.byte) {
+            prm(markk);
+            markk = null;
+            nowmarking = 1;
+            return 0;
+        }
+    }
+    prm(markb);
+    markb = null;
+    prm(markk);
+    markk = null;
+    updall();
+    nowmarking = 1;
+    return umarkb(@ptrCast(bw.parent), 0);
+}
+
+pub export fn utoggle_marking(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = bw.cursor orelse return -1;
+    if (markv(0) != 0 and markb != null and cur.b == markb.?.b and
+        cur.byte >= markb.?.byte and cur.byte <= markk.?.byte)
+    {
+        prm(markb);
+        markb = null;
+        prm(markk);
+        markk = null;
+        updall();
+        nowmarking = 0;
+        msgnw(@ptrCast(bw.parent), my_gettext("Selection cleared."));
+        return 0;
+    } else if (markk != null) {
+        prm(markb);
+        markb = null;
+        prm(markk);
+        markk = null;
+        updall();
+        nowmarking = 1;
+        msgnw(@ptrCast(bw.parent), my_gettext("Selection started."));
+        return umarkb(@ptrCast(bw.parent), 0);
+    } else if (markb != null and markb.?.b == cur.b) {
+        nowmarking = 0;
+        if (cur.byte < markb.?.byte) {
+            _ = pdupown(markb, &markk, "utoggle_marking");
+            prm(markb);
+            markb = null;
+            _ = pdupown(cur, &markb, "utoggle_marking");
+            if (markb) |mb| mb.xcol = cur.xcol;
+        } else {
+            _ = pdupown(cur, &markk, "utoggle_marking");
+            if (markk) |mk| mk.xcol = cur.xcol;
+        }
+        updall();
+        return 0;
+    } else {
+        nowmarking = 1;
+        msgnw(@ptrCast(bw.parent), my_gettext("Selection started."));
+        return umarkb(@ptrCast(bw.parent), 0);
+    }
+}
+
+pub export fn uselect(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    if (markb == null) _ = umarkb(w, 0);
+    return 0;
+}
+
+pub export fn umarkk(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = bw.cursor orelse return -1;
+    _ = pdupown(cur, &markk, "umarkk");
+    if (markk) |mk| mk.xcol = cur.xcol;
+    updall();
+    return 0;
+}
+
+pub export fn unmark(w: ?*anyopaque, k: c_int) c_int {
+    _ = w;
+    _ = k;
+    prm(markb);
+    prm(markk);
+    nowmarking = 0;
+    updall();
+    return 0;
+}
+
+pub export fn umarkl(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = bw.cursor orelse return -1;
+    _ = p_goto_bol(cur);
+    _ = umarkb(w, 0);
+    _ = pnextl(cur);
+    _ = umarkk(w, 0);
+    _ = utomarkb(w, 0);
+    _ = pcol(cur, cur.xcol);
+    return 0;
+}
+
+pub export fn utomarkb(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = bw.cursor orelse return -1;
+    if (markb) |mb| {
+        if (mb.b == bw.b) {
+            _ = pset(cur, mb);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+pub export fn utomarkk(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = bw.cursor orelse return -1;
+    if (markk) |mk| {
+        if (mk.b == bw.b) {
+            _ = pset(cur, mk);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+pub export fn uswap(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = bw.cursor orelse return -1;
+    if (markb) |mb| {
+        if (mb.b == bw.b) {
+            const q = pdup(mb, "uswap");
+            _ = umarkb(w, 0);
+            _ = pset(cur, q);
+            prm(q);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+pub export fn utomarkbk(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = bw.cursor orelse return -1;
+    if (markb) |mb| {
+        if (mb.b == bw.b and cur.byte != mb.byte) {
+            _ = pset(cur, mb);
+            return 0;
+        }
+    }
+    if (markk) |mk| {
+        if (mk.b == bw.b and cur.byte != mk.byte) {
+            _ = pset(cur, mk);
+            return 0;
+        }
+    }
+    return -1;
+}

@@ -857,6 +857,7 @@ The build is always working — start with a binary that compiles and runs, then
 ### Phase 7: File I/O & Commands (3-4 weeks) — IN PROGRESS (Path A uedit done)
 - ⬜ `fileio.zig` — load, save, UTF-16 conversion
 - ✅ `edit.zig` / `src/uedit.zig` — Path A live edit commands (**zero-C `uedit`**: JOE `uedit.h` ABI exported from Zig; next: `ublock`/`uformat`)
+- ✅ Path A `ublock` mark slice: Zig `src/ublock.zig` owns mark globals (`square`/`markb`/`markk`/…) + `upsh`/`upop`/`markv` + mark set/goto/toggle cmds; remaining `joe/ublock.c` (~1332 lines: rect/blkdel/indent/filter/case) still linked; soak **196/196**
 - ⬜ `search.zig` — search/replace
 - ⬜ Shell window, tags, math, error navigation
 - At this point: feature-complete in Zig

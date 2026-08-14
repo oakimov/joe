@@ -854,12 +854,13 @@ The build is always working — start with a binary that compiles and runs, then
 - ✅ Path A `uedit` tomatch + removal: Zig owns `utomatch` + delimiter/XML/word/char helpers; removed `joe/uedit.c` from the link; soak **196/196**; live `uedit` is zero-C
 - At this point: fully functional editor with markdown viewmode
 
-### Phase 7: File I/O & Commands (3-4 weeks) — IN PROGRESS (Path A uedit done)
+### Phase 7: File I/O & Commands (3-4 weeks) — IN PROGRESS (Path A uedit + ublock done)
 - ⬜ `fileio.zig` — load, save, UTF-16 conversion
-- ✅ `edit.zig` / `src/uedit.zig` — Path A live edit commands (**zero-C `uedit`**: JOE `uedit.h` ABI exported from Zig; next: `ublock`/`uformat`)
-- ✅ Path A `ublock` mark slice: Zig `src/ublock.zig` owns mark globals (`square`/`markb`/`markk`/…) + `upsh`/`upop`/`markv` + mark set/goto/toggle cmds; remaining `joe/ublock.c` (~1332 lines: rect/blkdel/indent/filter/case) still linked; soak **196/196**
-- ✅ Path A `ublock` rect/block-ops slice: Zig owns `pextrect`/`pdelrect`/`pclrrect`/`ptabrect`/`pinsrect` + `ublkdel`/`upicokill`/`ublkmove`/`ublkcpy`; remaining `joe/ublock.c` (~973 lines: indent/filter/case/blksum); soak **196/196**
-- ✅ Path A `ublock` indent slice: Zig owns `setindent`/`urindent`/`ulindent` + helpers; remaining `joe/ublock.c` (~533 lines: filter/case/blksum); soak **196/196**
+- ✅ `edit.zig` / `src/uedit.zig` — Path A live edit commands (**zero-C `uedit`**: JOE `uedit.h` ABI exported from Zig)
+- ✅ Path A `ublock` mark slice: Zig `src/ublock.zig` owns mark globals (`square`/`markb`/`markk`/…) + `upsh`/`upop`/`markv` + mark set/goto/toggle cmds; soak **196/196**
+- ✅ Path A `ublock` rect/block-ops slice: Zig owns `pextrect`/`pdelrect`/`pclrrect`/`ptabrect`/`pinsrect` + `ublkdel`/`upicokill`/`ublkmove`/`ublkcpy`; soak **196/196**
+- ✅ Path A `ublock` indent slice: Zig owns `setindent`/`urindent`/`ulindent` + helpers; soak **196/196**
+- ✅ Path A `ublock` filter/case/stats + zero-C: Zig owns `doinsf`/`ufilt`/`ulower`/`uupper`/`blksum`/`blklr`/`blkget` (+ `joe_toupper_v`); `joe/ublock.c` removed from the link (tombstone); soak **196/196**; next: `uformat`
 - ⬜ `search.zig` — search/replace
 - ⬜ Shell window, tags, math, error navigation
 - At this point: feature-complete in Zig

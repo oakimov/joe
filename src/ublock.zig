@@ -1,7 +1,7 @@
 //! Path A live port of JOE highlighted-block commands (`joe/ublock.c`).
 //!
-//! Landed: marks, rect/block-ops, and indent (`setindent`/`urindent`/`ulindent`).
-//! Remaining `joe/ublock.c` (filter, case, blksum) stays linked until later slices.
+//! JOE `ublock.h` ABI lives here (marks, rect/block-ops, indent, filter,
+//! case fold, blksum). `joe/ublock.c` is a tombstone.
 
 const std = @import("std");
 const gap_types = @import("gapbuffer/types.zig");
@@ -1075,4 +1075,577 @@ pub export fn ulindent(w: ?*anyopaque, k: c_int) c_int {
         }
     }
     return 0;
+}
+
+// --- Path A: filter, case fold, blksum/blklr/blkget ---
+
+const intern = @import("gapbuffer/intern.zig");
+
+const ScreenRec = extern struct {
+    t: ?*anyopaque,
+    wind: isize,
+    topwin: ?*WinRec,
+    curwin: ?*WinRec,
+    w: isize,
+    h: isize,
+};
+
+const PWFLAG_COMMAND: c_int = 8;
+const MAXOFF: i64 = @divTrunc(std.math.maxInt(u64), 2) - 1;
+
+export var filthist: ?*GapB = null;
+var filtflg: c_int = 0;
+
+extern fn bload(s: [*c]const u8) ?*GapB;
+extern fn bread(fi: c_int, max: i64, binary: c_int) ?*GapB;
+extern fn bsavefd(p: ?*GapP, fd: c_int, size: i64) c_int;
+extern fn off_max(a: i64, b: i64) i64;
+extern fn vsrm(s: [*c]u8) void;
+extern fn vsncpy(vary: [*c]u8, pos: isize, array: [*c]const u8, len: isize) [*c]u8;
+extern fn slen(s: [*c]const u8) isize;
+extern fn nescape(t: ?*anyopaque) void;
+extern fn nreturn(t: ?*anyopaque) void;
+extern fn ttclsn() void;
+extern fn ttopnn() void;
+extern fn signrm() void;
+extern fn prgetc(p: ?*GapP) c_int;
+extern fn joe_strtod(ptr: [*c]const u8, at_eptr: ?*?[*:0]const u8) f64;
+extern fn to_uni(map: ?*anyopaque, c: c_int) c_int;
+extern fn utf8_encode(buf: [*]u8, c: c_int) isize;
+extern fn joe_malloc(size: isize) ?*anyopaque;
+extern fn joe_realloc(ptr: ?*anyopaque, size: isize) ?*anyopaque;
+extern fn cmplt_command(bw: ?*anyopaque, k: c_int) c_int;
+extern fn wmkpw(
+    w: ?*anyopaque,
+    prompt: [*c]const u8,
+    history: ?*?*GapB,
+    func: ?*const fn (?*anyopaque, [*c]u8, ?*anyopaque, ?*c_int) callconv(.c) c_int,
+    huh: ?[*:0]const u8,
+    abrt: ?*const fn (?*anyopaque, ?*anyopaque) callconv(.c) c_int,
+    tab: ?*const fn (?*anyopaque, c_int) callconv(.c) c_int,
+    object: ?*anyopaque,
+    notify: ?*c_int,
+    map: ?*anyopaque,
+    file_prompt: c_int,
+) ?*anyopaque;
+extern var locale_map: ?*anyopaque;
+extern fn pipe(fds: *[2]c_int) c_int;
+extern fn fork() c_int;
+extern fn close(fd: c_int) c_int;
+extern fn dup(fd: c_int) c_int;
+extern fn execl(path: [*:0]const u8, arg0: [*:0]const u8, ...) c_int;
+extern fn _exit(status: c_int) noreturn;
+extern fn wait(status: ?*c_int) c_int;
+extern fn putenv(string: [*:0]u8) c_int;
+
+fn scrnOf(bw: *BwRec) ?*anyopaque {
+    const parent = bw.parent orelse return null;
+    const scr: *ScreenRec = @ptrCast(@alignCast(parent.t orelse return null));
+    return scr.t;
+}
+
+fn vsLen(s: [*c]u8) isize {
+    if (s == null) return 0;
+    return (@as([*]align(1) const isize, @ptrCast(s)) - 1)[0];
+}
+
+fn joeTolower(map: ?*anyopaque, c: c_int) c_int {
+    return intern.joe_tolower_v(map, c);
+}
+
+fn joeToupper(map: ?*anyopaque, c: c_int) c_int {
+    return intern.joe_toupper_v(map, c);
+}
+
+fn msgBerror(bw: *BwRec) void {
+    const err = intern.berror;
+    if (err < 0 and -err < intern.msgs.len) {
+        msgnw(@ptrCast(bw.parent), @ptrCast(intern.msgs[@intCast(-err)]));
+    }
+}
+
+pub export fn doinsf(w: ?*anyopaque, s_in: [*c]u8, object: ?*anyopaque, notify: ?*c_int) c_int {
+    _ = object;
+    const bw = windBw(w) orelse return -1;
+    const cur = bw.cursor orelse return -1;
+    if (notify) |n| n.* = 1;
+    if (square != 0) {
+        if (markv(2) != 0) {
+            const mb = markb orelse return -1;
+            const mk = markk orelse return -1;
+            const width = mk.xcol - mb.xcol;
+            const usetabs = ptabrect(mb, mk.line - mb.line + 1, mk.xcol);
+            const tmp = bload(s_in);
+            if (intern.berror != 0) {
+                msgBerror(bw);
+                brm(tmp);
+                return -1;
+            }
+            const eof = tmp.?.eof orelse {
+                brm(tmp);
+                return -1;
+            };
+            const height: i64 = if (piscol(eof) != 0) eof.line + 1 else eof.line;
+            if (bw.o.overtype != 0) {
+                pclrrect(mb, off_max(mk.line - mb.line + 1, height), mk.xcol, usetabs);
+                pdelrect(mb, height, width + mb.xcol);
+            }
+            pinsrect(mb, tmp, width, usetabs);
+            _ = pdupown(mb, &markk, "doinsf");
+            if (markk) |nmk| {
+                nmk.xcol = mb.xcol;
+                if (height != 0) {
+                    _ = pline(nmk, nmk.line + height - 1);
+                    _ = pcol(nmk, mb.xcol + width);
+                    nmk.xcol = mb.xcol + width;
+                }
+            }
+            brm(tmp);
+            updall();
+            return 0;
+        } else {
+            msgnw(@ptrCast(bw.parent), my_gettext("No block"));
+            return -1;
+        }
+    } else {
+        var ret: c_int = 0;
+        const tmp = bload(s_in);
+        if (intern.berror != 0) {
+            msgBerror(bw);
+            brm(tmp);
+            ret = -1;
+        } else {
+            _ = binsb(cur, tmp);
+        }
+        vsrm(s_in);
+        cur.xcol = piscol(cur);
+        return ret;
+    }
+}
+
+fn markall(bw: *BwRec) void {
+    const cur = bw.cursor orelse return;
+    const b = cur.b orelse return;
+    _ = pdupown(b.bof, &markb, "markall");
+    if (markb) |mb| mb.xcol = 0;
+    _ = pdupown(b.eof, &markk, "markall");
+    if (markk) |mk| mk.xcol = piscol(mk);
+    updall();
+}
+
+fn checkmark(bw: *BwRec) c_int {
+    if (markv(1) == 0) {
+        if (square != 0) return 2;
+        markall(bw);
+        filtflg = 1;
+        return 1;
+    } else {
+        filtflg = 0;
+        return 0;
+    }
+}
+
+fn dofilt(w: ?*anyopaque, s_in: [*c]u8, object: ?*anyopaque, notify: ?*c_int) callconv(.c) c_int {
+    _ = object;
+    var fr: [2]c_int = undefined;
+    var fw: [2]c_int = undefined;
+    var flg: c_int = 0;
+    const bw = windBw(w) orelse return -1;
+    const cur = bw.cursor orelse return -1;
+
+    if (notify) |n| n.* = 1;
+    if (markb != null and markk != null and square == 0 and markb.?.b == bw.b and markk.?.b == bw.b and markb.?.byte == markk.?.byte) {
+        flg = 1;
+    } else if (markv(1) == 0) {
+        msgnw(@ptrCast(bw.parent), my_gettext("No block"));
+        return -1;
+    }
+
+    const mb = markb orelse return -1;
+    const mk = markk orelse return -1;
+    if (mb.b != bw.b and modify_logic(@ptrCast(bw), mb.b) == 0) return -1;
+
+    if (pipe(&fr) == -1) {
+        msgnw(@ptrCast(bw.parent), my_gettext("Couldn't create pipe"));
+        return -1;
+    }
+    if (pipe(&fw) == -1) {
+        msgnw(@ptrCast(bw.parent), my_gettext("Couldn't create pipe"));
+        return -1;
+    }
+    nescape(scrnOf(bw));
+    ttclsn();
+
+    const child1 = fork();
+    if (child1 == 0) {
+        signrm();
+        _ = close(0);
+        _ = close(1);
+        _ = close(2);
+        if (dup(fw[0]) == -1) _exit(1);
+        if (dup(fr[1]) == -1) _exit(1);
+        if (dup(fr[1]) == -1) _exit(1);
+        _ = close(fw[0]);
+        _ = close(fr[1]);
+        _ = close(fw[1]);
+        _ = close(fr[0]);
+        const prefix = "JOE_FILENAME=";
+        var fname = vsncpy(null, 0, prefix, prefix.len);
+        const nam: [*c]const u8 = if (bw.b) |bb| blk: {
+            if (bb.name) |n| break :blk @ptrCast(@alignCast(n));
+            break :blk "Unnamed";
+        } else "Unnamed";
+        var nlen = slen(nam);
+        if (nlen >= 512) nlen = 512;
+        fname = vsncpy(fname, vsLen(fname), nam, nlen);
+        _ = putenv(@ptrCast(fname));
+        vsrm(fname);
+        _ = execl("/bin/sh", "/bin/sh", "-c", s_in, @as(?[*:0]const u8, null));
+        _exit(0);
+    }
+
+    _ = close(fr[1]);
+    _ = close(fw[0]);
+    const child2 = fork();
+    if (child2 != 0) {
+        _ = close(fw[1]);
+        if (square != 0) {
+            const width = mk.xcol - mb.xcol;
+            const usetabs = ptabrect(mb, mk.line - mb.line + 1, mk.xcol);
+            const tmp = bread(fr[0], MAXOFF, 0);
+            const eof = tmp.?.eof orelse {
+                brm(tmp);
+                return -1;
+            };
+            const height: i64 = if (piscol(eof) != 0) eof.line + 1 else eof.line;
+            if (bw.o.overtype != 0) {
+                pclrrect(mb, mk.line - mb.line + 1, mk.xcol, usetabs);
+                pdelrect(mb, off_max(height, mk.line - mb.line + 1), width + mb.xcol);
+            } else {
+                pdelrect(mb, mk.line - mb.line + 1, mk.xcol);
+            }
+            pinsrect(mb, tmp, width, usetabs);
+            _ = pdupown(mb, &markk, "dofilt");
+            if (markk) |nmk| {
+                nmk.xcol = mb.xcol;
+                if (height != 0) {
+                    _ = pline(nmk, nmk.line + height - 1);
+                    _ = pcol(nmk, mb.xcol + width);
+                    nmk.xcol = mb.xcol + width;
+                }
+            }
+            if (lightoff != 0) _ = unmark(@ptrCast(bw.parent), 0);
+            brm(tmp);
+            updall();
+        } else {
+            const p = pdup(mk, "dofilt") orelse return -1;
+            if (flg == 0) _ = prgetc(p);
+            bdel(mb, p);
+            _ = binsb(p, bread(fr[0], MAXOFF, 0));
+            if (flg == 0) {
+                _ = pset(p, markk);
+                _ = prgetc(p);
+                bdel(p, markk);
+            }
+            prm(p);
+            if (lightoff != 0) _ = unmark(@ptrCast(bw.parent), 0);
+        }
+        _ = close(fr[0]);
+        _ = wait(null);
+        _ = wait(null);
+    } else {
+        if (square != 0) {
+            const tmp = pextrect(mb, mk.line - mb.line + 1, mk.xcol);
+            _ = bsavefd(tmp.?.bof, fw[1], tmp.?.eof.?.byte);
+            brm(tmp);
+        } else {
+            _ = bsavefd(mb, fw[1], mk.byte - mb.byte);
+        }
+        _ = close(fw[1]);
+        _exit(0);
+    }
+    vsrm(s_in);
+    ttopnn();
+    nreturn(scrnOf(bw));
+    if (filtflg != 0) _ = unmark(@ptrCast(bw.parent), 0);
+    cur.xcol = piscol(cur);
+    return 0;
+}
+
+pub export fn ufilt(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    switch (checkmark(bw)) {
+        0 => {
+            const prompt = my_gettext("Command to filter block through (%{abort} to abort): ");
+            if (wmkpw(@ptrCast(bw.parent), prompt, &filthist, &dofilt, null, null, &cmplt_command, null, null, locale_map, PWFLAG_COMMAND) != null) return 0;
+            return -1;
+        },
+        1 => {
+            const prompt = my_gettext("Command to filter file through (%{abort} to abort): ");
+            if (wmkpw(@ptrCast(bw.parent), prompt, &filthist, &dofilt, null, null, &cmplt_command, null, null, locale_map, PWFLAG_COMMAND) != null) return 0;
+            return -1;
+        },
+        else => {
+            msgnw(@ptrCast(bw.parent), my_gettext("No block"));
+            return -1;
+        },
+    }
+}
+
+pub export fn ulower(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = bw.cursor orelse return -1;
+    if (markv(1) != 0) {
+        const mb = markb orelse return -1;
+        const mk = markk orelse return -1;
+        const b = bcpy(mb, mk) orelse return -1;
+        const q = pdup(mk, "ulower") orelse {
+            brm(b);
+            return -1;
+        };
+        _ = prgetc(q);
+        bdel(mb, q);
+        if (mb.b) |srcb| b.o.charmap = srcb.o.charmap;
+        const p = pdup(b.bof, "ulower") orelse {
+            prm(q);
+            brm(b);
+            return -1;
+        };
+        while (true) {
+            var c = pgetc(p);
+            if (c == NO_MORE_DATA) break;
+            c = joeTolower(@ptrCast(b.o.charmap), c);
+            _ = binsc(q, c);
+            _ = pgetc(q);
+        }
+        prm(p);
+        bdel(q, mk);
+        prm(q);
+        brm(b);
+        cur.xcol = piscol(cur);
+        return 0;
+    }
+    return -1;
+}
+
+pub export fn uupper(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = bw.cursor orelse return -1;
+    if (markv(1) != 0) {
+        const mb = markb orelse return -1;
+        const mk = markk orelse return -1;
+        const b = bcpy(mb, mk) orelse return -1;
+        const q = pdup(mk, "uupper") orelse {
+            brm(b);
+            return -1;
+        };
+        _ = prgetc(q);
+        bdel(mb, q);
+        if (mb.b) |srcb| b.o.charmap = srcb.o.charmap;
+        const p = pdup(b.bof, "uupper") orelse {
+            prm(q);
+            brm(b);
+            return -1;
+        };
+        while (true) {
+            var c = pgetc(p);
+            if (c == NO_MORE_DATA) break;
+            c = joeToupper(@ptrCast(b.o.charmap), c);
+            _ = binsc(q, c);
+            _ = pgetc(q);
+        }
+        prm(p);
+        bdel(q, mk);
+        prm(q);
+        brm(b);
+        cur.xcol = piscol(cur);
+        return 0;
+    }
+    return -1;
+}
+
+fn isNumStart(c: c_int) bool {
+    return (c >= '0' and c <= '9') or c == '.' or c == '-';
+}
+
+fn isNumCont(c: c_int) bool {
+    return (c >= '0' and c <= '9') or c == 'e' or c == 'E' or
+        c == 'p' or c == 'P' or c == 'x' or c == 'X' or
+        c == '.' or c == '-' or c == '+' or c == 'o' or c == 'O' or
+        (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F') or c == '_';
+}
+
+pub export fn blksum(bw_in: ?*anyopaque, sum: ?*f64, sumsq: ?*f64) c_int {
+    const bw = @as(*BwRec, @ptrCast(@alignCast(bw_in orelse return -1)));
+    if (checkmark(bw) == 2) return -1;
+    const mb = markb orelse return -1;
+    const mk = markk orelse return -1;
+    const q = pdup(mb, "blksum") orelse return -1;
+    defer prm(q);
+    var buf: [80]u8 = undefined;
+    var accu: f64 = 0.0;
+    var accusq: f64 = 0.0;
+    var count: c_int = 0;
+    const left = mb.xcol;
+    const right = mk.xcol;
+    while (q.byte < mk.byte) {
+        while (q.byte < mk.byte and square != 0 and (piscol(q) < left or piscol(q) >= right)) _ = pgetc(q);
+        while (q.byte < mk.byte and (square == 0 or (piscol(q) >= left and piscol(q) < right))) {
+            var c = pgetc(q);
+            if (isNumStart(c)) {
+                buf[0] = @truncate(@as(u32, @bitCast(c)));
+                var x: usize = 1;
+                while (q.byte < mk.byte and (square == 0 or (piscol(q) >= left and piscol(q) < right))) {
+                    c = pgetc(q);
+                    if (isNumCont(c)) {
+                        if (x != 79) {
+                            buf[x] = @truncate(@as(u32, @bitCast(c)));
+                            x += 1;
+                        }
+                    } else break;
+                }
+                buf[x] = 0;
+                const v = joe_strtod(&buf, null);
+                count += 1;
+                accu += v;
+                accusq += v * v;
+                break;
+            }
+        }
+    }
+    if (sum) |s| s.* = accu;
+    if (sumsq) |s| s.* = accusq;
+    if (filtflg != 0) _ = unmark(@ptrCast(bw.parent), 0);
+    return count;
+}
+
+pub export fn blklr(
+    bw_in: ?*anyopaque,
+    xsum: ?*f64,
+    xsumsq: ?*f64,
+    ysum: ?*f64,
+    ysumsq: ?*f64,
+    xy: ?*f64,
+    logx: c_int,
+    logy: c_int,
+) c_int {
+    const bw = @as(*BwRec, @ptrCast(@alignCast(bw_in orelse return -1)));
+    if (checkmark(bw) == 2) return -1;
+    const mb = markb orelse return -1;
+    const mk = markk orelse return -1;
+    const q = pdup(mb, "blklr") orelse return -1;
+    defer prm(q);
+    var buf: [80]u8 = undefined;
+    var accux: f64 = 0.0;
+    var accuxsq: f64 = 0.0;
+    var accuy: f64 = 0.0;
+    var accuysq: f64 = 0.0;
+    var accuxy: f64 = 0.0;
+    var prevx: f64 = 0.0;
+    var state: c_int = 0;
+    var count: c_int = 0;
+    const left = mb.xcol;
+    const right = mk.xcol;
+    while (q.byte < mk.byte) {
+        while (q.byte < mk.byte and square != 0 and (piscol(q) < left or piscol(q) >= right)) _ = pgetc(q);
+        while (q.byte < mk.byte and (square == 0 or (piscol(q) >= left and piscol(q) < right))) {
+            var c = pgetc(q);
+            if (isNumStart(c)) {
+                buf[0] = @truncate(@as(u32, @bitCast(c)));
+                var x: usize = 1;
+                while (q.byte < mk.byte and (square == 0 or (piscol(q) >= left and piscol(q) < right))) {
+                    c = pgetc(q);
+                    if (isNumCont(c)) {
+                        if (x != 79) {
+                            buf[x] = @truncate(@as(u32, @bitCast(c)));
+                            x += 1;
+                        }
+                    } else break;
+                }
+                buf[x] = 0;
+                var v = joe_strtod(&buf, null);
+                if (state == 0) {
+                    if (logx != 0) v = @log(v);
+                    prevx = v;
+                    accux += v;
+                    accuxsq += v * v;
+                    state = 1;
+                } else {
+                    if (logy != 0) v = @log(v);
+                    accuy += v;
+                    accuysq += v * v;
+                    accuxy += prevx * v;
+                    state = 0;
+                    count += 1;
+                }
+                break;
+            }
+        }
+    }
+    if (xsum) |s| s.* = accux;
+    if (xsumsq) |s| s.* = accuxsq;
+    if (ysum) |s| s.* = accuy;
+    if (ysumsq) |s| s.* = accuysq;
+    if (xy) |s| s.* = accuxy;
+    if (filtflg != 0) _ = unmark(@ptrCast(bw.parent), 0);
+    if (state != 0) return -1;
+    return count;
+}
+
+pub export fn blkget(bw_in: ?*anyopaque) [*c]u8 {
+    const bw = @as(*BwRec, @ptrCast(@alignCast(bw_in orelse return null)));
+    if (checkmark(bw) == 2) return null;
+    const mb = markb orelse return null;
+    const mk = markk orelse return null;
+    var buf_size: isize = mk.byte - mb.byte + 1;
+    var buf_x: isize = 0;
+    var buf: [*c]u8 = @ptrCast(@alignCast(joe_malloc(buf_size) orelse return null));
+    const left = mb.xcol;
+    const right = mk.xcol;
+    const q = pdup(mb, "blkget") orelse {
+        // leak matches failed alloc path rarity; still free
+        return null;
+    };
+    while (q.byte < mk.byte) {
+        while (q.byte < mk.byte and square != 0 and (piscol(q) < left or piscol(q) >= right)) _ = pgetc(q);
+        while (q.byte < mk.byte and (square == 0 or (piscol(q) >= left and piscol(q) < right))) {
+            var ch = pgetc(q);
+            var bf: [8]u8 = undefined;
+            const map = if (q.b) |b| b.o.charmap else null;
+            if (map == null or map.?.@"type" == 0) {
+                ch = to_uni(@ptrCast(map), ch);
+            }
+            const len = utf8_encode(&bf, ch);
+            var xi: isize = 0;
+            while (xi != len) : (xi += 1) {
+                if (buf_x == buf_size - 1) {
+                    buf_size *= 2;
+                    buf = @ptrCast(@alignCast(joe_realloc(buf, buf_size) orelse {
+                        prm(q);
+                        return null;
+                    }));
+                }
+                buf[@intCast(buf_x)] = bf[@intCast(xi)];
+                buf_x += 1;
+            }
+        }
+        if (square != 0 and q.byte < mk.byte and piscol(q) >= right) {
+            if (buf_x == buf_size - 1) {
+                buf_size *= 2;
+                buf = @ptrCast(@alignCast(joe_realloc(buf, buf_size) orelse {
+                    prm(q);
+                    return null;
+                }));
+            }
+            buf[@intCast(buf_x)] = '\n';
+            buf_x += 1;
+        }
+    }
+    prm(q);
+    buf[@intCast(buf_x)] = 0;
+    if (filtflg != 0) _ = unmark(@ptrCast(bw.parent), 0);
+    return buf;
 }

@@ -109,6 +109,12 @@ pub fn joe_tolower_v(map: ?*anyopaque, c: c_int) c_int {
     return c;
 }
 
+pub fn joe_toupper_v(map: ?*anyopaque, c: c_int) c_int {
+    const m = @as(*const Charmap, @alignCast(@ptrCast(map orelse return c)));
+    if (m.to_upper) |f| return f(map, c);
+    return c;
+}
+
 /// `joe_wcwidth(1, c)` returning i64 for column arithmetic.
 pub fn wcw(c: c_int) i64 {
     return @as(i64, @intCast(joe_wcwidth(1, c)));

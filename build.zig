@@ -107,7 +107,7 @@ pub fn build(b: *std.Build) void {
             // REMOVED: joe/termcap.c — replaced by src/termcap.zig
             // REMOVED: joe/tty.c — replaced by src/tty.zig
             // REMOVED: joe/tw.c — replaced by src/tw.zig
-            "joe/ublock.c",
+            // REMOVED: joe/ublock.c — replaced by src/ublock.zig JOE ublock.h ABI exports
             // REMOVED: joe/uedit.c — replaced by src/uedit.zig JOE uedit.h ABI exports
             "joe/uerror.c",
             "joe/ufile.c",

@@ -847,11 +847,12 @@ The build is always working — start with a binary that compiles and runs, then
 - ✅ Path A `uedit` motion slice: Zig `src/uedit.zig` exports `pgamnt` + `u_goto_{bol,eol,bof,eof}` + `uuparw`/`udnarw` + `utos`/`ubos`; deleted matching C bodies; remaining `joe/uedit.c` still linked
 - ✅ Path A `uedit` word/edge slice: Zig owns `uhome` + `u_goto_{left,right,prev,next}` + `upedge`/`unedge` (+ exported `p_goto_prev`/`p_goto_next` for remaining C tomatch); soak **196/196**
 - ✅ Path A `uedit` scroll/page slice: Zig owns `scrup`/`scrdn` + `upgup`/`upgdn` + `uupslide`/`udnslide`; soak **196/196**; `joe/uedit.c` ~2037 lines
+- ✅ Path A `uedit` goto + delete slice: Zig owns `uline`/`ucol`/`ubyte` (+ histories/`doline`/`docol`/`dobyte`) + `udelch`/`ubacks`/`u_word_delete`/`ubackw`/`udelel`/`udelbl`/`udelln`/`uinsc`; soak **196/196**; `joe/uedit.c` ~1675 lines
 - At this point: fully functional editor with markdown viewmode
 
 ### Phase 7: File I/O & Commands (3-4 weeks) — IN PROGRESS (Path A uedit)
 - ⬜ `fileio.zig` — load, save, UTF-16 conversion
-- 🚧 `edit.zig` / `src/uedit.zig` — Path A live edit commands (motions + scroll/page landed; next: goto-line/col/byte, deletes, type, quote, marks, paste, `utomatch`; then `ublock`/`uformat`)
+- 🚧 `edit.zig` / `src/uedit.zig` — Path A live edit commands (motions + scroll/page + goto + deletes landed; next: type/`rtntw`/`uopen`, quote, marks, paste, `utomatch`; then `ublock`/`uformat`)
 - ⬜ `search.zig` — search/replace
 - ⬜ Shell window, tags, math, error navigation
 - At this point: feature-complete in Zig

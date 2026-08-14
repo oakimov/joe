@@ -1,8 +1,8 @@
 //! Path A live port of JOE basic edit/motion commands (`joe/uedit.c`).
 //!
-//! First slice: `pgamnt` + simple cursor motions (`u_goto_{bol,eol,bof,eof}`,
-//! `uuparw`/`udnarw`, `utos`/`ubos`). Remaining `uedit.c` stays linked until
-//! later Path A slices retire it the same way `bw.c` was removed.
+//! Landed: `pgamnt`, cursor motions, word/edge, scroll/page, goto
+//! line/col/byte prompts, and delete commands. Remaining `uedit.c`
+//! (tomatch, type, quote, marks, paste, …) stays linked until later slices.
 
 const std = @import("std");
 const gap_types = @import("gapbuffer/types.zig");
@@ -156,8 +156,35 @@ extern fn nscrldn(t: ?*anyopaque, top: isize, bot: isize, amnt: isize) void;
 extern fn nscrlup(t: ?*anyopaque, top: isize, bot: isize, amnt: isize) void;
 extern fn umpgup(w: ?*anyopaque, k: c_int) c_int;
 extern fn umpgdn(w: ?*anyopaque, k: c_int) c_int;
+extern fn bdel(from: ?*GapP, to: ?*GapP) void;
+extern fn pgoto(p: ?*GapP, loc: i64) ?*GapP;
+extern fn pfill(p: ?*GapP, to: i64, usetabs: c_int) void;
+extern fn pisbof(p: ?*GapP) c_int;
+extern fn piseof(p: ?*GapP) c_int;
+extern fn calc(bw: ?*anyopaque, s: [*c]u8, secure: c_int) f64;
+extern fn vsrm(s: [*c]u8) void;
+extern fn dofollows() void;
+extern fn msgnw(w: ?*anyopaque, s: [*c]const u8) void;
+extern fn my_gettext(s: [*c]const u8) [*c]const u8;
+extern fn math_cmplt(bw: ?*anyopaque, k: c_int) c_int;
+extern fn wmkpw(
+    w: ?*anyopaque,
+    prompt: [*c]const u8,
+    history: *?*GapB,
+    func: ?*const fn (?*anyopaque, [*c]u8, ?*anyopaque, ?*c_int) callconv(.c) c_int,
+    huh: ?[*:0]const u8,
+    abrt: ?*const fn (?*anyopaque, ?*anyopaque) callconv(.c) c_int,
+    tab: ?*const fn (?*anyopaque, c_int) callconv(.c) c_int,
+    object: ?*anyopaque,
+    notify: ?*c_int,
+    map: ?*anyopaque,
+    file_prompt: c_int,
+) ?*anyopaque;
 extern var menu_above: c_int;
 extern var watommenu: Watom;
+extern var merr: ?[*:0]const u8;
+extern var utf8_map: ?*anyopaque;
+extern var opt_mid: c_int;
 
 const NO_MORE_DATA: c_int = -256;
 
@@ -799,4 +826,323 @@ pub export fn udnslide(w: ?*anyopaque, k: c_int) c_int {
         return 0;
     }
     return udnarw(w, 0);
+}
+
+// ── Goto line / column / byte prompts ──────────────────────────────
+
+var linehist: ?*GapB = null;
+var colhist: ?*GapB = null;
+var bytehist: ?*GapB = null;
+
+fn doline(w: ?*anyopaque, s: [*c]u8, object: ?*anyopaque, notify: ?*c_int) callconv(.c) c_int {
+    _ = object;
+    const bw = windBw(w) orelse {
+        vsrm(s);
+        return -1;
+    };
+    const num: i64 = @intFromFloat(calc(bw, s, 1));
+    if (notify) |n| n.* = 1;
+    vsrm(s);
+    if (num >= 1 and merr == null) {
+        const cur = cursorOrNull(bw) orelse return -1;
+        const b = bw.b orelse return -1;
+        const eof = b.eof orelse return -1;
+        var line_no = num;
+        if (line_no > eof.line) line_no = eof.line + 1;
+        const tmp = opt_mid;
+        _ = pline(cur, line_no - 1);
+        cur.xcol = piscol(cur);
+        opt_mid = 1;
+        dofollows();
+        opt_mid = tmp;
+        return 0;
+    }
+    if (merr) |err| {
+        msgnw(@ptrCast(bw.parent), err);
+    } else {
+        msgnw(@ptrCast(bw.parent), my_gettext("Invalid line number"));
+    }
+    return -1;
+}
+
+/// Prompt and go to a line number.
+pub export fn uline(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    if (wmkpw(
+        @ptrCast(bw.parent),
+        my_gettext("Go to line (%{abort} to abort): "),
+        &linehist,
+        &doline,
+        null,
+        null,
+        &math_cmplt,
+        null,
+        null,
+        utf8_map,
+        0,
+    ) != null) return 0;
+    return -1;
+}
+
+fn docol(w: ?*anyopaque, s: [*c]u8, object: ?*anyopaque, notify: ?*c_int) callconv(.c) c_int {
+    _ = object;
+    const bw = windBw(w) orelse {
+        vsrm(s);
+        return -1;
+    };
+    const num: i64 = @intFromFloat(calc(bw, s, 1));
+    if (notify) |n| n.* = 1;
+    vsrm(s);
+    if (num >= 1 and merr == null) {
+        const cur = cursorOrNull(bw) orelse return -1;
+        const tmp = opt_mid;
+        _ = pcol(cur, num - 1);
+        cur.xcol = piscol(cur);
+        opt_mid = 1;
+        dofollows();
+        opt_mid = tmp;
+        return 0;
+    }
+    if (merr) |err| {
+        msgnw(@ptrCast(bw.parent), err);
+    } else {
+        msgnw(@ptrCast(bw.parent), my_gettext("Invalid column number"));
+    }
+    return -1;
+}
+
+/// Prompt and go to a column number.
+pub export fn ucol(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    if (wmkpw(
+        @ptrCast(bw.parent),
+        my_gettext("Go to column (%{abort} to abort): "),
+        &colhist,
+        &docol,
+        null,
+        null,
+        &math_cmplt,
+        null,
+        null,
+        utf8_map,
+        0,
+    ) != null) return 0;
+    return -1;
+}
+
+fn dobyte(w: ?*anyopaque, s: [*c]u8, object: ?*anyopaque, notify: ?*c_int) callconv(.c) c_int {
+    _ = object;
+    const bw = windBw(w) orelse {
+        vsrm(s);
+        return -1;
+    };
+    const num: i64 = @intFromFloat(calc(bw, s, 1));
+    if (notify) |n| n.* = 1;
+    vsrm(s);
+    if (num >= 0 and merr == null) {
+        const cur = cursorOrNull(bw) orelse return -1;
+        const tmp = opt_mid;
+        _ = pgoto(cur, num);
+        cur.xcol = piscol(cur);
+        opt_mid = 1;
+        dofollows();
+        opt_mid = tmp;
+        return 0;
+    }
+    if (merr) |err| {
+        msgnw(@ptrCast(bw.parent), err);
+    } else {
+        msgnw(@ptrCast(bw.parent), my_gettext("Invalid byte number"));
+    }
+    return -1;
+}
+
+/// Prompt and go to a byte offset.
+pub export fn ubyte(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    if (wmkpw(
+        @ptrCast(bw.parent),
+        my_gettext("Go to byte (%{abort} to abort): "),
+        &bytehist,
+        &dobyte,
+        null,
+        null,
+        &math_cmplt,
+        null,
+        null,
+        utf8_map,
+        0,
+    ) != null) return 0;
+    return -1;
+}
+
+// ── Delete commands ────────────────────────────────────────────────
+
+/// Delete character under cursor.
+pub export fn udelch(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = cursorOrNull(bw) orelse return -1;
+    if (piseof(cur) != 0) return -1;
+    const p = pdup(cur, "udelch") orelse return -1;
+    defer prm(p);
+    _ = pgetc(p);
+    bdel(cur, p);
+    return 0;
+}
+
+/// Backspace (smart-indent aware).
+pub export fn ubacks(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = cursorOrNull(bw) orelse return -1;
+    const parent = bw.parent orelse return -1;
+    const wa = parent.watom orelse return -1;
+    if (wa.what != TYPETW and pisbol(cur) != 0) return -1;
+
+    if (bw.o.overtype != 0) return u_goto_left(@ptrCast(parent), 0);
+    if (pisbof(cur) != 0) return -1;
+
+    const indent = pisindent(cur);
+    const col = piscol(cur);
+    const wid: i64 = if (bw.o.indentc == '\t') bw.o.tab else 1;
+    const indwid = bw.o.istep * wid;
+
+    if (col == indent and @mod(col, indwid) == 0 and col != 0 and bw.o.smartbacks != 0 and bw.o.autoindent != 0) {
+        const p = pdup(cur, "ubacks") orelse return -1;
+        defer prm(p);
+        _ = p_goto_bol(p);
+        bdel(p, cur);
+        pfill(cur, col - indwid, bw.o.indentc);
+        return 0;
+    }
+
+    if (col < indent and bw.o.smartbacks != 0 and pisbol(cur) == 0) {
+        const p = pdup(cur, "ubacks") orelse return -1;
+        defer prm(p);
+        var cw: i64 = 0;
+        while (true) {
+            const c = prgetc(cur);
+            if (c == '\t') cw += bw.o.tab else cw += 1;
+            bdel(cur, p);
+            if (!(pisbol(cur) == 0 and cw < indwid)) break;
+        }
+        return 0;
+    }
+
+    const p = pdup(cur, "ubacks") orelse return -1;
+    defer prm(p);
+    const c = prgetc(cur);
+    if (c != NO_MORE_DATA) {
+        if (bw.o.overtype == 0 or c == '\t' or pisbol(p) != 0 or piseol(p) != 0) {
+            bdel(cur, p);
+        }
+    }
+    return 0;
+}
+
+/// Delete alphanumeric or whitespace run under cursor.
+pub export fn u_word_delete(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = cursorOrNull(bw) orelse return -1;
+    const p = pdup(cur, "u_word_delete") orelse return -1;
+    defer prm(p);
+    const map = mapOf(p);
+    var c = brch(p);
+    if (joeIsAlnum(map, c)) {
+        while (joeIsAlnum(map, blk: {
+            c = brch(p);
+            break :blk c;
+        })) _ = pgetc(p);
+    } else if (joeIsSpace(map, c)) {
+        while (joeIsSpace(map, blk: {
+            c = brch(p);
+            break :blk c;
+        })) _ = pgetc(p);
+    } else {
+        _ = pgetc(p);
+    }
+    if (p.byte == cur.byte) return -1;
+    bdel(cur, p);
+    return 0;
+}
+
+/// Delete backward over word / whitespace / single char.
+pub export fn ubackw(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = cursorOrNull(bw) orelse return -1;
+    const p = pdup(cur, "ubackw") orelse return -1;
+    defer prm(p);
+    var c = prgetc(cur);
+    const map = mapOf(cur);
+    if (joeIsAlnum(map, c)) {
+        while (joeIsAlnum(map, blk: {
+            c = prgetc(cur);
+            break :blk c;
+        })) {}
+        if (c != NO_MORE_DATA) _ = pgetc(cur);
+    } else if (joeIsSpace(map, c)) {
+        while (joeIsSpace(map, blk: {
+            c = prgetc(cur);
+            break :blk c;
+        })) {}
+        if (c != NO_MORE_DATA) _ = pgetc(cur);
+    }
+    if (cur.byte == p.byte) return -1;
+    bdel(cur, p);
+    return 0;
+}
+
+/// Delete to end of line (or the linebreak if empty).
+pub export fn udelel(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = cursorOrNull(bw) orelse return -1;
+    const p = pdup(cur, "udelel") orelse return -1;
+    defer prm(p);
+    _ = p_goto_eol(p);
+    if (cur.byte == p.byte) return udelch(w, 0);
+    bdel(cur, p);
+    return 0;
+}
+
+/// Delete to beginning of line (or backspace linebreak if empty).
+pub export fn udelbl(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = cursorOrNull(bw) orelse return -1;
+    const p = pdup(cur, "udelbl") orelse return -1;
+    defer prm(p);
+    _ = p_goto_bol(p);
+    if (p.byte == cur.byte) return ubacks(w, 8);
+    bdel(p, cur);
+    return 0;
+}
+
+/// Delete entire line.
+pub export fn udelln(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = cursorOrNull(bw) orelse return -1;
+    const p = pdup(cur, "udelln") orelse return -1;
+    defer prm(p);
+    _ = p_goto_bol(cur);
+    _ = pnextl(p);
+    if (cur.byte == p.byte) return -1;
+    bdel(cur, p);
+    return 0;
+}
+
+/// Insert a single space.
+pub export fn uinsc(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = cursorOrNull(bw) orelse return -1;
+    _ = binsc(cur, ' ');
+    return 0;
 }

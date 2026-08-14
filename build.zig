@@ -109,7 +109,7 @@ pub fn build(b: *std.Build) void {
             // REMOVED: joe/tw.c — replaced by src/tw.zig
             // REMOVED: joe/ublock.c — replaced by src/ublock.zig JOE ublock.h ABI exports
             // REMOVED: joe/uedit.c — replaced by src/uedit.zig JOE uedit.h ABI exports
-            "joe/uerror.c",
+            // REMOVED: joe/uerror.c — replaced by src/uerror.zig JOE uerror.h ABI exports
             "joe/ufile.c",
             // REMOVED: joe/uformat.c — replaced by src/uformat.zig JOE uformat.h ABI exports
             // REMOVED: joe/uisrch.c — replaced by src/uisrch.zig JOE uisrch.h ABI exports

@@ -18,9 +18,8 @@ extern fn _vaset(vary: ?*anyopaque, pos: isize, el: ?*anyopaque) ?*anyopaque;
 extern fn vsncpy(a: ?*anyopaque, pos: isize, s: ?*const anyopaque, len: isize) ?*anyopaque;
 
 /// C `const char *const builtins[]` — pairs of (name, content), NULL-terminated.
-/// Must be an *array* symbol. Declaring it as `[*c]T` makes Zig load the first
-/// pointer slot as the base address, then index into string bytes (crash).
-extern const builtins: [64]?[*:0]const u8;
+/// Defined in `src/builtins_data.zig` (Path A). Must be an *array* symbol.
+extern const builtins: [17][*c]const u8;
 
 /// JFILE — matching C struct layout
 const JFILE = extern struct {
@@ -31,8 +30,8 @@ const JFILE = extern struct {
 export fn jfopen(name: [*c]const u8, mode: [*c]const u8) ?*anyopaque {
     if (name[0] == '*') {
         var x: usize = 0;
-        while (builtins[x] != null) : (x += 2) {
-            if (strcmp(builtins[x].?, name + 1) == 0) {
+        while (@intFromPtr(builtins[x]) != 0) : (x += 2) {
+            if (strcmp(builtins[x], name + 1) == 0) {
                 const j = @as(*JFILE, @alignCast(@ptrCast(joe_malloc(@sizeOf(JFILE)) orelse return null)));
                 j.* = .{ .f = null, .p = @ptrCast(@constCast(builtins[x + 1])) };
                 return @ptrCast(j);
@@ -83,8 +82,8 @@ export fn jgetbuiltins(suffix: [*c]const u8) ?*anyopaque {
     const sflen = if (suffix != null) strlen(suffix) else 0;
     var result: ?*anyopaque = null;
     var x: usize = 0;
-    while (builtins[x] != null) : (x += 2) {
-        const name: [*c]const u8 = builtins[x].?;
+    while (@intFromPtr(builtins[x]) != 0) : (x += 2) {
+        const name: [*c]const u8 = builtins[x];
         const nlen = strlen(name);
         if (suffix == null or (sflen <= nlen and strcmp(suffix, @ptrFromInt(@intFromPtr(name) + @as(usize, @intCast(nlen - sflen)))) == 0)) {
             result = _vaset(result, aLEN(result), vsncpy(null, 0, @ptrCast(name), strlen(name)));

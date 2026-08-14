@@ -17,6 +17,7 @@ comptime {
     _ = @import("blocks.zig");
     _ = @import("utils.zig");
     _ = @import("frag.zig");
+    _ = @import("builtins_data.zig");
     _ = @import("builtin.zig");
     _ = @import("gapbuffer.zig");
     _ = @import("undo.zig");

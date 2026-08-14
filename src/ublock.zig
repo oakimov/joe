@@ -1,8 +1,8 @@
 //! Path A live port of JOE highlighted-block commands (`joe/ublock.c`).
 //!
-//! Slice 1: globals + mark stack + mark set/goto/toggle commands.
-//! Remaining `joe/ublock.c` (rect helpers, blkdel/cpy/move, indent, filter,
-//! case) stays linked until later slices.
+//! Landed: mark globals/stack/set/goto + rectangle helpers +
+//! `ublkdel`/`upicokill`/`ublkmove`/`ublkcpy`. Remaining `joe/ublock.c`
+//! (indent, filter, case, blksum) stays linked until later slices.
 
 const std = @import("std");
 const gap_types = @import("gapbuffer/types.zig");
@@ -120,13 +120,34 @@ var markstack: MarkSav = undefined;
 var markfree: MarkSav = undefined;
 var mark_sentinels_ready: bool = false;
 
+const NO_MORE_DATA: c_int = -256;
+
 extern fn pdup(p: ?*GapP, tr: [*:0]const u8) ?*GapP;
 extern fn pdupown(p: ?*GapP, owner: *?*GapP, tr: [*:0]const u8) ?*GapP;
 extern fn prm(p: ?*GapP) void;
 extern fn pset(n: ?*GapP, p: ?*GapP) ?*GapP;
 extern fn p_goto_bol(p: ?*GapP) ?*GapP;
+extern fn p_goto_eol(p: ?*GapP) ?*GapP;
+extern fn p_goto_eof(p: ?*GapP) ?*GapP;
 extern fn pnextl(p: ?*GapP) ?*GapP;
 extern fn pcol(p: ?*GapP, goalcol: i64) ?*GapP;
+extern fn pcolwse(p: ?*GapP, goalcol: i64) ?*GapP;
+extern fn pcoli(p: ?*GapP, goalcol: i64) ?*GapP;
+extern fn piscol(p: ?*GapP) i64;
+extern fn pfill(p: ?*GapP, to: i64, usetabs: c_int) void;
+extern fn pbackws(p: ?*GapP) void;
+extern fn pfwrd(p: ?*GapP, n: i64) ?*GapP;
+extern fn pline(p: ?*GapP, line: i64) ?*GapP;
+extern fn pgetc(p: ?*GapP) c_int;
+extern fn piseol(p: ?*GapP) c_int;
+extern fn bdel(from: ?*GapP, to: ?*GapP) void;
+extern fn bmk(prop: ?*GapB) ?*GapB;
+extern fn brm(b: ?*GapB) void;
+extern fn bcpy(from: ?*GapP, to: ?*GapP) ?*GapB;
+extern fn binsb(p: ?*GapP, b: ?*GapB) ?*GapP;
+extern fn binsc(p: ?*GapP, c: c_int) ?*GapP;
+extern fn modify_logic(bw: ?*anyopaque, b: ?*GapB) c_int;
+extern fn udelln(w: ?*anyopaque, k: c_int) c_int;
 extern fn updall() void;
 extern fn msgnw(w: ?*anyopaque, s: [*c]const u8) void;
 extern fn my_gettext(s: [*c]const u8) [*c]const u8;
@@ -436,4 +457,314 @@ pub export fn utomarkbk(w: ?*anyopaque, k: c_int) c_int {
         }
     }
     return -1;
+}
+
+/// Copy a rectangle into a new buffer.
+pub export fn pextrect(org: ?*GapP, height_in: i64, right: i64) ?*GapB {
+    const orgp = org orelse return null;
+    var height = height_in;
+    const p = pdup(orgp, "pextrect") orelse return null;
+    const q = pdup(p, "pextrect") orelse {
+        prm(p);
+        return null;
+    };
+    const tmp = bmk(null) orelse {
+        prm(p);
+        prm(q);
+        return null;
+    };
+    const z = pdup(tmp.eof, "pextrect") orelse {
+        prm(p);
+        prm(q);
+        brm(tmp);
+        return null;
+    };
+    while (height > 0) : (height -= 1) {
+        _ = pcol(p, orgp.xcol);
+        _ = pset(q, p);
+        _ = pcolwse(q, right);
+        _ = p_goto_eof(z);
+        _ = binsb(z, bcpy(p, q));
+        _ = p_goto_eof(z);
+        _ = binsc(z, '\n');
+        _ = pnextl(p);
+    }
+    prm(p);
+    prm(q);
+    prm(z);
+    return tmp;
+}
+
+pub export fn pdelrect(org: ?*GapP, height_in: i64, right: i64) void {
+    const orgp = org orelse return;
+    var height = height_in;
+    const p = pdup(orgp, "pdelrect") orelse return;
+    const q = pdup(p, "pdelrect") orelse {
+        prm(p);
+        return;
+    };
+    while (height > 0) : (height -= 1) {
+        _ = pcol(p, orgp.xcol);
+        _ = pset(q, p);
+        _ = pcol(q, right);
+        bdel(p, q);
+        _ = pnextl(p);
+    }
+    prm(p);
+    prm(q);
+}
+
+pub export fn pclrrect(org: ?*GapP, height_in: i64, right: i64, usetabs: c_int) void {
+    const orgp = org orelse return;
+    var height = height_in;
+    const p = pdup(orgp, "pclrrect") orelse return;
+    const q = pdup(p, "pclrrect") orelse {
+        prm(p);
+        return;
+    };
+    while (height > 0) : (height -= 1) {
+        _ = pcol(p, orgp.xcol);
+        _ = pset(q, p);
+        _ = pcoli(q, right);
+        const pos = q.col;
+        bdel(p, q);
+        pfill(p, pos, usetabs);
+        _ = pnextl(p);
+    }
+    prm(p);
+    prm(q);
+}
+
+pub export fn ptabrect(org: ?*GapP, height_in: i64, right: i64) c_int {
+    const orgp = org orelse return ' ';
+    var height = height_in;
+    const p = pdup(orgp, "ptabrect") orelse return ' ';
+    while (height > 0) : (height -= 1) {
+        _ = pcol(p, orgp.xcol);
+        var c: c_int = 0;
+        while (true) {
+            c = pgetc(p);
+            if (c == NO_MORE_DATA or c == '\n') break;
+            if (c == '\t') {
+                prm(p);
+                return '\t';
+            } else if (piscol(p) > right) {
+                break;
+            }
+        }
+        if (c != '\n') _ = pnextl(p);
+    }
+    prm(p);
+    return ' ';
+}
+
+pub export fn pinsrect(cur: ?*GapP, tmp: ?*GapB, width: i64, usetabs: c_int) void {
+    const curp = cur orelse return;
+    const tmpb = tmp orelse return;
+    const p = pdup(curp, "pinsrect") orelse return;
+    const q = pdup(tmpb.bof, "pinsrect") orelse {
+        prm(p);
+        return;
+    };
+    const r = pdup(q, "pinsrect") orelse {
+        prm(p);
+        prm(q);
+        return;
+    };
+    while (true) {
+        _ = pset(r, q);
+        _ = p_goto_eol(q);
+        const eof = tmpb.eof orelse break;
+        if (!(q.line != eof.line or piscol(q) != 0)) break;
+        _ = pcol(p, curp.xcol);
+        if (piscol(p) < curp.xcol) pfill(p, curp.xcol, usetabs);
+        _ = binsb(p, bcpy(r, q));
+        _ = pfwrd(p, q.byte - r.byte);
+        if (piscol(p) < curp.xcol + width) pfill(p, curp.xcol + width, usetabs);
+        if (piseol(p) != 0) pbackws(p);
+        if (pnextl(p) == null) {
+            _ = binsc(p, '\n');
+            _ = pgetc(p);
+        }
+        if (pgetc(q) == NO_MORE_DATA) break;
+    }
+    prm(p);
+    prm(q);
+    prm(r);
+}
+
+pub export fn ublkdel(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    if (markv(1) != 0) {
+        const mb = markb orelse return -1;
+        const mk = markk orelse return -1;
+        if (mb.b != bw.b and modify_logic(@ptrCast(bw), mb.b) == 0) return -1;
+        if (square != 0) {
+            if (bw.o.overtype != 0) {
+                const ocol = mk.xcol;
+                pclrrect(mb, mk.line - mb.line + 1, mk.xcol, ptabrect(mb, mk.line - mb.line + 1, mk.xcol));
+                _ = pcol(mk, ocol);
+                mk.xcol = ocol;
+            } else {
+                pdelrect(mb, mk.line - mb.line + 1, mk.xcol);
+            }
+        } else {
+            bdel(mb, mk);
+        }
+        if (lightoff != 0) _ = unmark(@ptrCast(bw.parent), 0);
+    } else {
+        msgnw(@ptrCast(bw.parent), my_gettext("No block"));
+        return -1;
+    }
+    return 0;
+}
+
+pub export fn upicokill(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    _ = upsh(w, 0);
+    _ = umarkk(w, 0);
+    if (markv(1) != 0) {
+        const mb = markb orelse return -1;
+        const mk = markk orelse return -1;
+        if (square != 0) {
+            if (bw.o.overtype != 0) {
+                const ocol = mk.xcol;
+                pclrrect(mb, mk.line - mb.line + 1, mk.xcol, ptabrect(mb, mk.line - mb.line + 1, mk.xcol));
+                _ = pcol(mk, ocol);
+                mk.xcol = ocol;
+            } else {
+                pdelrect(mb, mk.line - mb.line + 1, mk.xcol);
+            }
+        } else {
+            bdel(mb, mk);
+        }
+        if (lightoff != 0) _ = unmark(w, 0);
+    } else {
+        _ = udelln(w, 0);
+    }
+    return 0;
+}
+
+pub export fn ublkmove(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = bw.cursor orelse return -1;
+    if (markv(1) != 0) {
+        const mb = markb orelse return -1;
+        const mk = markk orelse return -1;
+        if (mb.b != bw.b and modify_logic(@ptrCast(bw), mb.b) == 0) return -1;
+        if (square != 0) {
+            const height = mk.line - mb.line + 1;
+            const width = mk.xcol - mb.xcol;
+            const usetabs = ptabrect(mb, height, mk.xcol);
+            const ocol = piscol(cur);
+            const tmp = pextrect(mb, height, mk.xcol);
+            const update_xcol = cur.xcol >= mk.xcol and cur.line >= mb.line and cur.line <= mk.line;
+            _ = ublkdel(w, 0);
+            if (bw.o.overtype != 0) {
+                _ = pcol(cur, ocol);
+                pfill(cur, ocol, ' ');
+                pdelrect(cur, height, piscol(cur) + width);
+            } else if (update_xcol) {
+                cur.xcol -= width;
+            }
+            pinsrect(cur, tmp, width, usetabs);
+            brm(tmp);
+            if (lightoff != 0) {
+                _ = unmark(@ptrCast(bw.parent), 0);
+            } else {
+                _ = umarkb(@ptrCast(bw.parent), 0);
+                _ = umarkk(@ptrCast(bw.parent), 0);
+                if (markk) |nmk| {
+                    if (markb) |nmb| {
+                        _ = pline(nmk, nmk.line + height - 1);
+                        _ = pcol(nmk, nmb.xcol + width);
+                        nmk.xcol = nmb.xcol + width;
+                    }
+                }
+            }
+            return 0;
+        } else if (cur.b != mk.b or cur.byte > mk.byte or cur.byte < mb.byte) {
+            const size = mk.byte - mb.byte;
+            _ = binsb(cur, bcpy(mb, mk));
+            bdel(mb, mk);
+            if (lightoff != 0) {
+                _ = unmark(@ptrCast(bw.parent), 0);
+            } else {
+                _ = umarkb(@ptrCast(bw.parent), 0);
+                _ = umarkk(@ptrCast(bw.parent), 0);
+                if (markk) |nmk| _ = pfwrd(nmk, size);
+            }
+            updall();
+            return 0;
+        }
+    }
+    msgnw(@ptrCast(bw.parent), my_gettext("No block"));
+    return -1;
+}
+
+pub export fn ublkcpy(w: ?*anyopaque, k: c_int) c_int {
+    const bw = windBw(w) orelse return -1;
+    const cur = bw.cursor orelse return -1;
+    if (markv(1) != 0) {
+        const mb = markb orelse return -1;
+        const mk = markk orelse return -1;
+        if (square != 0) {
+            const height = mk.line - mb.line + 1;
+            const width = mk.xcol - mb.xcol;
+            const usetabs = ptabrect(mb, height, mk.xcol);
+            const tmp = pextrect(mb, height, mk.xcol);
+            if (bw.o.overtype != 0) pdelrect(cur, height, piscol(cur) + width);
+            pinsrect(cur, tmp, width, usetabs);
+            brm(tmp);
+            if (lightoff != 0) {
+                _ = unmark(@ptrCast(bw.parent), 0);
+            } else {
+                _ = umarkb(@ptrCast(bw.parent), 0);
+                _ = umarkk(@ptrCast(bw.parent), 0);
+                if (markk) |nmk| {
+                    if (markb) |nmb| {
+                        _ = pline(nmk, nmk.line + height - 1);
+                        _ = pcol(nmk, nmb.xcol + width);
+                        nmk.xcol = nmb.xcol + width;
+                    }
+                }
+            }
+            return 0;
+        } else {
+            const size = mk.byte - mb.byte;
+            const tmp = bcpy(mb, mk);
+            if (bw.o.hex != 0 and bw.o.overtype != 0) {
+                const q = pdup(cur, "ublkcpy") orelse return -1;
+                const eof = q.b.?.eof orelse {
+                    prm(q);
+                    return -1;
+                };
+                if (q.byte + size >= eof.byte) {
+                    _ = pset(q, eof);
+                } else {
+                    _ = pfwrd(q, size);
+                }
+                bdel(cur, q);
+                prm(q);
+            }
+            _ = binsb(cur, tmp);
+            if (k != -2) {
+                if (lightoff != 0) {
+                    _ = unmark(@ptrCast(bw.parent), 0);
+                } else {
+                    _ = umarkb(@ptrCast(bw.parent), 0);
+                    _ = umarkk(@ptrCast(bw.parent), 0);
+                    if (markk) |nmk| _ = pfwrd(nmk, size);
+                }
+            }
+            updall();
+            return 0;
+        }
+    } else {
+        msgnw(@ptrCast(bw.parent), my_gettext("No block"));
+        return -1;
+    }
 }

@@ -185,6 +185,14 @@ extern var watommenu: Watom;
 extern var merr: ?[*:0]const u8;
 extern var utf8_map: ?*anyopaque;
 extern var opt_mid: c_int;
+extern fn binsm(p: ?*GapP, blk: ?*const anyopaque, amnt: isize) ?*GapP;
+extern fn pisblank(p: ?*GapP) c_int;
+extern fn from_uni(map: ?*anyopaque, c: c_int) c_int;
+extern fn utf8_encode(buf: [*]u8, c: c_int) isize;
+extern fn joe_write(fd: c_int, buf: ?*const anyopaque, size: isize) isize;
+extern fn wrapword(bw: ?*anyopaque, p: ?*GapP, indent: i64, french: c_int, no_over: c_int, indents: ?[*:0]u8) void;
+extern var locale_map: ?*FullCharmap;
+
 
 const NO_MORE_DATA: c_int = -256;
 
@@ -1144,5 +1152,201 @@ pub export fn uinsc(w: ?*anyopaque, k: c_int) c_int {
     const bw = windBw(w) orelse return -1;
     const cur = cursorOrNull(bw) orelse return -1;
     _ = binsc(cur, ' ');
+    return 0;
+}
+
+
+// ── Typing / return / open-line ────────────────────────────────────
+
+fn findIndent(p_in: *GapP) i64 {
+    var x: c_int = 0;
+    while (x != 10) : (x += 1) {
+        if (pprevl(p_in) == null) return -1;
+        _ = p_goto_bol(p_in);
+        if (pisblank(p_in) == 0) break;
+    }
+    if (x == 10) return -1;
+    return pisindent(p_in);
+}
+
+/// Core type-into-buffer / shell-forward path. Exported for remaining C quote.
+pub export fn utypebw_raw(bw_in: ?*anyopaque, k_in: c_int, no_decode: c_int) c_int {
+    const bw = asBw(bw_in);
+    const cur = bw.cursor orelse return -1;
+    const b = bw.b orelse return -1;
+    var k = k_in;
+    const map = @as(?*FullCharmap, @ptrCast(@alignCast(b.o.charmap)));
+
+    // Send data to shell window
+    const vt_at_cur = blk: {
+        if (b.vt == null) break :blk false;
+        const vt: *VtRec = @ptrCast(@alignCast(b.vt.?));
+        break :blk cur.byte == (vt.vtcur orelse break :blk false).byte;
+    };
+    if ((b.pid != 0 and b.vt == null and piseof(cur) != 0) or (b.pid != 0 and vt_at_cur)) {
+        const loc = locale_map;
+        if (loc != null and loc.?.@"type" != 0) {
+            var buf: [8]u8 = undefined;
+            const len = utf8_encode(&buf, k);
+            _ = joe_write(b.out, &buf, len);
+        } else {
+            if (no_decode == 0) k = from_uni(@ptrCast(loc), k);
+            if (k != -1) {
+                var c: u8 = @truncate(@as(u32, @bitCast(k)));
+                _ = joe_write(b.out, &c, 1);
+            }
+        }
+        return 0;
+    }
+
+    // Hex mode overtype needs to preserve file size
+    if (bw.o.hex != 0 and bw.o.overtype != 0) {
+        var buf: [8]u8 = undefined;
+        var len: isize = undefined;
+        if (map != null and map.?.@"type" != 0) {
+            len = utf8_encode(&buf, k);
+        } else {
+            if (no_decode == 0) k = from_uni(@ptrCast(map), k);
+            if (k == -1) return 1;
+            buf[0] = @truncate(@as(u32, @bitCast(k)));
+            len = 1;
+        }
+        _ = binsm(cur, &buf, len);
+        var x: isize = 0;
+        while (x != len) : (x += 1) _ = pgetb(cur);
+        var rem = len;
+        while (rem > 0) : (rem -= 1) {
+            if (piseof(cur) != 0) return 0;
+            const p = pdup(cur, "utypebw_raw") orelse return -1;
+            defer prm(p);
+            _ = pgetb(p);
+            bdel(cur, p);
+        }
+        return 0;
+    }
+
+    if (k == '\t' and bw.o.overtype != 0 and piseol(cur) == 0 and no_decode == 0) {
+        var col = cur.xcol;
+        col = col + bw.o.tab - @mod(col, bw.o.tab);
+        _ = pcol(cur, col);
+        if (bw.o.picture == 0 and piseol(cur) != 0 and piscol(cur) < col) {
+            if (bw.o.spaces != 0) pfill(cur, col, ' ') else pfill(cur, col, '\t');
+        }
+        cur.xcol = col;
+    } else if (k == '\t' and bw.o.smartbacks != 0 and bw.o.autoindent != 0 and pisindent(cur) >= piscol(cur) and no_decode == 0) {
+        const p = pdup(cur, "utypebw_raw") orelse return -1;
+        defer prm(p);
+        const n = findIndent(p);
+        if (n != -1 and pisindent(cur) == piscol(cur) and n > pisindent(cur)) {
+            if (pisbol(cur) == 0) _ = udelbl(@ptrCast(bw.parent), 0);
+            while (true) {
+                k = pgetc(p);
+                if (!(joeIsSpace(map, k) and k != '\n')) break;
+                _ = binsc(cur, k);
+                _ = pgetc(cur);
+            }
+        } else {
+            var x: i64 = 0;
+            while (x < bw.o.istep) : (x += 1) {
+                _ = binsc(cur, bw.o.indentc);
+                _ = pgetc(cur);
+            }
+        }
+        cur.xcol = piscol(cur);
+    } else if (k == '\t' and bw.o.spaces != 0 and no_decode == 0) {
+        var n: i64 = if (bw.o.picture != 0) cur.xcol else piscol(cur);
+        n = bw.o.tab - @mod(n, bw.o.tab);
+        while (n > 0) : (n -= 1) _ = utypebw(bw, ' ');
+    } else {
+        if (bw.o.picture != 0 and cur.xcol != piscol(cur)) pfill(cur, cur.xcol, ' ');
+
+        if (pisblank(cur) != 0) {
+            while (piscol(cur) < bw.o.lmargin) {
+                _ = binsc(cur, ' ');
+                _ = pgetc(cur);
+            }
+        }
+
+        if (no_decode == 0) {
+            if (map == null or map.?.@"type" == 0) {
+                k = from_uni(@ptrCast(map), k);
+            }
+        }
+
+        _ = binsc(cur, k);
+        _ = pgetc(cur);
+
+        if (bw.o.overtype != 0 and piseol(cur) == 0 and k != '\t') _ = udelch(@ptrCast(bw.parent), 0);
+
+        if (bw.o.wordwrap != 0 and piscol(cur) > bw.o.rmargin and joe_isblank(@ptrCast(map), k) == 0) {
+            wrapword(bw, cur, bw.o.lmargin, bw.o.french, 0, null);
+        }
+
+        cur.xcol = piscol(cur);
+        // Path A: omit the SCRN micro-update optimization from C (`outatr` hot path);
+        // normal follow/update paints the typed character.
+    }
+    return 0;
+}
+
+pub export fn utypebw(bw_in: ?*anyopaque, k: c_int) c_int {
+    return utypebw_raw(bw_in, k, 0);
+}
+
+pub export fn utypew(w: ?*anyopaque, k: c_int) c_int {
+    const bw = windBw(w) orelse return -1;
+    return utypebw(bw, k);
+}
+
+/// Return / newline with optional autoindent.
+pub export fn rtntw(w: ?*anyopaque) c_int {
+    const bw = windBw(w) orelse return -1;
+    const cur = cursorOrNull(bw) orelse return -1;
+    if (bw.o.overtype != 0) {
+        _ = p_goto_eol(cur);
+        if (piseof(cur) != 0) _ = binsc(cur, '\n');
+        _ = pgetc(cur);
+        cur.xcol = piscol(cur);
+    } else {
+        const p = pdup(cur, "rtntw") orelse return -1;
+        defer prm(p);
+        _ = binsc(cur, '\n');
+        _ = pgetc(cur);
+        if (bw.o.autoindent != 0) {
+            const map = mapOf(cur);
+            _ = p_goto_bol(p);
+            while (true) {
+                const c = pgetc(p);
+                if (!(joeIsSpace(map, c) and c != '\n')) break;
+                _ = binsc(cur, c);
+                _ = pgetc(cur);
+            }
+        }
+        cur.xcol = piscol(cur);
+    }
+    return 0;
+}
+
+/// Open (split) a line with optional autoindent on the new line.
+pub export fn uopen(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = cursorOrNull(bw) orelse return -1;
+    _ = binsc(cur, '\n');
+    if (bw.o.autoindent != 0 and brch(cur) != ' ' and brch(cur) != '\t') {
+        const p = pdup(cur, "uopen") orelse return -1;
+        defer prm(p);
+        const q = pdup(p, "uopen") orelse return -1;
+        defer prm(q);
+        _ = pgetc(q);
+        _ = p_goto_bol(p);
+        const map = mapOf(cur);
+        while (true) {
+            const c = pgetc(p);
+            if (!(joeIsSpace(map, c) and c != '\n')) break;
+            _ = binsc(q, c);
+            _ = pgetc(q);
+        }
+    }
     return 0;
 }

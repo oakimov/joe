@@ -54,4 +54,6 @@ comptime {
     _ = @import("umath.zig");
     // Path A: live uisrch → Zig JOE uisrch.h ABI exports.
     _ = @import("uisrch.zig");
+    // Path A: live usearch → Zig JOE usearch.h ABI exports.
+    _ = @import("usearch.zig");
 }

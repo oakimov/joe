@@ -132,7 +132,7 @@ pub fn build(b: *std.Build) void {
             // REMOVED: joe/gettext.c — replaced by src/gettext.zig JOE gettext.h ABI exports
             // REMOVED: joe/builtin.c — replaced by src/builtin.zig
             "joe/builtins.c",
-            "joe/vt.c",
+            // REMOVED: joe/vt.c — replaced by src/vt.zig JOE vt.h ABI exports
             // REMOVED: joe/mmenu.c — replaced by src/mmenu.zig
             // REMOVED: joe/state.c — replaced by src/state.zig JOE state.h ABI exports
             // REMOVED: joe/options.c — replaced by src/options.zig

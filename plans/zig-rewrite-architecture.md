@@ -877,7 +877,8 @@ The build is always working — start with a binary that compiles and runs, then
 - ✅ Path A `gettext` zero-C: Zig `src/gettext.zig` owns `my_gettext`/`init_gettext`; `joe/gettext.c` removed from the link (tombstone); soak **196/196**
 - ✅ Path A `state` zero-C: Zig `src/state.zig` owns `joe_state`/`load_state`/`save_state`; `joe/state.c` removed from the link (tombstone); soak **196/196**
 - ✅ Path A `selinux` zero-C: Zig `src/selinux.zig` owns security-context helpers (WITH_SELINUX off → no-ops); `joe/selinux.c` removed from the link (tombstone); soak **196/196**
-- ✅ Path A `cclass` zero-C: Zig `src/cclass.zig` owns character-class / radix-map helpers (`interval_*`/`rset_*`/`rtree_*`/`rmap_*`/`cclass_*`); `joe/cclass.c` removed from the link (tombstone); soak **196/196**; next Phase 7: remaining C (`builtins`/`vt`/`unicat`/`main`) or gapbuffer `fileio` hardening
+- ✅ Path A `cclass` zero-C: Zig `src/cclass.zig` owns character-class / radix-map helpers (`interval_*`/`rset_*`/`rtree_*`/`rmap_*`/`cclass_*`); `joe/cclass.c` removed from the link (tombstone); soak **196/196**
+- ✅ Path A `vt` zero-C: Zig `src/vt.zig` owns terminal emulator (`mkvt`/`vtrm`/`vt_data`/`vt_resize`); `joe/vt.c` removed from the link (tombstone); soak **196/196**; next Phase 7: remaining C (`builtins`/`unicat`/`main`) or gapbuffer `fileio` hardening
 - ⬜ `search.zig` — search/replace (covered by Path A `usearch`)
 - ⬜ Shell window, tags, math, error navigation (covered by Path A ushell/utag/umath/uerror)
 - At this point: feature-complete in Zig

@@ -93,7 +93,7 @@ pub fn build(b: *std.Build) void {
             // REMOVED: joe/help.c — replaced by src/help.zig JOE help.h ABI exports
             // REMOVED: joe/kbd.c — replaced by src/kbd.zig
             // REMOVED: joe/macro.c — replaced by src/macro.zig
-            "joe/main.c",
+            // REMOVED: joe/main.c — replaced by src/main.zig JOE main.h ABI exports
             // REMOVED: joe/menu.c — replaced by src/menu.zig
             // REMOVED: joe/path.c — replaced by src/path.zig JOE path.h ABI exports
             // REMOVED: joe/poshist.c — replaced by src/poshist.zig JOE poshist.h ABI exports

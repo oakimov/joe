@@ -82,4 +82,6 @@ comptime {
     _ = @import("cclass.zig");
     // Path A: live vt → Zig JOE vt.h ABI exports.
     _ = @import("vt.zig");
+    // Path A: live main → Zig JOE main.h ABI exports + entry.
+    _ = @import("main.zig");
 }

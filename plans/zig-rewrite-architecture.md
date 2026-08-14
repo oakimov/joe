@@ -854,7 +854,7 @@ The build is always working — start with a binary that compiles and runs, then
 - ✅ Path A `uedit` tomatch + removal: Zig owns `utomatch` + delimiter/XML/word/char helpers; removed `joe/uedit.c` from the link; soak **196/196**; live `uedit` is zero-C
 - At this point: fully functional editor with markdown viewmode
 
-### Phase 7: File I/O & Commands (3-4 weeks) — IN PROGRESS (Path A uedit + ublock + uformat + ushell + utag + umath + uisrch + usearch + uerror + ufile + tab + path + poshist + help + mouse done)
+### Phase 7: File I/O & Commands (3-4 weeks) — IN PROGRESS (Path A uedit…help/mouse/gettext/state/selinux/cclass/vt/unicat/builtins/main done; zero live joe/*.c)
 - ⬜ `fileio.zig` — load, save, UTF-16 conversion
 - ✅ `edit.zig` / `src/uedit.zig` — Path A live edit commands (**zero-C `uedit`**: JOE `uedit.h` ABI exported from Zig)
 - ✅ Path A `ublock` mark slice: Zig `src/ublock.zig` owns mark globals (`square`/`markb`/`markk`/…) + `upsh`/`upop`/`markv` + mark set/goto/toggle cmds; soak **196/196**
@@ -878,9 +878,10 @@ The build is always working — start with a binary that compiles and runs, then
 - ✅ Path A `state` zero-C: Zig `src/state.zig` owns `joe_state`/`load_state`/`save_state`; `joe/state.c` removed from the link (tombstone); soak **196/196**
 - ✅ Path A `selinux` zero-C: Zig `src/selinux.zig` owns security-context helpers (WITH_SELINUX off → no-ops); `joe/selinux.c` removed from the link (tombstone); soak **196/196**
 - ✅ Path A `cclass` zero-C: Zig `src/cclass.zig` owns character-class / radix-map helpers (`interval_*`/`rset_*`/`rtree_*`/`rmap_*`/`cclass_*`); `joe/cclass.c` removed from the link (tombstone); soak **196/196**
-- ✅ Path A `vt` zero-C: Zig `src/vt.zig` owns terminal emulator (`mkvt`/`vtrm`/`vt_data`/`vt_resize`); `joe/vt.c` removed from the link (tombstone); soak **196/196**; next Phase 7: remaining C (`builtins`/`unicat`/`main`) or gapbuffer `fileio` hardening
+- ✅ Path A `vt` zero-C: Zig `src/vt.zig` owns terminal emulator (`mkvt`/`vtrm`/`vt_data`/`vt_resize`); `joe/vt.c` removed from the link (tombstone); soak **196/196**; Path A `builtins`/`unicat`/`main` also zero-C — see below
 - ✅ Path A `unicat` zero-C: Zig `src/unicat.zig` owns Unicode category/interval data tables; `joe/unicat-17.0.0.c` removed from the link (tombstone); soak **196/196**
 - ✅ Path A `builtins` zero-C: Zig `src/builtins_data.zig` owns embedded `builtins[]`; `joe/builtins.c` removed from the link (tombstone); soak **196/196**
+- ✅ Path A `main` zero-C: Zig `src/main.zig` owns startup/`edloop`/`edupd`/`dofollows`/`nungetc`/`timer_play`/`ushowlog`/`internal_msg`/`setlogerrs` + `maint`/`dostaupd`/`exmsg`/`xmsg`/`usexmouse`/`xmouse`/`nonotice`/`noexmsg`/`pastehack`/`helpon`/`shell_kbd`/`mainenv`/`i_msg`; `joe/main.c` removed from the link (tombstone); soak **196/196**; **zero live `joe/*.c` in `build.zig`**
 - ⬜ `search.zig` — search/replace (covered by Path A `usearch`)
 - ⬜ Shell window, tags, math, error navigation (covered by Path A ushell/utag/umath/uerror)
 - At this point: feature-complete in Zig

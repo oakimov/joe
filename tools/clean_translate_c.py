@@ -16,9 +16,9 @@ def clean_translate(raw: str, header: str) -> str:
         raw,
     )
 
-    # Drop nested __root method aliases inside type decls
+    # Drop nested __root method aliases inside type decls (incl. @"name")
     raw = re.sub(
-        r"\n\s*pub const \w+ = __root\.\w+;",
+        r"\n\s*pub const (?:\w+|@\"\w+\") = __root\.\w+;",
         "",
         raw,
     )

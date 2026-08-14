@@ -76,4 +76,6 @@ comptime {
     _ = @import("state.zig");
     // Path A: live selinux → Zig JOE selinux.h ABI exports.
     _ = @import("selinux.zig");
+    // Path A: live cclass → Zig JOE cclass.h ABI exports.
+    _ = @import("cclass.zig");
 }

@@ -854,7 +854,7 @@ The build is always working — start with a binary that compiles and runs, then
 - ✅ Path A `uedit` tomatch + removal: Zig owns `utomatch` + delimiter/XML/word/char helpers; removed `joe/uedit.c` from the link; soak **196/196**; live `uedit` is zero-C
 - At this point: fully functional editor with markdown viewmode
 
-### Phase 7: File I/O & Commands (3-4 weeks) — IN PROGRESS (Path A uedit + ublock + uformat + ushell + utag + umath + uisrch + usearch + uerror done)
+### Phase 7: File I/O & Commands (3-4 weeks) — IN PROGRESS (Path A uedit + ublock + uformat + ushell + utag + umath + uisrch + usearch + uerror + ufile + tab done)
 - ⬜ `fileio.zig` — load, save, UTF-16 conversion
 - ✅ `edit.zig` / `src/uedit.zig` — Path A live edit commands (**zero-C `uedit`**: JOE `uedit.h` ABI exported from Zig)
 - ✅ Path A `ublock` mark slice: Zig `src/ublock.zig` owns mark globals (`square`/`markb`/`markk`/…) + `upsh`/`upop`/`markv` + mark set/goto/toggle cmds; soak **196/196**

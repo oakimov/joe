@@ -103,7 +103,7 @@ pub fn build(b: *std.Build) void {
             // REMOVED: joe/rc.c — replaced by src/rc.zig
             // REMOVED: joe/regex.c — replaced by src/regex.zig
             // REMOVED: joe/scrn.c — replaced by src/scrn.zig
-            "joe/tab.c",
+            // REMOVED: joe/tab.c — replaced by src/tab.zig JOE tab.h ABI exports
             // REMOVED: joe/termcap.c — replaced by src/termcap.zig
             // REMOVED: joe/tty.c — replaced by src/tty.zig
             // REMOVED: joe/tw.c — replaced by src/tw.zig

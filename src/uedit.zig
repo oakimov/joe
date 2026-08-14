@@ -170,7 +170,7 @@ extern fn math_cmplt(bw: ?*anyopaque, k: c_int) c_int;
 extern fn wmkpw(
     w: ?*anyopaque,
     prompt: [*c]const u8,
-    history: *?*GapB,
+    history: ?*?*GapB,
     func: ?*const fn (?*anyopaque, [*c]u8, ?*anyopaque, ?*c_int) callconv(.c) c_int,
     huh: ?[*:0]const u8,
     abrt: ?*const fn (?*anyopaque, ?*anyopaque) callconv(.c) c_int,
@@ -192,6 +192,37 @@ extern fn utf8_encode(buf: [*]u8, c: c_int) isize;
 extern fn joe_write(fd: c_int, buf: ?*const anyopaque, size: isize) isize;
 extern fn wrapword(bw: ?*anyopaque, p: ?*GapP, indent: i64, french: c_int, no_over: c_int, indents: ?[*:0]u8) void;
 extern var locale_map: ?*FullCharmap;
+
+extern fn mkqwna(
+    w: ?*anyopaque,
+    prompt: [*c]const u8,
+    len: isize,
+    func: ?*const fn (?*anyopaque, c_int, ?*anyopaque, ?*c_int) callconv(.c) c_int,
+    abrt: ?*const fn (?*anyopaque, ?*anyopaque) callconv(.c) c_int,
+    object: ?*anyopaque,
+    notify: ?*c_int,
+) ?*anyopaque;
+extern fn mkqw(
+    w: ?*anyopaque,
+    prompt: [*c]const u8,
+    len: isize,
+    func: ?*const fn (?*anyopaque, c_int, ?*anyopaque, ?*c_int) callconv(.c) c_int,
+    abrt: ?*const fn (?*anyopaque, ?*anyopaque) callconv(.c) c_int,
+    object: ?*anyopaque,
+    notify: ?*c_int,
+) ?*anyopaque;
+extern fn nungetc(c: c_int) void;
+extern fn pdupown(p: ?*GapP, owner: *?*GapP, tr: [*:0]const u8) ?*GapP;
+extern fn poffline(p: ?*GapP) void;
+extern fn zhtoi(s: [*c]const u8) c_int;
+extern fn zlcpy(a: [*c]u8, len: isize, b: [*c]const u8) [*c]u8;
+extern fn slen(s: [*c]const u8) isize;
+extern fn vsmk(len: isize) [*c]u8;
+extern fn stagen(stalin: [*c]u8, bw: ?*anyopaque, s: [*c]const u8, fill: u8) [*c]u8;
+extern fn utf8_decode_fwrd(pos: *[*c]const u8, len: ?*isize) c_int;
+extern fn ttgetch() c_int;
+extern var msgbuf: [300]u8;
+
 
 
 const NO_MORE_DATA: c_int = -256;
@@ -1348,5 +1379,308 @@ pub export fn uopen(w: ?*anyopaque, k: c_int) c_int {
             _ = pgetc(q);
         }
     }
+    return 0;
+}
+
+
+// ── Marks / char-search / message / insert-text / paste ─────────────
+
+fn vsLen(a: [*c]u8) isize {
+    if (a == null) return 0;
+    const p: [*]const isize = @ptrCast(@alignCast(a));
+    return (p - 1)[0];
+}
+
+extern fn snprintf(buf: [*]u8, n: usize, fmt: [*c]const u8, ...) c_int;
+
+fn dosetmark(w: ?*anyopaque, c: c_int, object: ?*anyopaque, notify: ?*c_int) callconv(.c) c_int {
+    _ = object;
+    const bw = windBw(w) orelse return -1;
+    if (notify) |n| n.* = 1;
+    if (c >= '0' and c <= ':') {
+        const cur = cursorOrNull(bw) orelse return -1;
+        const b = bw.b orelse return -1;
+        const idx: usize = @intCast(c - '0');
+        _ = pdupown(cur, &b.marks[idx], "dosetmark");
+        poffline(b.marks[idx]);
+        if (c != ':') {
+            const fmt = my_gettext("Mark %d set");
+            _ = snprintf(&msgbuf, msgbuf.len, fmt, c - '0');
+            msgnw(@ptrCast(bw.parent), &msgbuf);
+        }
+        return 0;
+    }
+    nungetc(c);
+    return -1;
+}
+
+pub export fn usetmark(w: ?*anyopaque, c: c_int) c_int {
+    if (c >= '0' and c <= ':') return dosetmark(w, c, null, null);
+    const prompt = my_gettext("Set mark (0-9):");
+    if (mkqwna(w, prompt, slen(prompt), &dosetmark, null, null, null) != null) return 0;
+    return -1;
+}
+
+fn dogomark(w: ?*anyopaque, c: c_int, object: ?*anyopaque, notify: ?*c_int) callconv(.c) c_int {
+    _ = object;
+    const bw = windBw(w) orelse return -1;
+    if (notify) |n| n.* = 1;
+    if (c >= '0' and c <= ':') {
+        const b = bw.b orelse return -1;
+        const idx: usize = @intCast(c - '0');
+        if (b.marks[idx]) |mark| {
+            const cur = cursorOrNull(bw) orelse return -1;
+            _ = pset(cur, mark);
+            cur.xcol = piscol(cur);
+            return 0;
+        }
+        const fmt = my_gettext("Mark %d not set");
+        _ = snprintf(&msgbuf, msgbuf.len, fmt, c - '0');
+        msgnw(@ptrCast(bw.parent), &msgbuf);
+        return -1;
+    }
+    nungetc(c);
+    return -1;
+}
+
+pub export fn ugomark(w: ?*anyopaque, c: c_int) c_int {
+    if (c >= '0' and c <= '9') return dogomark(w, c, null, null);
+    const prompt = my_gettext("Goto bookmark (0-9):");
+    if (mkqwna(w, prompt, slen(prompt), &dogomark, null, null, null) != null) return 0;
+    return -1;
+}
+
+var dobkwdc: c_int = 0;
+
+fn dofwrdc(w: ?*anyopaque, k: c_int, object: ?*anyopaque, notify: ?*c_int) callconv(.c) c_int {
+    _ = object;
+    const bw = windBw(w) orelse return -1;
+    if (notify) |n| n.* = 1;
+    if (k < 0 or k >= 256) {
+        nungetc(k);
+        return -1;
+    }
+    const cur = cursorOrNull(bw) orelse return -1;
+    const q = pdup(cur, "dofwrdc") orelse return -1;
+    defer prm(q);
+    var c: c_int = undefined;
+    if (dobkwdc != 0) {
+        while (true) {
+            c = prgetc(q);
+            if (c == NO_MORE_DATA or c == k) break;
+        }
+    } else {
+        while (true) {
+            c = pgetc(q);
+            if (c == NO_MORE_DATA or c == k) break;
+        }
+    }
+    if (c == NO_MORE_DATA) {
+        msgnw(@ptrCast(bw.parent), my_gettext("Not found"));
+        return -1;
+    }
+    _ = pset(cur, q);
+    cur.xcol = piscol(cur);
+    return 0;
+}
+
+pub export fn ufwrdc(w: ?*anyopaque, k: c_int) c_int {
+    dobkwdc = 0;
+    if (k >= 0 and k < 256) return dofwrdc(w, k, null, null);
+    const prompt = my_gettext("Forward to char: ");
+    if (mkqw(w, prompt, slen(prompt), &dofwrdc, null, null, null) != null) return 0;
+    return -1;
+}
+
+pub export fn ubkwdc(w: ?*anyopaque, k: c_int) c_int {
+    dobkwdc = 1;
+    if (k >= 0 and k < 256) return dofwrdc(w, k, null, null);
+    const prompt = my_gettext("Backward to char: ");
+    if (mkqw(w, prompt, slen(prompt), &dofwrdc, null, null, null) != null) return 0;
+    return -1;
+}
+
+fn domsg(w: ?*anyopaque, s: [*c]u8, object: ?*anyopaque, notify: ?*c_int) callconv(.c) c_int {
+    _ = object;
+    if (notify) |n| n.* = 1;
+    _ = zlcpy(&msgbuf, msgbuf.len, s);
+    vsrm(s);
+    msgnw(w, &msgbuf);
+    return 0;
+}
+
+pub export fn umsg(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    if (wmkpw(
+        w,
+        my_gettext("Message (%{abort} to abort): "),
+        null,
+        &domsg,
+        null,
+        null,
+        null,
+        null,
+        null,
+        @ptrCast(locale_map),
+        0,
+    ) != null) return 0;
+    return -1;
+}
+
+fn dotxt(w: ?*anyopaque, s_in: [*c]u8, object: ?*anyopaque, notify: ?*c_int) callconv(.c) c_int {
+    _ = object;
+    const bw = windBw(w) orelse {
+        vsrm(s_in);
+        return -1;
+    };
+    if (notify) |n| n.* = 1;
+    var s = s_in;
+    if (s != null and s[0] == '`') {
+        var str = vsmk(1024);
+        str = stagen(str, bw, s + 1, ' ');
+        vsrm(s);
+        s = str;
+    }
+    if (s != null) {
+        var t: [*c]const u8 = s;
+        var len = vsLen(s);
+        const map = @as(?*FullCharmap, @ptrCast(@alignCast((bw.b orelse return -1).o.charmap)));
+        while (len != 0) {
+            var c: c_int = undefined;
+            if (map != null and map.?.@"type" != 0) {
+                c = utf8_decode_fwrd(&t, &len);
+            } else {
+                c = t[0];
+                t += 1;
+                len -= 1;
+            }
+            if (c >= 0) _ = utypebw_raw(bw, c, 1);
+        }
+        vsrm(s);
+    }
+    return 0;
+}
+
+pub export fn utxt(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const b = bw.b orelse return -1;
+    if (wmkpw(
+        w,
+        my_gettext("Insert (%{abort} to abort): "),
+        null,
+        &dotxt,
+        null,
+        null,
+        @ptrCast(&utypebw),
+        null,
+        null,
+        @ptrCast(b.o.charmap),
+        0,
+    ) != null) return 0;
+    return -1;
+}
+
+pub export fn uname_joe(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const win = asWin(w);
+    const main_win = win.main orelse return -1;
+    const bw: *BwRec = @ptrCast(@alignCast(main_win.object orelse return -1));
+    const b = bw.b orelse return -1;
+    const name_ptr: ?[*:0]const u8 = @ptrCast(@alignCast(b.name orelse return -1));
+    const name = name_ptr orelse return -1;
+    if (name[0] == 0) return -1;
+    var s: [*:0]const u8 = name;
+    while (s[0] != 0) : (s += 1) {
+        if (utypew(w, s[0]) != 0) return -1;
+    }
+    return 0;
+}
+
+pub export fn upaste(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const tmp_ww = bw.o.wordwrap;
+    const tmp_ai = bw.o.autoindent;
+    bw.o.wordwrap = 0;
+    bw.o.autoindent = 0;
+    defer {
+        bw.o.wordwrap = tmp_ww;
+        bw.o.autoindent = tmp_ai;
+    }
+
+    var count: c_int = 0;
+    var accu: c_int = 0;
+
+    while (true) {
+        const c = ttgetch();
+        if (c == -1) return 0;
+        if (c == ';') break;
+    }
+
+    while (true) {
+        var c = ttgetch();
+        if (c == -1) break;
+        if (c >= 'A' and c <= 'Z') c = c - 'A'
+        else if (c >= 'a' and c <= 'z') c = c - 'a' + 26
+        else if (c >= '0' and c <= '9') c = c - '0' + 52
+        else if (c == '+') c = 62
+        else if (c == '/') c = 63
+        else if (c == '=') continue
+        else {
+            if (c == 0o33) _ = ttgetch();
+            break;
+        }
+
+        switch (count) {
+            0 => {
+                accu = c;
+                count = 6;
+            },
+            2 => {
+                accu = (accu << 6) + c;
+                if (accu == 13) _ = rtntw(@ptrCast(bw.parent)) else _ = utypebw(bw, accu);
+                count = 0;
+            },
+            4 => {
+                accu = (accu << 4) + (c >> 2);
+                if (accu == 13) _ = rtntw(@ptrCast(bw.parent)) else _ = utypebw(bw, accu);
+                accu = c & 0x3;
+                count = 2;
+            },
+            6 => {
+                accu = (accu << 2) + (c >> 4);
+                if (accu == 13) _ = rtntw(@ptrCast(bw.parent)) else _ = utypebw(bw, accu);
+                accu = c & 0xF;
+                count = 4;
+            },
+            else => {},
+        }
+    }
+    return 0;
+}
+
+pub export fn ubrpaste(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    if (bw.pasting != 0) return 0;
+    bw.saved.ww = bw.o.wordwrap;
+    bw.saved.ai = bw.o.autoindent;
+    bw.saved.sp = bw.o.spaces;
+    bw.o.wordwrap = 0;
+    bw.o.autoindent = 0;
+    bw.o.spaces = 0;
+    bw.pasting = 1;
+    return 0;
+}
+
+pub export fn ubrpaste_done(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    if (bw.pasting == 0) return 0;
+    bw.o.wordwrap = bw.saved.ww;
+    bw.o.autoindent = bw.saved.ai;
+    bw.o.spaces = bw.saved.sp;
+    bw.pasting = 0;
     return 0;
 }

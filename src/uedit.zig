@@ -189,7 +189,7 @@ extern fn pisblank(p: ?*GapP) c_int;
 extern fn from_uni(map: ?*anyopaque, c: c_int) c_int;
 extern fn utf8_encode(buf: [*]u8, c: c_int) isize;
 extern fn joe_write(fd: c_int, buf: ?*const anyopaque, size: isize) isize;
-extern fn wrapword(bw: ?*anyopaque, p: ?*GapP, indent: i64, french: c_int, no_over: c_int, indents: ?[*:0]u8) void;
+extern fn wrapword(bw: ?*anyopaque, p: ?*GapP, indent: i64, french: c_int, no_over: c_int, indents: [*c]u8) void;
 extern var locale_map: ?*FullCharmap;
 
 extern fn mkqwna(

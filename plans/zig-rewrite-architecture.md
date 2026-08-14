@@ -874,7 +874,8 @@ The build is always working — start with a binary that compiles and runs, then
 - ✅ Path A `poshist` zero-C: Zig `src/poshist.zig` owns position history (`afterpos`/`aftermove`/`windie`/`uprevpos`/`unextpos`); `joe/poshist.c` removed from the link (tombstone); soak **196/196**
 - ✅ Path A `help` zero-C: Zig `src/help.zig` owns help (`help_init`/`help_display`/`help_on`/`u_help`/`u_help_next`/`u_help_prev` + `bg_help`/`help_is_utf8`); `joe/help.c` removed from the link (tombstone); soak **196/196**
 - ✅ Path A `mouse` zero-C: Zig `src/mouse.zig` owns mouse (`mouseopen`/`mouseclose`/`mousedn`/`mouseup`/`mousedrag`/`uxtmouse`/`uextmouse`/`utomouse`/`udefm*`/`mnow`/`reset_trig_time` + `floatmouse`/`rtbutton`/`joexterm`/`auto_scroll`/`auto_trig_time`/`auto_rate`); `joe/mouse.c` removed from the link (tombstone); soak **196/196**
-- ✅ Path A `gettext` zero-C: Zig `src/gettext.zig` owns `my_gettext`/`init_gettext`; `joe/gettext.c` removed from the link (tombstone); soak **196/196**; next Phase 7: remaining C (`builtins`/`vt`/`state`/`cclass`/`selinux`/`unicat`/`main`) or gapbuffer `fileio` hardening
+- ✅ Path A `gettext` zero-C: Zig `src/gettext.zig` owns `my_gettext`/`init_gettext`; `joe/gettext.c` removed from the link (tombstone); soak **196/196**
+- ✅ Path A `state` zero-C: Zig `src/state.zig` owns `joe_state`/`load_state`/`save_state`; `joe/state.c` removed from the link (tombstone); soak **196/196**; next Phase 7: remaining C (`builtins`/`vt`/`cclass`/`selinux`/`unicat`/`main`) or gapbuffer `fileio` hardening
 - ⬜ `search.zig` — search/replace (covered by Path A `usearch`)
 - ⬜ Shell window, tags, math, error navigation (covered by Path A ushell/utag/umath/uerror)
 - At this point: feature-complete in Zig

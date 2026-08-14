@@ -134,7 +134,7 @@ pub fn build(b: *std.Build) void {
             "joe/builtins.c",
             "joe/vt.c",
             // REMOVED: joe/mmenu.c — replaced by src/mmenu.zig
-            "joe/state.c",
+            // REMOVED: joe/state.c — replaced by src/state.zig JOE state.h ABI exports
             // REMOVED: joe/options.c — replaced by src/options.zig
             "joe/cclass.c",
             // REMOVED: joe/frag.c — replaced by src/frag.zig

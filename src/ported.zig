@@ -72,4 +72,6 @@ comptime {
     _ = @import("mouse.zig");
     // Path A: live gettext → Zig JOE gettext.h ABI exports.
     _ = @import("gettext.zig");
+    // Path A: live state → Zig JOE state.h ABI exports.
+    _ = @import("state.zig");
 }

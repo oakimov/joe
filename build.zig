@@ -113,7 +113,7 @@ pub fn build(b: *std.Build) void {
             "joe/ufile.c",
             // REMOVED: joe/uformat.c — replaced by src/uformat.zig JOE uformat.h ABI exports
             "joe/uisrch.c",
-            "joe/umath.c",
+            // REMOVED: joe/umath.c — replaced by src/umath.zig JOE umath.h ABI exports
             // REMOVED: joe/undo.c — replaced by src/undo.zig
             "joe/usearch.c",
             // REMOVED: joe/ushell.c — replaced by src/ushell.zig JOE ushell.h ABI exports

@@ -139,7 +139,7 @@ pub fn build(b: *std.Build) void {
             // REMOVED: joe/cclass.c — replaced by src/cclass.zig JOE cclass.h ABI exports
             // REMOVED: joe/frag.c — replaced by src/frag.zig
             // REMOVED: joe/colors.c — replaced by src/colors.zig
-            "joe/unicat-17.0.0.c",
+            // REMOVED: joe/unicat-17.0.0.c — replaced by src/unicat.zig JOE unicode.h data tables
         },
         .flags = &.{
             // Match GCC/Clang default for signed overflow

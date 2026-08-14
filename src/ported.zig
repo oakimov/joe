@@ -7,6 +7,7 @@ const std = @import("std");
 
 comptime {
     _ = @import("utf8.zig");
+    _ = @import("unicat.zig");
     _ = @import("unicode.zig");
     _ = @import("vfile.zig");
     _ = @import("hash.zig");

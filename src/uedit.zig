@@ -222,6 +222,8 @@ extern fn stagen(stalin: [*c]u8, bw: ?*anyopaque, s: [*c]const u8, fill: u8) [*c
 extern fn utf8_decode_fwrd(pos: *[*c]const u8, len: ?*isize) c_int;
 extern fn ttgetch() c_int;
 extern var msgbuf: [300]u8;
+extern var srchstr: [*:0]const u8;
+extern var replstr: [*:0]const u8;
 
 
 
@@ -1683,4 +1685,230 @@ pub export fn ubrpaste_done(w: ?*anyopaque, k: c_int) c_int {
     bw.o.spaces = bw.saved.sp;
     bw.pasting = 0;
     return 0;
+}
+
+
+// ── Quoting ────────────────────────────────────────────────────────
+
+var unicodehist: ?*GapB = null;
+
+export var quotestate: c_int = 0;
+export var quoteval: c_int = 0;
+
+fn dounicode(w: ?*anyopaque, s: [*c]u8, object: ?*anyopaque, notify: ?*c_int) callconv(.c) c_int {
+    _ = object;
+    const bw = windBw(w) orelse {
+        vsrm(s);
+        return -1;
+    };
+    const num = zhtoi(s);
+    if (notify) |n| n.* = 1;
+    vsrm(s);
+    _ = utypebw_raw(bw, num, 1);
+    if (bw.cursor) |cur| cur.xcol = piscol(cur);
+    return 0;
+}
+
+fn doquote(w: ?*anyopaque, c_in: c_int, object: ?*anyopaque, notify: ?*c_int) callconv(.c) c_int {
+    _ = object;
+    const bw = windBw(w) orelse return -1;
+    var c = c_in;
+    var buf: [40]u8 = undefined;
+
+    switch (quotestate) {
+        0 => {
+            if (c >= '0' and c <= '9') {
+                quoteval = c - '0';
+                quotestate = 1;
+                _ = snprintf(&buf, buf.len, "ASCII %c--", c);
+                if (mkqwna(@ptrCast(bw.parent), &buf, slen(&buf), &doquote, null, null, notify) == null) return -1;
+                return 0;
+            } else if (c == 'x' or c == 'X') {
+                const map = @as(?*FullCharmap, @ptrCast(@alignCast((bw.b orelse return -1).o.charmap)));
+                if (map != null and map.?.@"type" != 0) {
+                    if (wmkpw(
+                        @ptrCast(bw.parent),
+                        my_gettext("Unicode (ISO-10646) character in hex (%{abort} to abort): "),
+                        &unicodehist,
+                        &dounicode,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        @ptrCast(locale_map),
+                        0,
+                    ) == null) return 0;
+                    return -1;
+                } else {
+                    quotestate = 3;
+                    const p = "ASCII 0x--";
+                    if (mkqwna(@ptrCast(bw.parent), p, p.len, &doquote, null, null, notify) == null) return -1;
+                    return 0;
+                }
+            } else if (c == 'o' or c == 'O') {
+                quotestate = 5;
+                const p = "ASCII 0---";
+                if (mkqwna(@ptrCast(bw.parent), p, p.len, &doquote, null, null, notify) == null) return -1;
+                return 0;
+            } else {
+                if ((c >= 0x40 and c <= 0x5F) or (c >= 'a' and c <= 'z')) c &= 0x1F;
+                if (c == '?') c = 127;
+                _ = utypebw_raw(bw, c, 1);
+                if (bw.cursor) |cur| cur.xcol = piscol(cur);
+            }
+        },
+        1 => {
+            if (c >= '0' and c <= '9') {
+                _ = snprintf(&buf, buf.len, "ASCII %c%c-", quoteval + '0', c);
+                quoteval = quoteval * 10 + c - '0';
+                quotestate = 2;
+                if (mkqwna(@ptrCast(bw.parent), &buf, slen(&buf), &doquote, null, null, notify) == null) return -1;
+                return 0;
+            }
+        },
+        2 => {
+            if (c >= '0' and c <= '9') {
+                quoteval = quoteval * 10 + c - '0';
+                _ = utypebw_raw(bw, quoteval, 1);
+                if (bw.cursor) |cur| cur.xcol = piscol(cur);
+            }
+        },
+        3 => {
+            if (c >= '0' and c <= '9') {
+                _ = snprintf(&buf, buf.len, "ASCII 0x%c-", c);
+                quoteval = c - '0';
+                quotestate = 4;
+                if (mkqwna(@ptrCast(bw.parent), &buf, slen(&buf), &doquote, null, null, notify) == null) return -1;
+                return 0;
+            } else if (c >= 'a' and c <= 'f') {
+                _ = snprintf(&buf, buf.len, "ASCII 0x%c-", c + 'A' - 'a');
+                quoteval = c - 'a' + 10;
+                quotestate = 4;
+                if (mkqwna(@ptrCast(bw.parent), &buf, slen(&buf), &doquote, null, null, notify) == null) return -1;
+                return 0;
+            } else if (c >= 'A' and c <= 'F') {
+                _ = snprintf(&buf, buf.len, "ASCII 0x%c-", c);
+                quoteval = c - 'A' + 10;
+                quotestate = 4;
+                if (mkqwna(@ptrCast(bw.parent), &buf, slen(&buf), &doquote, null, null, notify) == null) return -1;
+                return 0;
+            }
+        },
+        4 => {
+            if (c >= '0' and c <= '9') {
+                quoteval = quoteval * 16 + c - '0';
+                _ = utypebw_raw(bw, quoteval, 1);
+                if (bw.cursor) |cur| cur.xcol = piscol(cur);
+            } else if (c >= 'a' and c <= 'f') {
+                quoteval = quoteval * 16 + c - 'a' + 10;
+                _ = utypebw_raw(bw, quoteval, 1);
+                if (bw.cursor) |cur| cur.xcol = piscol(cur);
+            } else if (c >= 'A' and c <= 'F') {
+                quoteval = quoteval * 16 + c - 'A' + 10;
+                _ = utypebw_raw(bw, quoteval, 1);
+                if (bw.cursor) |cur| cur.xcol = piscol(cur);
+            }
+        },
+        5 => {
+            if (c >= '0' and c <= '7') {
+                _ = snprintf(&buf, buf.len, "ASCII 0%c--", c);
+                quoteval = c - '0';
+                quotestate = 6;
+                if (mkqwna(@ptrCast(bw.parent), &buf, slen(&buf), &doquote, null, null, notify) == null) return -1;
+                return 0;
+            }
+        },
+        6 => {
+            if (c >= '0' and c <= '7') {
+                _ = snprintf(&buf, buf.len, "ASCII 0%c%c-", quoteval + '0', c);
+                quoteval = quoteval * 8 + c - '0';
+                quotestate = 7;
+                if (mkqwna(@ptrCast(bw.parent), &buf, slen(&buf), &doquote, null, null, notify) == null) return -1;
+                return 0;
+            }
+        },
+        7 => {
+            if (c >= '0' and c <= '7') {
+                quoteval = quoteval * 8 + c - '0';
+                _ = utypebw_raw(bw, quoteval, 1);
+                if (bw.cursor) |cur| cur.xcol = piscol(cur);
+            }
+        },
+        else => {},
+    }
+    if (notify) |n| n.* = 1;
+    return 0;
+}
+
+pub export fn uquote(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    quotestate = 0;
+    const prompt = my_gettext("Ctrl- (or 0-9 for dec. ascii, x for hex, or o for octal)");
+    if (mkqwna(@ptrCast(bw.parent), prompt, slen(prompt), &doquote, null, null, null) != null) return 0;
+    return -1;
+}
+
+fn doquote9(w: ?*anyopaque, c_in: c_int, object: ?*anyopaque, notify: ?*c_int) callconv(.c) c_int {
+    _ = object;
+    const bw = windBw(w) orelse return -1;
+    if (notify) |n| n.* = 1;
+    var c = c_in;
+    if ((c >= 0x40 and c <= 0x5F) or (c >= 'a' and c <= 'z')) c &= 0x1F;
+    if (c == '?') c = 127;
+    if (c >= 0 and c <= 127) c |= 128;
+    _ = utypebw_raw(bw, c, 1);
+    if (bw.cursor) |cur| cur.xcol = piscol(cur);
+    return 0;
+}
+
+fn doquote8(w: ?*anyopaque, c: c_int, object: ?*anyopaque, notify: ?*c_int) callconv(.c) c_int {
+    _ = object;
+    const bw = windBw(w) orelse return -1;
+    if (c == '`') {
+        const p = "Meta-Ctrl-";
+        if (mkqwna(@ptrCast(bw.parent), p, p.len, &doquote9, null, null, notify) != null) return 0;
+        return -1;
+    }
+    if (notify) |n| n.* = 1;
+    var ch = c;
+    if (ch >= 0 and ch <= 127) ch |= 128;
+    _ = utypebw_raw(bw, ch, 1);
+    if (bw.cursor) |cur| cur.xcol = piscol(cur);
+    return 0;
+}
+
+pub export fn uquote8(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const p = "Meta-";
+    if (mkqwna(w, p, p.len, &doquote8, null, null, null) != null) return 0;
+    return -1;
+}
+
+fn doctrl(w: ?*anyopaque, c: c_int, object: ?*anyopaque, notify: ?*c_int) callconv(.c) c_int {
+    _ = object;
+    const bw = windBw(w) orelse return -1;
+    if (notify) |n| n.* = 1;
+    const org = bw.o.overtype;
+    bw.o.overtype = 0;
+    const parent = bw.parent;
+    const huh = if (parent) |pw| pw.huh else null;
+    if (huh != null and (huh == srchstr or huh == replstr) and c == '\n') {
+        _ = utypebw(bw, '\\');
+        _ = utypebw(bw, 'n');
+    } else {
+        _ = utypebw_raw(bw, c, 1);
+    }
+    bw.o.overtype = org;
+    if (bw.cursor) |cur| cur.xcol = piscol(cur);
+    return 0;
+}
+
+pub export fn uctrl(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const prompt = my_gettext("Quote");
+    if (mkqwna(@ptrCast(bw.parent), prompt, slen(prompt), &doctrl, null, null, null) != null) return 0;
+    return -1;
 }

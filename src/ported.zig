@@ -66,4 +66,6 @@ comptime {
     _ = @import("path.zig");
     // Path A: live poshist → Zig JOE poshist.h ABI exports.
     _ = @import("poshist.zig");
+    // Path A: live help → Zig JOE help.h ABI exports.
+    _ = @import("help.zig");
 }

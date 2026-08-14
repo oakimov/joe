@@ -854,7 +854,7 @@ The build is always working — start with a binary that compiles and runs, then
 - ✅ Path A `uedit` tomatch + removal: Zig owns `utomatch` + delimiter/XML/word/char helpers; removed `joe/uedit.c` from the link; soak **196/196**; live `uedit` is zero-C
 - At this point: fully functional editor with markdown viewmode
 
-### Phase 7: File I/O & Commands (3-4 weeks) — IN PROGRESS (Path A uedit + ublock + uformat + ushell + utag + umath + uisrch + usearch + uerror + ufile + tab + path + poshist done)
+### Phase 7: File I/O & Commands (3-4 weeks) — IN PROGRESS (Path A uedit + ublock + uformat + ushell + utag + umath + uisrch + usearch + uerror + ufile + tab + path + poshist + help done)
 - ⬜ `fileio.zig` — load, save, UTF-16 conversion
 - ✅ `edit.zig` / `src/uedit.zig` — Path A live edit commands (**zero-C `uedit`**: JOE `uedit.h` ABI exported from Zig)
 - ✅ Path A `ublock` mark slice: Zig `src/ublock.zig` owns mark globals (`square`/`markb`/`markk`/…) + `upsh`/`upop`/`markv` + mark set/goto/toggle cmds; soak **196/196**
@@ -871,7 +871,8 @@ The build is always working — start with a binary that compiles and runs, then
 - ✅ Path A `ufile` zero-C: Zig `src/ufile.zig` owns load/save/exit cmds (`usave`/`usavenow`/`ublksave`/`uexsve`/`uedit`/`uswitch`/`ulose`/`ubufed`/`uquerysave`/`ukilljoe`/`ureload`/`ureload_all` + `dosave`/`backup`/`yncheck`/`genexmsg` + file globals); `joe/ufile.c` removed from the link (tombstone); soak **196/196**
 - ✅ Path A `tab` zero-C: Zig `src/tab.zig` owns file/command completion (`cmplt_file`/`cmplt_file_in`/`cmplt_file_out`/`cmplt_command` + `menu_explorer`/`menu_jump`); `joe/tab.c` removed from the link (tombstone); soak **196/196**
 - ✅ Path A `path` zero-C: Zig `src/path.zig` owns directory/path helpers (`joesep`/`namprt`/`dirprt`/`mkpath`/`mktmp`/`rmatch`/`rexpnd*`/`chpwd`/`pwd`/`xdg_*`/`open_*_file`); `joe/path.c` removed from the link (tombstone); soak **196/196**
-- ✅ Path A `poshist` zero-C: Zig `src/poshist.zig` owns position history (`afterpos`/`aftermove`/`windie`/`uprevpos`/`unextpos`); `joe/poshist.c` removed from the link (tombstone); soak **196/196**; next Phase 7: remaining C (`help`/`mouse`/`gettext`/`builtins`/`vt`/`state`/`cclass`/`selinux`/`unicat`/`main`) or gapbuffer `fileio` hardening
+- ✅ Path A `poshist` zero-C: Zig `src/poshist.zig` owns position history (`afterpos`/`aftermove`/`windie`/`uprevpos`/`unextpos`); `joe/poshist.c` removed from the link (tombstone); soak **196/196**
+- ✅ Path A `help` zero-C: Zig `src/help.zig` owns help (`help_init`/`help_display`/`help_on`/`u_help`/`u_help_next`/`u_help_prev` + `bg_help`/`help_is_utf8`); `joe/help.c` removed from the link (tombstone); soak **196/196**; next Phase 7: remaining C (`mouse`/`gettext`/`builtins`/`vt`/`state`/`cclass`/`selinux`/`unicat`/`main`) or gapbuffer `fileio` hardening
 - ⬜ `search.zig` — search/replace (covered by Path A `usearch`)
 - ⬜ Shell window, tags, math, error navigation (covered by Path A ushell/utag/umath/uerror)
 - At this point: feature-complete in Zig

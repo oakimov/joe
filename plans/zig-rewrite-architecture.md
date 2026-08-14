@@ -851,11 +851,12 @@ The build is always working — start with a binary that compiles and runs, then
 - ✅ Path A `uedit` typing slice: Zig owns `find_indent`/`utypebw_raw`/`utypebw`/`utypew`/`rtntw`/`uopen` (SCRN micro-update omitted; C quote still calls exported `utypebw_raw`); soak **196/196**; `joe/uedit.c` ~1420 lines
 - ✅ Path A `uedit` marks/paste slice: Zig owns `usetmark`/`ugomark`/`ufwrdc`/`ubkwdc`/`umsg`/`utxt`/`uname_joe`/`upaste`/`ubrpaste*`; soak **196/196**; `joe/uedit.c` ~1090 lines (remaining: `utomatch` + quote/`uctrl`)
 - ✅ Path A `uedit` quote slice: Zig owns `uquote`/`uquote8`/`uctrl` + `quotestate`/`quoteval` + unicodehist; soak **196/196**; `joe/uedit.c` ~835 lines (**only `utomatch` + helpers remain**)
+- ✅ Path A `uedit` tomatch + removal: Zig owns `utomatch` + delimiter/XML/word/char helpers; removed `joe/uedit.c` from the link; soak **196/196**; live `uedit` is zero-C
 - At this point: fully functional editor with markdown viewmode
 
-### Phase 7: File I/O & Commands (3-4 weeks) — IN PROGRESS (Path A uedit)
+### Phase 7: File I/O & Commands (3-4 weeks) — IN PROGRESS (Path A uedit done)
 - ⬜ `fileio.zig` — load, save, UTF-16 conversion
-- 🚧 `edit.zig` / `src/uedit.zig` — Path A live edit commands (**almost zero-C `uedit`**: only delimiter-match `utomatch` left in `joe/uedit.c`; next: port `utomatch` and remove `uedit.c` from the link; then `ublock`/`uformat`)
+- ✅ `edit.zig` / `src/uedit.zig` — Path A live edit commands (**zero-C `uedit`**: JOE `uedit.h` ABI exported from Zig; next: `ublock`/`uformat`)
 - ⬜ `search.zig` — search/replace
 - ⬜ Shell window, tags, math, error navigation
 - At this point: feature-complete in Zig

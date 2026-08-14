@@ -1,8 +1,7 @@
 //! Path A live port of JOE basic edit/motion commands (`joe/uedit.c`).
 //!
-//! Landed: `pgamnt`, cursor motions, word/edge, scroll/page, goto
-//! line/col/byte prompts, and delete commands. Remaining `uedit.c`
-//! (tomatch, type, quote, marks, paste, …) stays linked until later slices.
+//! JOE `uedit.h` ABI lives here (motions, scroll/page, goto/delete, typing,
+//! marks/paste, quoting, and delimiter matching). `joe/uedit.c` is a tombstone.
 
 const std = @import("std");
 const gap_types = @import("gapbuffer/types.zig");
@@ -533,7 +532,7 @@ fn pGotoPrev(ptr: *GapP) c_int {
     return 0;
 }
 
-/// Internal word-back helper (former static in `uedit.c`; still called from C tomatch).
+/// Internal word-back helper (former static in `uedit.c`).
 pub export fn p_goto_prev(ptr: ?*GapP) c_int {
     const p = ptr orelse return -1;
     return pGotoPrev(p);
@@ -578,7 +577,7 @@ fn pGotoNext(ptr: *GapP) c_int {
     return rtn;
 }
 
-/// Internal word-forward helper (former static in `uedit.c`; still called from C tomatch).
+/// Internal word-forward helper (former static in `uedit.c`).
 pub export fn p_goto_next(ptr: ?*GapP) c_int {
     const p = ptr orelse return -1;
     return pGotoNext(p);
@@ -1911,4 +1910,864 @@ pub export fn uctrl(w: ?*anyopaque, k: c_int) c_int {
     const prompt = my_gettext("Quote");
     if (mkqwna(@ptrCast(bw.parent), prompt, slen(prompt), &doctrl, null, null, null) != null) return 0;
     return -1;
+}
+
+// --- Path A: delimiter matching (former joe/uedit.c utomatch + helpers) ---
+
+const MAX_WORD_SIZE: usize = 255;
+const CONTEXT_COMMENT: c_int = 1;
+const CONTEXT_STRING: c_int = 2;
+const CONTEXT_MASK: c_int = CONTEXT_COMMENT + CONTEXT_STRING;
+
+const HighlightState = extern struct {
+    stack: ?*anyopaque = null,
+    delim_stack: ?*anyopaque = null,
+    saved_s: ?*const c_int = null,
+    state: isize = 0,
+};
+
+extern var attr_buf: [*c]c_int;
+extern fn parse(syntax: ?*anyopaque, line: ?*GapP, h_state: HighlightState, charmap: ?*anyopaque) HighlightState;
+extern fn lattr_get(db: ?*anyopaque, syn: ?*anyopaque, p: ?*GapP, line: i64) HighlightState;
+extern fn dofirst(bw: ?*anyopaque, back: c_int, repl: c_int, hint: [*c]u8) c_int;
+extern fn utf8_decode_string(s: [*c]const u8) c_int;
+extern fn Zcmp(a: [*c]const c_int, b: [*c]const c_int) c_int;
+extern fn Ztoz(a: [*c]u8, len: isize, b: [*c]const c_int) [*c]u8;
+extern fn Ztoutf8(a: [*c]u8, len: isize, b: [*c]const c_int) [*c]u8;
+
+fn joeIsAlpha(map: ?*FullCharmap, c: c_int) bool {
+    const m = map orelse return false;
+    const f = m.is_alpha_ orelse return false;
+    return f(m, c) != 0;
+}
+
+fn nextSet(set: [*]const u8) [*]const u8 {
+    var s = set;
+    while (s[0] != 0 and s[0] != ':') : (s += 1) {}
+    if (s[0] == ':') s += 1;
+    return s;
+}
+
+fn nextGroup(group: [*]const u8) [*]const u8 {
+    var g = group;
+    while (g[0] != 0 and g[0] != '=' and g[0] != ':') : (g += 1) {}
+    if (g[0] == '=') g += 1;
+    return g;
+}
+
+fn repeatedGroup(group: [*]const u8) bool {
+    var g = group;
+    var repeated = false;
+    while (g[0] != 0 and g[0] != '=' and g[0] != ':') : (g += 1) {
+        if (g[0] == '*') repeated = true;
+    }
+    return repeated;
+}
+
+fn nextWord(word: [*]const u8) [*]const u8 {
+    var w = word;
+    while (w[0] != 0 and w[0] != '|' and w[0] != '=' and w[0] != ':') : (w += 1) {}
+    if (w[0] == '|') w += 1;
+    return w;
+}
+
+fn matchWord(word_in: [*]const u8, s: [*]const c_int) bool {
+    var word: [*c]const u8 = @ptrCast(word_in);
+    var si: usize = 0;
+    while (s[si] != 0 and word[0] != 0) {
+        const decoded = utf8_decode_fwrd(&word, null);
+        const expect = s[si];
+        si += 1;
+        if (decoded != expect) break;
+    }
+    if (s[si] != 0) return false;
+    const w = word[0];
+    return w == 0 or w == '|' or w == '=' or w == ':' or w == '*';
+}
+
+fn isInGroup(group_in: [*]const u8, s: [*]const c_int) bool {
+    var group = group_in;
+    while (group[0] != 0 and group[0] != '=' and group[0] != ':') {
+        if (matchWord(group, s)) return true;
+        group = nextWord(group);
+    }
+    return false;
+}
+
+fn isInAnyGroup(group_in: [*]const u8, s: [*]const c_int) bool {
+    var group = group_in;
+    while (group[0] != 0 and group[0] != ':') {
+        if (matchWord(group, s)) return true;
+        group = nextWord(group);
+        if (group[0] == '=') group += 1;
+    }
+    return false;
+}
+
+fn findLastGroup(group_in: [*]const u8) [*]const u8 {
+    var group = group_in;
+    var s = group_in;
+    while (s[0] != 0 and s[0] != ':') : (s = nextGroup(s)) {
+        group = s;
+    }
+    return group;
+}
+
+fn tomatchCharOrWord(
+    bw: *BwRec,
+    word_delimiter: bool,
+    c: c_int,
+    f: c_int,
+    set_in: ?[*]const u8,
+    group_in: ?[*]const u8,
+    backward: bool,
+) c_int {
+    const p = pdup(bw.cursor, "tomatch_char_or_word") orelse return -1;
+    const q = pdup(p, "tomatch_char_or_word") orelse {
+        prm(p);
+        return -1;
+    };
+    var last_of_set: [*]const u8 = @ptrCast("");
+    var buf: [MAX_WORD_SIZE + 1]c_int = undefined;
+    var len: usize = 0;
+    const query_highlighter = bw.o.highlighter_context != 0 and bw.o.syntax != null and bw.db != null;
+    var initial_context: c_int = 0;
+    var col: c_int = 0;
+    var cnt: c_int = 0;
+    var d: c_int = 0;
+    var sod: i64 = 0;
+
+    const set = set_in orelse @as([*]const u8, @ptrCast(""));
+    const group = group_in orelse @as([*]const u8, @ptrCast(""));
+
+    if (word_delimiter) {
+        if (backward) {
+            last_of_set = findLastGroup(set);
+            _ = p_goto_next(p);
+            _ = p_goto_prev(p);
+        } else {
+            last_of_set = findLastGroup(group);
+            _ = p_goto_next(p);
+        }
+        _ = pset(q, p);
+    }
+
+    if (query_highlighter) {
+        col = -1;
+        while (true) {
+            d = prgetc(q);
+            col += 1;
+            if (d == NO_MORE_DATA or d == '\n') break;
+        }
+        if (d != NO_MORE_DATA) _ = pgetc(q);
+        _ = parse(bw.o.syntax, q, lattr_get(bw.db, bw.o.syntax, q, q.line), bw.o.charmap);
+        if (attr_buf != null and col >= 0) {
+            initial_context = attr_buf[@intCast(col)] & CONTEXT_MASK;
+        }
+    }
+
+    if (backward) {
+        while (true) {
+            d = prgetc(p);
+            if (d == NO_MORE_DATA) break;
+
+            if (query_highlighter and d == '\n') {
+                _ = pset(q, p);
+                col = -1;
+                while (true) {
+                    d = prgetc(q);
+                    col += 1;
+                    if (d == NO_MORE_DATA or d == '\n') break;
+                }
+                if (d != NO_MORE_DATA) _ = pgetc(q);
+                _ = parse(bw.o.syntax, q, lattr_get(bw.db, bw.o.syntax, q, q.line), bw.o.charmap);
+                continue;
+            }
+
+            const peek = prgetc(p);
+            var peek1: c_int = 0;
+            if (peek != NO_MORE_DATA) {
+                peek1 = prgetc(p);
+                if (peek1 != NO_MORE_DATA) _ = pgetc(p);
+                _ = pgetc(p);
+            }
+            col -= 1;
+
+            const in_ignored_ctx = query_highlighter and attr_buf != null and col >= 0 and
+                (attr_buf[@intCast(col)] & (CONTEXT_COMMENT | CONTEXT_STRING)) != 0 and
+                (attr_buf[@intCast(col)] & CONTEXT_MASK) != initial_context;
+
+            if (in_ignored_ctx) {
+                // Ignore
+            } else if (!query_highlighter and
+                (bw.o.cpp_comment != 0 or bw.o.hash_comment != 0 or
+                    bw.o.semi_comment != 0 or bw.o.tex_comment != 0 or bw.o.vhdl_comment != 0) and
+                d == '\n')
+            {
+                var cc: c_int = 0;
+                _ = pset(q, p);
+                _ = p_goto_bol(q);
+                while (true) {
+                    cc = pgetc(q);
+                    if (cc == '\n') break;
+                    if (cc == '\\') {
+                        if (pgetc(q) == '\n') break;
+                    } else if (bw.o.hash_comment != 0 and cc == '$' and brch(q) == '#') {
+                        _ = pgetc(q);
+                    } else if (bw.o.no_double_quoted == 0 and cc == '"') {
+                        while (true) {
+                            cc = pgetc(q);
+                            if (cc == '\n') break;
+                            if (cc == '"') break;
+                            if (cc == '\\') {
+                                cc = pgetc(q);
+                                if (cc == '\n') break;
+                            }
+                        }
+                        if (cc == '\n') break;
+                    } else if (bw.o.single_quoted != 0 and cc == '\'') {
+                        while (true) {
+                            cc = pgetc(q);
+                            if (cc == '\n') break;
+                            if (cc == '\'') break;
+                            if (cc == '\\') {
+                                cc = pgetc(q);
+                                if (cc == '\n') break;
+                            }
+                        }
+                        if (cc == '\n') break;
+                    } else if (bw.o.cpp_comment != 0 and cc == '/') {
+                        if (brch(q) == '/') {
+                            _ = prgetc(q);
+                            _ = pset(p, q);
+                            break;
+                        }
+                    } else if (bw.o.vhdl_comment != 0 and cc == '-') {
+                        if (brch(q) == '-') {
+                            _ = prgetc(q);
+                            _ = pset(p, q);
+                            break;
+                        }
+                    } else if (bw.o.hash_comment != 0 and cc == '#') {
+                        _ = pset(p, q);
+                        break;
+                    } else if (bw.o.semi_comment != 0 and cc == ';') {
+                        _ = pset(p, q);
+                        break;
+                    } else if (bw.o.tex_comment != 0 and cc == '%') {
+                        _ = pset(p, q);
+                        break;
+                    }
+                }
+            } else if (peek == '\\' and peek1 != '\\') {
+                // Ignore
+            } else if (!query_highlighter and bw.o.no_double_quoted == 0 and d == '"') {
+                while (true) {
+                    d = prgetc(p);
+                    if (d == NO_MORE_DATA) break;
+                    if (d == '"') {
+                        d = prgetc(p);
+                        if (d != '\\') {
+                            if (d != NO_MORE_DATA) _ = pgetc(p);
+                            break;
+                        }
+                    }
+                }
+            } else if (!query_highlighter and bw.o.single_quoted != 0 and d == '\'' and c != '\'' and c != '`') {
+                while (true) {
+                    d = prgetc(p);
+                    if (d == NO_MORE_DATA) break;
+                    if (d == '\'') {
+                        d = prgetc(p);
+                        if (d != '\\') {
+                            if (d != NO_MORE_DATA) _ = pgetc(p);
+                            break;
+                        }
+                    }
+                }
+            } else if (!query_highlighter and bw.o.c_comment != 0 and d == '/') {
+                d = prgetc(p);
+                if (d == '*') {
+                    d = prgetc(p);
+                    while (true) {
+                        while (true) {
+                            if (d == '*') break;
+                            d = prgetc(p);
+                            if (d == NO_MORE_DATA) break;
+                        }
+                        d = prgetc(p);
+                        if (d == NO_MORE_DATA or d == '/') break;
+                    }
+                } else if (d != NO_MORE_DATA) {
+                    _ = pgetc(p);
+                }
+            } else if (word_delimiter) {
+                const map = mapOf(p);
+                if (joeIsAlnum(map, d)) {
+                    var flg: c_int = 0;
+                    len = 0;
+                    while (joeIsAlnum(map, d)) {
+                        if (len != MAX_WORD_SIZE) {
+                            buf[len] = d;
+                            len += 1;
+                        }
+                        d = prgetc(p);
+                        col -= 1;
+                    }
+                    const r = pdup(p, "tomatch_char_or_word");
+                    if (r) |rp| {
+                        while (d == ' ' or d == '\t') d = prgetc(rp);
+                        if ((d == 'd' or d == 'D') and bw.o.vhdl_comment != 0) {
+                            d = prgetc(rp);
+                            if (d == 'n' or d == 'N') {
+                                d = prgetc(rp);
+                                if (d == 'e' or d == 'E') {
+                                    d = prgetc(rp);
+                                    if (d == ' ' or d == '\t' or d == '\n' or d == NO_MORE_DATA) flg = 1;
+                                }
+                            }
+                        }
+                        prm(rp);
+                    }
+                    if (d == utf8_decode_string(@ptrCast(set))) {
+                        if (len != MAX_WORD_SIZE) {
+                            buf[len] = d;
+                            len += 1;
+                        }
+                    }
+                    if (d != NO_MORE_DATA) _ = pgetc(p);
+                    col += 1;
+                    buf[len] = 0;
+                    var x: usize = 0;
+                    while (x != len / 2) : (x += 1) {
+                        const e = buf[x];
+                        buf[x] = buf[len - x - 1];
+                        buf[len - x - 1] = e;
+                    }
+                    if (isInGroup(last_of_set, &buf)) {
+                        cnt += 1;
+                    } else if (isInGroup(set, &buf) and flg == 0) {
+                        const old_cnt = cnt;
+                        cnt -= 1;
+                        if (old_cnt == 0) {
+                            _ = pset(bw.cursor, p);
+                            prm(q);
+                            prm(p);
+                            return 0;
+                        }
+                    }
+                }
+            } else if (d == c) {
+                cnt += 1;
+            } else if (d == f) {
+                const old_cnt = cnt;
+                cnt -= 1;
+                if (old_cnt == 0) {
+                    _ = pset(bw.cursor, p);
+                    prm(q);
+                    prm(p);
+                    return 0;
+                }
+            }
+        }
+    } else {
+        // Forward search
+        while (true) {
+            sod = p.byte;
+            d = pgetc(p);
+            if (d == NO_MORE_DATA) break;
+
+            if (query_highlighter and d == '\n') {
+                _ = parse(bw.o.syntax, q, lattr_get(bw.db, bw.o.syntax, q, q.line), bw.o.charmap);
+                col = 0;
+                continue;
+            }
+
+            const in_ignored_ctx = query_highlighter and attr_buf != null and col >= 0 and
+                (attr_buf[@intCast(col)] & (CONTEXT_COMMENT | CONTEXT_STRING)) != 0 and
+                (attr_buf[@intCast(col)] & CONTEXT_MASK) != initial_context;
+
+            if (in_ignored_ctx) {
+                // Ignore
+            } else if (d == '\\') {
+                if (!(query_highlighter and brch(p) == '\n')) {
+                    _ = pgetc(p);
+                    col += 1;
+                }
+            } else if (!query_highlighter and bw.o.no_double_quoted == 0 and d == '"') {
+                while (true) {
+                    d = pgetc(p);
+                    if (d == NO_MORE_DATA) break;
+                    if (d == '"') break;
+                    if (d == '\\') _ = pgetc(p);
+                }
+            } else if (!query_highlighter and bw.o.single_quoted != 0 and d == '\'' and c != '\'' and c != '`') {
+                while (true) {
+                    d = pgetc(p);
+                    if (d == NO_MORE_DATA) break;
+                    if (d == '\'') break;
+                    if (d == '\\') _ = pgetc(p);
+                }
+            } else if (!query_highlighter and d == '$' and brch(p) == '#' and bw.o.hash_comment != 0) {
+                _ = pgetc(p);
+            } else if (!query_highlighter and
+                ((bw.o.hash_comment != 0 and d == '#') or
+                    (bw.o.semi_comment != 0 and d == ';') or
+                    (bw.o.tex_comment != 0 and d == '%') or
+                    (bw.o.vhdl_comment != 0 and d == '-' and brch(p) == '-') or
+                    (bw.o.cpp_comment != 0 and d == '/' and brch(p) == '/')))
+            {
+                while (true) {
+                    d = pgetc(p);
+                    if (d == NO_MORE_DATA) break;
+                    if (d == '\n') break;
+                }
+            } else if (!query_highlighter and bw.o.c_comment != 0 and d == '/' and brch(p) == '*') {
+                _ = pgetc(p);
+                d = pgetc(p);
+                while (true) {
+                    while (true) {
+                        if (d == '*') break;
+                        d = pgetc(p);
+                        if (d == NO_MORE_DATA) break;
+                    }
+                    d = pgetc(p);
+                    if (d == NO_MORE_DATA or d == '/') break;
+                }
+            } else if (word_delimiter) {
+                const map = mapOf(p);
+                const set0 = utf8_decode_string(@ptrCast(set));
+                var do_word = false;
+                if (d == set0) {
+                    len = 0;
+                    if (!joeIsAlnum(map, d)) {
+                        sod = p.byte;
+                        while (true) {
+                            d = pgetc(p);
+                            if (d == NO_MORE_DATA) break;
+                            col += 1;
+                            if (d != ' ' and d != '\t') break;
+                            sod = p.byte;
+                        }
+                        buf[0] = set0;
+                        len = 1;
+                    }
+                    if (joeIsAlnum(map, d)) {
+                        do_word = true;
+                    } else if (d != NO_MORE_DATA) {
+                        _ = prgetc(p);
+                        col -= 1;
+                    }
+                } else if (joeIsAlpha(map, d)) {
+                    len = 0;
+                    do_word = true;
+                }
+                if (do_word) {
+                    while (joeIsAlnum(map, d)) {
+                        if (len != MAX_WORD_SIZE) {
+                            buf[len] = d;
+                            len += 1;
+                        }
+                        d = pgetc(p);
+                        col += 1;
+                    }
+                    if (d != NO_MORE_DATA) {
+                        _ = prgetc(p);
+                        col -= 1;
+                    }
+                    buf[len] = 0;
+                    if (isInGroup(set, &buf)) {
+                        cnt += 1;
+                    } else if (cnt == 0) {
+                        if (isInAnyGroup(group, &buf)) {
+                            _ = pgoto(p, sod);
+                            _ = pset(bw.cursor, p);
+                            prm(q);
+                            prm(p);
+                            return 0;
+                        }
+                    } else if (isInGroup(last_of_set, &buf)) {
+                        // VHDL hack (preserve C quirk: end || !END)
+                        if (bw.o.vhdl_comment != 0 and (matchWord(@ptrCast("end"), &buf) or !matchWord(@ptrCast("END"), &buf))) {
+                            while (true) {
+                                d = pgetc(p);
+                                if (d == NO_MORE_DATA) break;
+                                col += 1;
+                                if (d == ';' or d == '\n') {
+                                    _ = prgetc(p);
+                                    col -= 1;
+                                    break;
+                                }
+                            }
+                        }
+                        cnt -= 1;
+                    }
+                }
+            } else if (d == c) {
+                cnt += 1;
+            } else if (d == f) {
+                cnt -= 1;
+                if (cnt == 0) {
+                    _ = prgetc(p);
+                    _ = pset(bw.cursor, p);
+                    prm(q);
+                    prm(p);
+                    return 0;
+                }
+            }
+            col += 1;
+        }
+    }
+    prm(q);
+    prm(p);
+    return -1;
+}
+
+fn tomatchChar(bw: *BwRec, c: c_int, f: c_int, dir: c_int) c_int {
+    return tomatchCharOrWord(bw, false, c, f, null, null, dir == -1);
+}
+
+fn tomatchWord(bw: *BwRec, set: [*]const u8, group: [*]const u8) c_int {
+    return tomatchCharOrWord(bw, true, 0, 0, set, group, group[0] == 0 or group[0] == ':');
+}
+
+fn xmlStartend(p_in: ?*GapP) bool {
+    const p = pdup(p_in, "xml_startend") orelse return false;
+    defer prm(p);
+    var c: c_int = 0;
+    var d: c_int = 0;
+    while (true) {
+        c = pgetc(p);
+        if (c == NO_MORE_DATA) break;
+        if (d == '/' and c == '>') return true;
+        if (c == '>') break;
+        d = c;
+    }
+    return false;
+}
+
+fn tomatchXml(bw: *BwRec, word: [*]c_int, dir: c_int) c_int {
+    if (dir == -1) {
+        const p = pdup(bw.cursor, "tomatch_xml") orelse return -1;
+        defer prm(p);
+        var buf: [MAX_WORD_SIZE + 1]c_int = undefined;
+        var cnt: c_int = 1;
+        _ = p_goto_next(p);
+        _ = p_goto_prev(p);
+        while (true) {
+            var c = prgetc(p);
+            if (c == NO_MORE_DATA) break;
+            const map = mapOf(p);
+            if (joeIsAlnum(map, c) or c == '.' or c == ':' or c == '-') {
+                var len: usize = 0;
+                while (joeIsAlnum(map, c) or c == '.' or c == ':' or c == '-') {
+                    if (len != MAX_WORD_SIZE) {
+                        buf[len] = c;
+                        len += 1;
+                    }
+                    c = prgetc(p);
+                }
+                if (c != NO_MORE_DATA) c = pgetc(p);
+                buf[len] = 0;
+                var x: usize = 0;
+                while (x != len / 2) : (x += 1) {
+                    const tmp = buf[x];
+                    buf[x] = buf[len - x - 1];
+                    buf[len - x - 1] = tmp;
+                }
+                if (Zcmp(word, &buf) == 0 and !xmlStartend(p)) {
+                    if (c == '<') {
+                        cnt -= 1;
+                        if (cnt == 0) {
+                            _ = pset(bw.cursor, p);
+                            return 0;
+                        }
+                    } else if (c == '/') {
+                        cnt += 1;
+                    }
+                }
+            }
+        }
+        return -1;
+    } else {
+        const p = pdup(bw.cursor, "tomatch_xml") orelse return -1;
+        defer prm(p);
+        var buf: [MAX_WORD_SIZE + 1]c_int = undefined;
+        var cnt: c_int = 1;
+        var sod: i64 = 0;
+        while (true) {
+            var c = pgetc(p);
+            if (c == NO_MORE_DATA) break;
+            if (c == '<') {
+                var e: c_int = 1;
+                sod = p.byte;
+                c = pgetc(p);
+                if (c == '/') {
+                    sod = p.byte;
+                    e = 0;
+                    c = pgetc(p);
+                }
+                const map = mapOf(p);
+                if (joeIsAlpha(map, c) or c == ':' or c == '-' or c == '.') {
+                    var len: usize = 0;
+                    while (joeIsAlnum(map, c) or c == ':' or c == '-' or c == '.') {
+                        if (len != MAX_WORD_SIZE) {
+                            buf[len] = c;
+                            len += 1;
+                        }
+                        c = pgetc(p);
+                    }
+                    if (c != NO_MORE_DATA) _ = prgetc(p);
+                    buf[len] = 0;
+                    if (Zcmp(word, &buf) == 0 and !xmlStartend(p)) {
+                        if (e != 0) {
+                            cnt += 1;
+                        } else {
+                            cnt -= 1;
+                            if (cnt == 0) {
+                                _ = pgoto(p, sod);
+                                _ = pset(bw.cursor, p);
+                                return 0;
+                            }
+                        }
+                    }
+                } else if (c != NO_MORE_DATA) {
+                    _ = prgetc(p);
+                }
+            }
+        }
+        return -1;
+    }
+}
+
+fn getXmlName(p_in: ?*GapP, buf: [*]c_int) void {
+    const p = pdup(p_in, "get_xml_name") orelse {
+        buf[0] = 0;
+        return;
+    };
+    defer prm(p);
+    var len: usize = 0;
+    var c = pgetc(p);
+    const map = mapOf(p);
+    while (joeIsAlnum(map, c) or c == ':' or c == '-' or c == '.') {
+        if (len != MAX_WORD_SIZE) {
+            buf[len] = c;
+            len += 1;
+        }
+        c = pgetc(p);
+    }
+    buf[len] = 0;
+}
+
+fn getDelimName(q: ?*GapP, buf: [*]c_int) void {
+    var len: usize = 0;
+    var c: c_int = 0;
+    {
+        const p = pdup(q, "get_delim_name") orelse {
+            buf[0] = 0;
+            return;
+        };
+        while (true) {
+            c = prgetc(p);
+            if (c == NO_MORE_DATA) break;
+            if (c != ' ' and c != '\t') break;
+        }
+        prm(p);
+    }
+    if (c == '#' or c == '`') {
+        buf[len] = c;
+        len += 1;
+    }
+    const p = pdup(q, "get_delim_name") orelse {
+        buf[len] = 0;
+        return;
+    };
+    defer prm(p);
+    c = pgetc(p);
+    const map = mapOf(p);
+    while (joeIsAlnum(map, c)) {
+        if (len != MAX_WORD_SIZE) {
+            buf[len] = c;
+            len += 1;
+        }
+        c = pgetc(p);
+    }
+    buf[len] = 0;
+}
+
+/// Move cursor to matching delimiter (`^G`).
+pub export fn utomatch(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = cursorOrNull(bw) orelse return -1;
+    var c = brch(cur);
+    const b = bw.b orelse return -1;
+
+    if (joeIsAlnum(mapOf(cur), c)) {
+        var buf: [MAX_WORD_SIZE + 1]c_int = undefined;
+        var utf8_buf: [MAX_WORD_SIZE * 6 + 1]u8 = undefined;
+        var buf1: [MAX_WORD_SIZE + 1]c_int = undefined;
+        const list_ptr: ?[*]const u8 = if (b.o.text_delimiters) |td| @ptrCast(@alignCast(td)) else null;
+        var flg: c_int = 0;
+        const p = pdup(cur, "utomatch") orelse return -1;
+        _ = p_goto_next(p);
+        _ = p_goto_prev(p);
+        getDelimName(p, &buf);
+        getXmlName(p, &buf1);
+        c = prgetc(p);
+        if (c == '<') {
+            flg = 1;
+        } else if (c == '/') {
+            c = prgetc(p);
+            if (c == '<') flg = -1;
+        }
+        prm(p);
+
+        if (flg != 0) {
+            return tomatchXml(bw, &buf1, flg);
+        }
+
+        if (list_ptr) |list| {
+            var set = list;
+            while (set[0] != 0) : (set = nextSet(set)) {
+                var group = set;
+                while (group[0] != 0 and group[0] != '=' and group[0] != ':') : (group = nextGroup(group)) {
+                    var word = group;
+                    while (word[0] != 0 and word[0] != '|' and word[0] != '=' and word[0] != ':') : (word = nextWord(word)) {
+                        if (matchWord(word, &buf)) {
+                            if (repeatedGroup(word)) {
+                                return tomatchWord(bw, set, group);
+                            } else {
+                                return tomatchWord(bw, set, nextGroup(word));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        const map = mapOf(cur);
+        if (map != null and map.?.@"type" != 0) {
+            _ = Ztoutf8(&utf8_buf, utf8_buf.len, &buf);
+        } else {
+            _ = Ztoz(&utf8_buf, utf8_buf.len, &buf);
+        }
+        return dofirst(@ptrCast(bw), 0, 0, &utf8_buf);
+    }
+
+    var f: c_int = 0;
+    var dir: c_int = 0;
+    switch (c) {
+        '/' => {
+            dir = 1;
+            _ = pgetc(cur);
+            f = brch(cur);
+            _ = prgetc(cur);
+            if (f == '*') {
+                f = '/';
+            } else {
+                dir = -1;
+                f = prgetc(cur);
+                if (f != NO_MORE_DATA) _ = pgetc(cur);
+                if (f == '*') f = '/' else return -1;
+            }
+        },
+        '*' => {
+            dir = -1;
+            _ = pgetc(cur);
+            f = brch(cur);
+            _ = prgetc(cur);
+            if (f == '/') {
+                f = '*';
+            } else {
+                dir = 1;
+                f = prgetc(cur);
+                if (f != NO_MORE_DATA) _ = pgetc(cur);
+                if (f == '/') f = '*' else return -1;
+            }
+        },
+        '(' => {
+            f = ')';
+            dir = 1;
+        },
+        '[' => {
+            f = ']';
+            dir = 1;
+        },
+        '{' => {
+            f = '}';
+            dir = 1;
+        },
+        '`' => {
+            f = '\'';
+            dir = 1;
+        },
+        '<' => {
+            f = '>';
+            dir = 1;
+        },
+        ')' => {
+            f = '(';
+            dir = -1;
+        },
+        ']' => {
+            f = '[';
+            dir = -1;
+        },
+        '}' => {
+            f = '{';
+            dir = -1;
+        },
+        '\'' => {
+            f = '`';
+            dir = -1;
+        },
+        '>' => {
+            f = '<';
+            dir = -1;
+        },
+        else => return -1,
+    }
+
+    if (f == '/' or f == '*') {
+        const p = pdup(cur, "utomatch") orelse return -1;
+        defer prm(p);
+        var d: c_int = 0;
+        if (dir == 1) {
+            d = pgetc(p);
+            while (true) {
+                while (true) {
+                    if (d == '*') break;
+                    d = pgetc(p);
+                    if (d == NO_MORE_DATA) break;
+                }
+                d = pgetc(p);
+                if (d == NO_MORE_DATA or d == '/') break;
+            }
+            if (d == '/') {
+                if (f == '*') _ = prgetc(p);
+                _ = pset(cur, p);
+                _ = prgetc(cur);
+            }
+        } else {
+            d = prgetc(p);
+            while (true) {
+                while (true) {
+                    if (d == '*') break;
+                    d = prgetc(p);
+                    if (d == NO_MORE_DATA) break;
+                }
+                d = prgetc(p);
+                if (d == NO_MORE_DATA or d == '/') break;
+            }
+            if (d == '/') {
+                if (f == '*') _ = pgetc(p);
+                _ = pset(cur, p);
+            }
+        }
+        if (d == NO_MORE_DATA) return -1;
+        return 0;
+    }
+
+    return tomatchChar(bw, c, f, dir);
 }

@@ -854,7 +854,7 @@ The build is always working — start with a binary that compiles and runs, then
 - ✅ Path A `uedit` tomatch + removal: Zig owns `utomatch` + delimiter/XML/word/char helpers; removed `joe/uedit.c` from the link; soak **196/196**; live `uedit` is zero-C
 - At this point: fully functional editor with markdown viewmode
 
-### Phase 7: File I/O & Commands (3-4 weeks) — IN PROGRESS (Path A uedit + ublock + uformat + ushell + utag + umath done)
+### Phase 7: File I/O & Commands (3-4 weeks) — IN PROGRESS (Path A uedit + ublock + uformat + ushell + utag + umath + uisrch done)
 - ⬜ `fileio.zig` — load, save, UTF-16 conversion
 - ✅ `edit.zig` / `src/uedit.zig` — Path A live edit commands (**zero-C `uedit`**: JOE `uedit.h` ABI exported from Zig)
 - ✅ Path A `ublock` mark slice: Zig `src/ublock.zig` owns mark globals (`square`/`markb`/`markk`/…) + `upsh`/`upop`/`markv` + mark set/goto/toggle cmds; soak **196/196**
@@ -864,7 +864,8 @@ The build is always working — start with a binary that compiles and runs, then
 - ✅ Path A `uformat` zero-C: Zig `src/uformat.zig` owns `within` + `ucenter`/`pbop`/`peop`/`ubop`/`ueop`/`wrapword`/`uformat`/`ufmtblk`/`utrimlines`; `joe/uformat.c` removed from the link (tombstone); soak **196/196**
 - ✅ Path A `ushell` zero-C: Zig `src/ushell.zig` owns `cstart`/`vt_scrdn`/`ubknd`/`uvtbknd`/`urun`/`ubuild`/`ugrep`/`ukillpid` + `runhist`/`buildhist`/`grephist`; `joe/ushell.c` removed from the link (tombstone); soak **196/196**
 - ✅ Path A `utag` zero-C: Zig `src/utag.zig` owns `notagsmenu`/`utag`/`utagjump` + tag queue/menu/completion; `joe/utag.c` removed from the link (tombstone); soak **196/196**
-- ✅ Path A `umath` zero-C: Zig `src/umath.zig` owns `calc`/`umath`/`usmath`/`joe_strtod`/`math_cmplt` + `merr`/`mathhist` (translate-c Path A); `joe/umath.c` removed from the link (tombstone); soak **196/196**; next Phase 7: search/isrch/error nav
+- ✅ Path A `umath` zero-C: Zig `src/umath.zig` owns `calc`/`umath`/`usmath`/`joe_strtod`/`math_cmplt` + `merr`/`mathhist` (translate-c Path A); `joe/umath.c` removed from the link (tombstone); soak **196/196**
+- ✅ Path A `uisrch` zero-C: Zig `src/uisrch.zig` owns `uisrch`/`ursrch` + incremental-search state; `joe/uisrch.c` removed from the link (tombstone); soak **196/196**; next Phase 7: `usearch` / `uerror`
 - ⬜ `search.zig` — search/replace
 - ⬜ Shell window, tags, math, error navigation
 - At this point: feature-complete in Zig

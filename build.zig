@@ -127,7 +127,7 @@ pub fn build(b: *std.Build) void {
             // REMOVED: joe/utf8.c — replaced by src/utf8.zig
             "joe/selinux.c",
             // REMOVED: joe/charmap.c — replaced by src/charmap.zig
-            "joe/mouse.c",
+            // REMOVED: joe/mouse.c — replaced by src/mouse.zig JOE mouse.h ABI exports
             // REMOVED: joe/lattr.c — replaced by src/lattr.zig
             "joe/gettext.c",
             // REMOVED: joe/builtin.c — replaced by src/builtin.zig

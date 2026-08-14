@@ -1,8 +1,7 @@
 //! Path A live port of JOE highlighted-block commands (`joe/ublock.c`).
 //!
-//! Landed: mark globals/stack/set/goto + rectangle helpers +
-//! `ublkdel`/`upicokill`/`ublkmove`/`ublkcpy`. Remaining `joe/ublock.c`
-//! (indent, filter, case, blksum) stays linked until later slices.
+//! Landed: marks, rect/block-ops, and indent (`setindent`/`urindent`/`ulindent`).
+//! Remaining `joe/ublock.c` (filter, case, blksum) stays linked until later slices.
 
 const std = @import("std");
 const gap_types = @import("gapbuffer/types.zig");
@@ -152,6 +151,12 @@ extern fn updall() void;
 extern fn msgnw(w: ?*anyopaque, s: [*c]const u8) void;
 extern fn my_gettext(s: [*c]const u8) [*c]const u8;
 extern fn alitem(list: ?*anyopaque, itemsize: isize) ?*anyopaque;
+
+extern fn pisblank(p: ?*GapP) c_int;
+extern fn pisindent(p: ?*GapP) i64;
+extern fn pprevl(p: ?*GapP) ?*GapP;
+extern fn brc(p: ?*GapP) c_int;
+extern fn p_goto_indent(p: ?*GapP, c: c_int) ?*GapP;
 
 fn asWin(w: ?*anyopaque) *WinRec {
     return @ptrCast(@alignCast(w.?));
@@ -767,4 +772,307 @@ pub export fn ublkcpy(w: ?*anyopaque, k: c_int) c_int {
         msgnw(@ptrCast(bw.parent), my_gettext("No block"));
         return -1;
     }
+}
+
+/// Set highlighted block on a program indent block.
+pub export fn setindent(bw_in: ?*anyopaque) void {
+    const bw = @as(*BwRec, @ptrCast(@alignCast(bw_in orelse return)));
+    const cur = bw.cursor orelse return;
+    if (pisblank(cur) != 0) return;
+
+    const p = pdup(cur, "setindent") orelse return;
+    const q = pdup(p, "setindent") orelse {
+        prm(p);
+        return;
+    };
+    const indent = pisindent(p);
+
+    var at_bof = false;
+    while (true) {
+        if (pprevl(p) == null) {
+            at_bof = true;
+            break;
+        }
+        _ = p_goto_bol(p);
+        if (!(pisindent(p) >= indent or pisblank(p) != 0)) break;
+    }
+    if (!at_bof) _ = pnextl(p);
+
+    _ = p_goto_bol(p);
+    p.xcol = piscol(p);
+    prm(markb);
+    markb = p;
+    p.owner = &markb;
+
+    while (true) {
+        if (pnextl(q) == null) break;
+        if (!(pisindent(q) >= indent or pisblank(q) != 0)) break;
+    }
+    prm(markk);
+    q.xcol = piscol(q);
+    markk = q;
+    q.owner = &markk;
+
+    updall();
+}
+
+fn getCommonIndentWidth() i64 {
+    const mb = markb orelse return 0;
+    const mk = markk orelse return 0;
+    const p = pdup(mb, "get_common_indent_width") orelse return 0;
+    defer prm(p);
+    var maxwidth: i64 = 0x7FFFFFFF;
+    _ = p_goto_bol(p);
+    while (p.byte < mk.byte) {
+        var width: i64 = 0;
+        while (true) {
+            const c = pgetc(p);
+            if (!(c == ' ' or c == '\t')) break;
+            width = p.col;
+        }
+        if (width < maxwidth) maxwidth = width;
+        _ = pnextl(p);
+    }
+    const b = mb.b orelse return maxwidth;
+    if (b.o.indentc == '\t') {
+        const step = b.o.tab * b.o.istep;
+        if (step == 0) return maxwidth;
+        return maxwidth - @mod(maxwidth, step);
+    } else {
+        if (b.o.istep == 0) return maxwidth;
+        return maxwidth - @mod(maxwidth, b.o.istep);
+    }
+}
+
+fn isPure(p: *GapP, c: c_int, n: i64) bool {
+    const col = piscol(p) + n;
+    while (piscol(p) < col) {
+        if (pgetc(p) != c) return false;
+    }
+    return true;
+}
+
+fn eatPretabSpaces(p: *GapP, limit: i64) void {
+    var col = piscol(p);
+    const q = pdup(p, "eat_pretab_spaces") orelse return;
+    defer prm(q);
+    const b = p.b orelse return;
+    const tab = b.o.tab;
+    if (tab == 0) return;
+    col -= @mod(col, tab);
+    _ = pcol(q, col);
+
+    var c = brc(q);
+    while (c == ' ' and q.col < limit) {
+        c = pgetc(q);
+    }
+    if (piscol(q) >= limit) {
+        _ = pcol(q, limit);
+        c = '\t';
+    }
+    var del = piscol(q) - col;
+    if (del != 0) {
+        if (c != '\t') {
+            del -= @mod(del, tab);
+            _ = pcol(q, col + del);
+        }
+        if (del != 0) {
+            bdel(p, q);
+            pfill(q, col + del - @mod(del, tab), '\t');
+        }
+    }
+}
+
+fn lindentCheck(c: c_int, n: i64) bool {
+    const mb = markb orelse return false;
+    const mk = markk orelse return false;
+    const p = pdup(mb, "lindent_check") orelse return false;
+    const q = pdup(mb, "lindent_check") orelse {
+        prm(p);
+        return false;
+    };
+    defer {
+        prm(q);
+        prm(p);
+    }
+    const indwid: i64 = if (c == '\t') blk: {
+        const b = p.b orelse return false;
+        break :blk n * b.o.tab;
+    } else n;
+
+    if (c == ' ' or c == '\t') {
+        while (p.byte < mk.byte) {
+            _ = p_goto_bol(p);
+            if (piseol(p) == 0 and pisindent(p) < indwid) return false;
+            _ = pnextl(p);
+        }
+    } else {
+        while (p.byte < mk.byte) {
+            _ = p_goto_bol(p);
+            if (piseol(p) == 0) {
+                _ = pset(q, p);
+                var x: i64 = 0;
+                while (x < indwid and pgetc(q) == c) : (x += 1) {}
+                if (x < indwid) return false;
+            }
+            _ = pnextl(p);
+        }
+    }
+    return true;
+}
+
+pub export fn urindent(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = bw.cursor orelse return -1;
+    if (square != 0) {
+        if (markb) |mb| {
+            if (markk) |mk| {
+                if (mb.b == mk.b and mb.byte <= mk.byte and mb.xcol <= mk.xcol) {
+                    const p = pdup(mb, "urindent") orelse return -1;
+                    defer prm(p);
+                    while (true) {
+                        _ = pcol(p, mb.xcol);
+                        pfill(p, mb.xcol + bw.o.istep, bw.o.indentc);
+                        if (pnextl(p) == null or p.line > mk.line) break;
+                    }
+                }
+            }
+        }
+    } else {
+        if (markb == null or markk == null or markb.?.b != markk.?.b or
+            cur.byte < markb.?.byte or cur.byte > markk.?.byte or markb.?.byte == markk.?.byte)
+        {
+            setindent(bw);
+        } else {
+            const mb = markb.?;
+            const mk = markk.?;
+            const p = pdup(mb, "urindent") orelse return -1;
+            const q = pdup(mb, "urindent") orelse {
+                prm(p);
+                return -1;
+            };
+            defer {
+                prm(p);
+                prm(q);
+            }
+            const common_width = getCommonIndentWidth();
+            const indwid: i64 = if (bw.o.indentc == '\t') bw.o.tab * bw.o.istep else bw.o.istep;
+
+            while (p.byte < mk.byte) {
+                _ = p_goto_bol(p);
+                if (piseol(p) == 0) {
+                    _ = pset(q, p);
+                    if (bw.o.indentc == ' ' and brc(p) == '\t') {
+                        _ = p_goto_indent(q, bw.o.indentc);
+                        const col = piscol(q);
+                        bdel(p, q);
+                        pfill(p, col + indwid, bw.o.indentc);
+                    } else {
+                        if (bw.o.indentc == '\t') {
+                            var col: i64 = 0;
+                            while (col < common_width) : (col += bw.o.tab) {
+                                _ = pcol(q, col);
+                                eatPretabSpaces(q, common_width);
+                            }
+                        }
+                        while (piscol(p) < bw.o.istep) {
+                            _ = binsc(p, bw.o.indentc);
+                            _ = pgetc(p);
+                        }
+                    }
+                }
+                _ = pnextl(p);
+            }
+        }
+    }
+    return 0;
+}
+
+pub export fn ulindent(w: ?*anyopaque, k: c_int) c_int {
+    _ = k;
+    const bw = windBw(w) orelse return -1;
+    const cur = bw.cursor orelse return -1;
+    if (square != 0) {
+        if (markb) |mb| {
+            if (markk) |mk| {
+                if (mb.b == mk.b and mb.byte <= mk.byte and mb.xcol <= mk.xcol) {
+                    const p = pdup(mb, "ulindent") orelse return -1;
+                    const q = pdup(p, "ulindent") orelse {
+                        prm(p);
+                        return -1;
+                    };
+                    defer {
+                        prm(p);
+                        prm(q);
+                    }
+                    while (true) {
+                        _ = pcol(p, mb.xcol);
+                        while (piscol(p) < mb.xcol + bw.o.istep) {
+                            const c = pgetc(p);
+                            if (c != ' ' and c != '\t' and c != bw.o.indentc) return -1;
+                        }
+                        if (pnextl(p) == null or p.line > mk.line) break;
+                    }
+                    _ = pset(p, mb);
+                    while (true) {
+                        _ = pcol(p, mb.xcol);
+                        _ = pset(q, p);
+                        _ = pcol(q, mb.xcol + bw.o.istep);
+                        bdel(p, q);
+                        if (pnextl(p) == null or p.line > mk.line) break;
+                    }
+                }
+            }
+        }
+    } else {
+        if (markb == null or markk == null or markb.?.b != markk.?.b or
+            cur.byte < markb.?.byte or cur.byte > markk.?.byte or markb.?.byte == markk.?.byte)
+        {
+            setindent(bw);
+        } else if (lindentCheck(bw.o.indentc, bw.o.istep)) {
+            const mb = markb.?;
+            const mk = markk.?;
+            const p = pdup(mb, "ulindent") orelse return -1;
+            const q = pdup(mb, "ulindent") orelse {
+                prm(p);
+                return -1;
+            };
+            defer {
+                prm(p);
+                prm(q);
+            }
+            const common_width = getCommonIndentWidth();
+            const indwid: i64 = if (bw.o.indentc == '\t') bw.o.tab * bw.o.istep else bw.o.istep;
+
+            while (p.byte < mk.byte) {
+                _ = p_goto_bol(p);
+                if (piseol(p) == 0) {
+                    _ = pset(q, p);
+                    if (isPure(q, bw.o.indentc, common_width)) {
+                        _ = pset(q, p);
+                        while (piscol(q) < bw.o.istep) _ = pgetc(q);
+                        bdel(p, q);
+                    } else if (bw.o.indentc == '\t') {
+                        _ = pcol(q, common_width);
+                        bdel(p, q);
+                        if (common_width > bw.o.tab) {
+                            pfill(p, common_width - bw.o.tab, '\t');
+                        }
+                    } else {
+                        _ = pset(q, p);
+                        _ = p_goto_indent(q, bw.o.indentc);
+                        const col = piscol(q);
+                        bdel(p, q);
+                        pfill(p, col - indwid, bw.o.indentc);
+                    }
+                }
+                _ = pnextl(p);
+            }
+        } else {
+            msgnw(@ptrCast(bw.parent), my_gettext("Selected lines not properly indented"));
+            return 1;
+        }
+    }
+    return 0;
 }

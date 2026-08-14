@@ -46,4 +46,6 @@ comptime {
     _ = @import("ublock.zig");
     // Path A: live uformat → Zig JOE uformat.h ABI exports.
     _ = @import("uformat.zig");
+    // Path A: live ushell → Zig JOE ushell.h ABI exports.
+    _ = @import("ushell.zig");
 }

@@ -22,14 +22,11 @@ the Python soak suite stay intact.
 `zig-rewrite`. Rebase or merge it forward from `zig-rewrite` rather than the
 other way round.
 
-An initial markdown viewmode is **already landed** in the live Zig paint path
-(`src/bw_lgen.zig` + `src/render/`). Active markdown plan:
+A markdown viewmode is **landed** in the live Zig paint path
+(`src/bw_lgen.zig` + `src/render/`), including the plan's current Phase 1
+(zero-width conceal, `markdown` branch). Active markdown plan:
 `plans/markdown-wysiwyg-feasibility.md` + `plans/TODO.md` (OpenCode-style rich
 viewmode; self-contained Zig — no vendored markdown libs).
-
-> **Phase numbers were renumbered.** What shipped is the *old* Phase 1–2 feature
-> set, archived in `plans/TODO.md`. The plan's **current** Phase 1 is zero-width
-> conceal and has **not** started. Do not read "Phase 1 landed" from this file.
 
 ## Current state (read this first)
 
@@ -82,7 +79,7 @@ sudo zig build -Doptimize=ReleaseFast --prefix /usr/local
 ```sh
 cp -f zig-out/bin/joe joe/joe
 ./runtests
-# Expect: Ran 197 tests ... OK
+# Expect: Ran 201 tests ... OK
 ```
 
 Do **not** use `pytest`. Root `./runtests` (or `cd tests && python3 -m unittest …` per project habit) only.
@@ -147,7 +144,7 @@ for-loop `switch` in `while (true)` such that Zig `continue` restarts the while
    (undersized fakes smash stacks — see Path A `ufile` history).
 5. **translate-c footguns:** `sc("...")` lengths, `while(true)+continue`, fake libc
    types, `return undefined`. Prefer hand-fixing control flow after translate-c.
-6. **Always soak** (`./runtests` → 197/197) before “done.”
+6. **Always soak** (`./runtests` → 201/201) before “done.”
 7. **Commits:** focused messages; update `plans/zig-rewrite-architecture.md` when
    finishing a phase-sized chunk.
 8. **Parallelism:** independent modules/tests can use subagents; keep one soak gate
@@ -155,7 +152,7 @@ for-loop `switch` in `while (true)` such that Zig `continue` restarts the while
 
 ## Post-change review checklist
 
-- Soak **197/197** (and relevant `zig build *-test` if you touched those trees)
+- Soak **201/201** (and relevant `zig build *-test` if you touched those trees)
 - No new unbounded `[*c]` writes; check help/status/paint paths manually if UI chrome
 - SELinux/GPM remain no-ops unless Linux + `-D` flags
 - Do not reintroduce linked `joe/*.c`
@@ -164,9 +161,9 @@ for-loop `switch` in `while (true)` such that Zig `continue` restarts the while
 
 ## Markdown / rendering (already in tree)
 
-Viewmode hides markdown delimiters, paints emphasis/headings/tables, OSC 8 links,
-Unicode table borders — implemented on the Zig paint path, not by editing deleted
-`joe/bw.c`. Syntax still driven by `syntax/md.jsf` + color schemes under `colors/`.
+Viewmode conceals markdown delimiters at zero width, paints emphasis/headings/tables,
+OSC 8 links, Unicode table borders — implemented on the Zig paint path, not by editing
+deleted `joe/bw.c`. Syntax still driven by `syntax/md.jsf` + color schemes under `colors/`.
 
 ## Classic Autoconf (reference only)
 

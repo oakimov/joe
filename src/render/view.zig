@@ -3,8 +3,10 @@
 //! Builds per-line hide / substitute / link-url / column-map tables from raw
 //! buffer bytes, matching JOE `joe/bw.c` Feature 1.x. Table box-drawing lives
 //! in `table.zig` (Feature 2.1/2.2) and paints padded rows directly.
-//! `lgen` applies hide→space and substitute→codepoint when `Options.view` is set.
-//! Not wired into live `joe` — unit-tested only.
+//! `lgen` conceals hidden bytes at zero width and applies substitute→codepoint
+//! when `Options.view` is set (plan §4). Wired into live `joe` via
+//! `zig_bw_view_line_start` (`src/bw_lgen.zig`), which binds these tables onto
+//! the C-owned side-table storage through `bindScratch`.
 
 const std = @import("std");
 const testing = std.testing;

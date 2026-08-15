@@ -1066,6 +1066,17 @@ pub export fn zig_bw_view_finish(
     var cursor_offset: i64 = zig_c_bw_pbyte(cursor) - zig_c_bw_pbyte(bol);
     prm(bol);
 
+    // Plan R5: cursor never rests on a concealed byte. This call site has
+    // no movement-direction context (it runs at paint time, not from the
+    // arrow-key handlers), so it cannot fully implement "left lands before
+    // the run, right lands after" — that needs direction threaded through
+    // the cursor-movement call chain, a larger change than this fixup.
+    // What it CAN do deterministically: prefer the forward skip (unchanged,
+    // existing behavior), and when the hidden run reaches end of line with
+    // nothing visible after it, clamp to the last visible byte before the
+    // run instead of leaving the cursor stuck on a hidden byte with a
+    // stale (pre-collapse) xcol. A fully concealed line clamps to offset 0
+    // (col_map[0] is 0 either way, since nothing on the line has width).
     if (skip_hidden != 0 and cursor_offset >= 0 and cursor_offset < hide_len) {
         const off: usize = @intCast(cursor_offset);
         if (off < clear_n and hide.?[off] != 0) {
@@ -1077,6 +1088,16 @@ pub export fn zig_bw_view_finish(
                 const target = zig_c_bw_pbyte(move) + @as(i64, @intCast(next));
                 zig_c_bw_pgoto(cursor, target);
                 cursor_offset = @intCast(next);
+                prm(move);
+            } else {
+                var prev: i64 = @as(i64, @intCast(off)) - 1;
+                while (prev >= 0 and hide.?[@intCast(prev)] != 0) : (prev -= 1) {}
+                const move = pdup(cursor, "zig_bw_view_finish_skip_back") orelse return -1;
+                zig_c_bw_p_goto_bol(move);
+                const base = zig_c_bw_pbyte(move);
+                const target = if (prev >= 0) base + prev else base;
+                zig_c_bw_pgoto(cursor, target);
+                cursor_offset = if (prev >= 0) prev else 0;
                 prm(move);
             }
         }

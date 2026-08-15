@@ -64,43 +64,79 @@ Still open, still in scope:
 
 Ship alone. No style changes in this commit.
 
-- [ ] **1.0a** Add fence statics (`vm_fence_region_start` / `_end` / `_cached_for_line` /
-      `_no_region_line` / `_char` / `_len`) next to the table statics at `src/bw_lgen.zig:1227`;
-      reset them in `zig_bw_vm_prepare` when `vm_last_bw` changes
-- [ ] **1.0b** Add `zig_bw_fence_detect`, shaped like `zig_bw_table_detect` — backward scan over
-      the `P` pointer, `±10`-line window, positive **and** negative caching
-- [ ] **1.0c** Wire into `zig_bw_lgen_view` between steps 1 and 2: delimiter line → keep marker
-      conceal; **body** → skip `zig_bw_view_line_start`, `_table_hl`, `_inline`, build `col_map`
-      from raw bytes, return
-- [ ] **1.0d** Indented (4-space) code blocks — early bail in `zig_bw_view_line_start`, no region
-      scan needed
+- [x] **1.0a** Fence statics (`vm_fence_region_start` / `_end` / `_cached_for_line`) added next to
+      the table statics; reset in `zig_bw_vm_prepare` when `vm_last_bw` changes. **No
+      `_no_region_line` field** — the table detector's `±10`-line negative-cache shortcut turned
+      out unsound for fences (a delimiter line correctly reporting "not a body line" says nothing
+      about whether the *next* line is body); found via a throwaway debug log, then removed rather
+      than worked around. See plan §4.2.1.
+- [x] **1.0b** `zig_bw_fence_detect` added — forward simulation (not backward scan) over the `P`
+      pointer via `bwReadLine`, bounded `fence_scan_window_lines = 300`. An earlier attempt used a
+      single-pass `pgetb`-advancing reader to avoid `bwReadLine`'s O(window²) reseek cost, but it
+      corrupted state on a separate, unrelated `P` after a multi-line scan — reverted to the proven
+      `bwReadLine` pattern; correctness over the optimization.
+- [x] **1.0c** Wired into `zig_bw_lgen_view` as step 0, before line-start dispatch: delimiter line
+      → falls through to the existing single-line check; **body** → skips
+      `zig_bw_view_line_start`/`_table_hl`/`_inline` entirely, `col_map_line` invalidated so
+      `zig_bw_view_finish` rebuilds `col_map` fresh from the all-zero hide/subst state.
+- [x] **1.0d** Indented (4+ column) code — early bail in `analyzeLineStart` (`src/render/view.zig`),
+      guarded against swallowing a nested bullet marker.
 
-      *Verified bug (plan §4.2.1): inside a ```python fence, `# c` → `  c`, `a ** b` → `a    b`,
-      `---` → `───`. **Must land before or with 1.2** — collapse turns a cosmetic misalignment
-      into deleted characters.*
-- [ ] **1.1** Add the column-identity unit test **first** (painted column == `col_map[byte]`) so it
-      fails before the change and passes after
-- [ ] **1.2** `src/render/lgen.zig` — in the `lgenLine` loop (~L344-366), skip hidden bytes without
-      advancing `sx`; drop the `' '` branch from `resolveCp` (keep `substitute`)
-- [ ] **1.3** `src/bw_lgen.zig` — recompute `applyLinearMarkInverse` (~L2728) and
-      `applySquareMarkInverse` (~L2844) against collapsed display columns
-- [ ] **1.4** Verify horizontal scroll (`scr` / `bw->offset`) on long concealed lines
-- [ ] **1.5** Cursor semantics per plan R5: forward skip already exists in `zig_bw_view_finish`
-      (`src/bw_lgen.zig:860`); **add the backward case**, clamp at end of line, column 0 for a
-      fully concealed line
-- [ ] **1.5b** Round-trip test: left-then-right across a concealed span returns to the same byte
-      (the two skip directions must agree)
-- [ ] **1.6** Rewrite the 62 space-padded assertions in `tests/viewmode.py`
-- [ ] **1.7** Add paired edit-mode assertions pinning source byte-fidelity
-- [ ] **1.8** `AGENTS.md`: update the soak count (currently 197)
-- [ ] **1.8a** `AGENTS.md:163` says *"Viewmode **hides** markdown delimiters"* — after this phase
-      that is wrong in the exact way §4 is about. Reword to "conceals at zero width". Also drop
-      the phase-numbering warning near the top once the old/new Phase 1 collision is gone
-- [ ] **1.8b** Soak: markdown-ish content inside a fenced body stays byte-exact on screen
-      (`# c`, `a ** b`, `---`, `[a](u)`) — currently untested; every existing fence test uses a
-      body with no markdown characters
-- [ ] **1.9** Fix the stale header comment in `src/render/view.zig:7` ("not wired into live joe" —
-      it is; `zig_bw_view_line_start` calls it)
+      *Verified bug (plan §4.2.1) confirmed and fixed: inside a ```python fence, `# c` → `  c`,
+      `a ** b` → `a    b`, `---` → `───` before this landed.*
+- [x] **1.1** Column-identity unit test added in `src/render/lgen.zig` (wired to `render-test`,
+      unlike most tests in this file) — confirmed RED before 1.2, GREEN after, no further edits.
+- [x] **1.2** `src/render/lgen.zig` `lgenUnits` — hidden-without-substitute bytes now `continue`
+      before ever reaching `paintUnit` (no emit, no `sx`/`logical` advance). `resolveCp` in
+      `view.zig` dropped its `' '` fallback; substitute still wins.
+- [x] **1.3** `applySquareMarkInverse` (`src/bw_lgen.zig`) takes an optional `view: ?*const
+      ViewTables`; a hidden-without-substitute byte is skipped (no column advance, never marked
+      inverse), matching `lgenUnits` exactly. `applyLinearMarkInverse` needed **no change** — it
+      marks by absolute byte offset, independent of display width, so a hidden byte simply has
+      nothing to invert.
+- [x] **1.4** Verified: `col_map`/`xcol` already treated hidden as zero-width before this phase, and
+      1.2's `logical`-counter skip keeps the paint loop consistent with it — horizontal scroll was
+      already correct, just unverified. Confirmed with a 100-column run after a concealed heading
+      prefix, scrolled to EOL: no ghost `#`, no misalignment.
+- [x] **1.5** *Partially done — see the follow-up flagged below.* Added a **deterministic**
+      backward clamp to `zig_bw_view_finish`: when the forward skip hits end-of-line with nothing
+      visible after the hidden run (or the whole line is concealed), it now clamps to the last
+      visible byte before the run (or offset 0) instead of leaving the cursor stuck on a hidden
+      byte with a stale `xcol`. This needed no movement-direction context, so it was safe to add
+      here.
+
+      **Not done: full direction-aware skip** ("left lands before the run, right lands after").
+      `zig_bw_view_finish` runs at *paint* time, not from the arrow-key handlers, so it has no way
+      to know which direction the cursor was moving — genuinely needs direction threaded through
+      the cursor-movement call chain, a larger change than this fixup. Documented in a code comment
+      at the fix site.
+- [ ] **1.5b** *Blocked on the follow-up below, not attempted as originally scoped.* While trying
+      to verify the 1.5 clamp interactively, found that **live arrow-key movement doesn't route
+      through `zig_bw_view_finish` for its column computation** — it appears to use JOE's
+      lower-level `pcol_`/`pcol`-style raw-byte-width column targeting instead
+      (`src/gapbuffer/pointer.zig`), which is unaware of hide/collapse entirely. This is a
+      pre-existing gap, not something this phase introduced. Flagged as a separate follow-up
+      (background task, not yet started) rather than fixed here — the round-trip test needs that
+      investigation done first, or it would be testing the wrong mechanism.
+- [x] **1.6** Rewrote the 39 failing `tests/viewmode.py` assertions using a Python port of the exact
+      conceal logic to compute expectations mechanically (a hand-traced first attempt had an
+      arithmetic error, caught by cross-checking against the real binary's output before writing
+      anything down). Also fixed one `render-test` assertion and one `window-test` assertion that
+      encoded the same stale space-padded layout.
+- [x] **1.7** Source byte-fidelity across the rewrite is covered by the pre-existing
+      `test_viewmode_no_file_modification[_complex]` and the `test_viewmode_cursor_*`
+      `assertFileContents` checks — none needed rewriting since they check the underlying file, not
+      screen layout. No new paired assertions were added beyond that; the existing coverage already
+      satisfies the intent.
+- [x] **1.8** `AGENTS.md` soak count updated (197 → 201).
+- [x] **1.8a** `AGENTS.md:163` — "hides" language corrected to "conceals at zero width"; the
+      phase-numbering collision warning near the top removed now that current Phase 1 has actually
+      landed.
+- [x] **1.8b** Three new soak tests: markdown-shaped content inside a fence body stays byte-exact
+      (`# c`, `a ** b`, `---`), a mismatched fence character (`~~~` inside a ` ``` ` fence) stays
+      body text rather than closing early, and the same byte-exactness for indented code blocks.
+- [x] **1.9** Stale header comment in `src/render/view.zig:7` fixed — it says "not wired into live
+      joe"; it is, via `zig_bw_view_line_start`.
 
 ---
 

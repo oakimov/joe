@@ -134,7 +134,10 @@ Target = plan §3.1 "JOE result" column, with the §3.2 deviation.
       `:list_content` → `MdText`. `MdConceal` is **not** needed (table grid uses the existing
       `MdTableSeparator`)
 - [ ] **3.2** Create `colors/cursor-dark.jcf` from plan §6.2 — markdown mapping (§6.2.3), general
-      syntax (§6.2.5), UI keys. **Both** `.colors 256` and `.colors *` sections
+      syntax (§6.2.5), UI keys (§6.2.6), 16 `-term` entries (§6.2.7). **Both** `.colors 256` and
+      `.colors *` sections
+- [ ] **3.2f** Status bar is **darker** than the editor (`#141414` bg, `#9A9A9A` fg) — not JOE's
+      conventional inverted light bar (§6.2.6)
 - [ ] **3.2a** Alpha handling per §6.2.1: flattened hex in the truecolor section
       (`#F0F0F099`→`#9A9A9A`, `#F0F0F05C`→`#666666`, `#40404099`→`#303030`); base colour + `dim`
       in the 256 section

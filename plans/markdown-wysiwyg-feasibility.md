@@ -469,10 +469,47 @@ The scheme must cover JOE's whole class surface (76 classes), not only markdown:
 | `diff.ChgLine` | `markup.changed.diff` | `orange` |
 | `diff.Hunk`, `diff.FileNew`, `diff.FileOld`, `diff.Garbage` | — | `muted` |
 
-UI keys: `-text fg/bg`, `-status bg/near-white`, `-selection /sel`, `-linum linenum`,
-`-curlin /#1F1F1F`, `-cursor bg/fg`, `-visiblews linenum`, plus the 16 `-term` entries.
+### 6.2.6 UI keys — all traced to `colors` in the theme JSON
 
-### 6.2.6 Consequences of removing the nine schemes
+Truecolor uses the flattened value; the 256 column is the xterm index.
+
+| JOE key | Cursor key | Raw | Flattened | 256 |
+|---|---|---|---|---|
+| `-text` fg | `editor.foreground` | `#F0F0F0` | `#F0F0F0` | `255` |
+| `-text` bg | `editor.background` | `#181818` | `#181818` | `234` |
+| `-status` fg | `statusBar.foreground` | `#F0F0F099` | `#9A9A9A` | `247` |
+| `-status` bg | `statusBar.background` | `#141414` | `#141414` | `233` |
+| `-curlin` | `editor.lineHighlightBackground` | `#262626` | `#262626` | `235` |
+| `-linum` | `editorLineNumber.foreground` | `#F0F0F05C` | `#666666` | `241` |
+| `-curlinum` | `editorLineNumber.activeForeground` | `#F0F0F0` | `#F0F0F0` | `255` |
+| `-selection` | `editor.selectionBackground` | `#40404099` | `#303030` | `236` |
+| `-cursor` | `editorCursor.foreground` | `#F0F0F0` | `#F0F0F0` | `255` |
+| `-visiblews` | `editorWhitespace.foreground` | `#505050B3` | `#3F3F3F` | `238` |
+
+**The status bar is darker than the editor, not inverted.** `#141414` background with muted
+`#9A9A9A` text — do not reuse JOE's conventional light-on-dark status bar.
+
+### 6.2.7 Terminal palette (the 16 `-term` entries)
+
+All sixteen exist upstream; none needs inventing.
+
+| # | Cursor key | Hex | 256 | | # | Cursor key | Hex | 256 |
+|---|---|---|---|---|---|---|---|---|
+| 0 | `ansiBlack` | `#242424` | `235` | | 8 | `ansiBrightBlack` | `#9A9A9A`¹ | `247` |
+| 1 | `ansiRed` | `#FC6B83` | `204` | | 9 | `ansiBrightRed` | `#FC6B83` | `204` |
+| 2 | `ansiGreen` | `#3FA266` | `71` | | 10 | `ansiBrightGreen` | `#70B489` | `72` |
+| 3 | `ansiYellow` | `#D2943E` | `173` | | 11 | `ansiBrightYellow` | `#F1B467` | `215` |
+| 4 | `ansiBlue` | `#81A1C1` | `109` | | 12 | `ansiBrightBlue` | `#87A6C4` | `110` |
+| 5 | `ansiMagenta` | `#B48EAD` | `139` | | 13 | `ansiBrightMagenta` | `#B48EAD` | `139` |
+| 6 | `ansiCyan` | `#88C0D0` | `110` | | 14 | `ansiBrightCyan` | `#88C0D0` | `110` |
+| 7 | `ansiWhite` | `#F0F0F0` | `255` | | 15 | `ansiBrightWhite` | `#FFFFFF` | `231` |
+
+¹ flattened from `#F0F0F099`.
+
+Note Cursor's ANSI set is cooler and lower-saturation than a stock terminal palette — red/bright-red
+and magenta/bright-magenta are identical, and cyan/bright-cyan share `#88C0D0` with headings.
+
+### 6.2.8 Consequences of removing the nine schemes
 
 Verified — the blast radius is small, but not zero:
 
@@ -621,7 +658,7 @@ large enough to hide a regression.
 
 - Retarget six `md.jsf` states per R4; add `MdText`, `MdListEnum`, `MdImageUrl` (no `MdConceal`).
 - Create `colors/cursor-dark.jcf` from §6.2 (both `.colors 256` and `.colors *` sections);
-  **delete the nine existing schemes** and update `colors/Makefile.am` + `NEWS.md` (§6.2.6).
+  **delete the nine existing schemes** and update `colors/Makefile.am` + `NEWS.md` (§6.2.8).
 - View attrs: H1 bold+underline; H2–H6 bold; strong bold; emph italic; quote italic; link label
   and URL underlined.
 - Degrade truecolor → 256 → 16 → attributes; verify each `Md*` stays legible at 16 colors.
@@ -769,8 +806,8 @@ is a single-line decision needing no region at all. Recorded as deviation 6 in t
 | `src/mouse.zig` | `udefmup` → click-to-open URL |
 | `syntax/md.jsf` | Six state retargets (R4): `MdText`, `MdListEnum`, `MdImageUrl` |
 | `colors/cursor-dark.jcf` | **New** — the single native scheme (§6.2) |
-| `colors/*.jcf` (the 9 existing) | **Deleted** (§6.2.6) |
-| `colors/Makefile.am`, `NEWS.md` | Scheme list + author credits (§6.2.6) |
+| `colors/*.jcf` (the 9 existing) | **Deleted** (§6.2.8) |
+| `colors/Makefile.am`, `NEWS.md` | Scheme list + author credits (§6.2.8) |
 | `tests/viewmode.py` | 62 rewritten assertions + conceal/style/click fixtures |
 | `AGENTS.md` | Soak count; "hides delimiters" → conceal wording; phase-numbering note |
 | `rc/joerc.in` / help | Optional click hint |
@@ -809,7 +846,7 @@ is a single-line decision needing no region at all. Recorded as deviation 6 in t
 | Mouse-open vs selection | Click without drag only (`selecting == 0`); skip if mark/drag active |
 | **URL → shell injection** | `execlp` with argv, scheme allowlist (Phase 5) |
 | Weak italic/truecolor terminals | Existing attr degradation; verify the scheme at truecolor / 256 / 16 |
-| **Removing 9 schemes is user-visible** | No default is set and nothing in code references them (§6.2.6); note it in `NEWS.md` and keep the author credits honest |
+| **Removing 9 schemes is user-visible** | No default is set and nothing in code references them (§6.2.8); note it in `NEWS.md` and keep the author credits honest |
 | Event migration regresses soak | Phase 4 behind the same `ViewTables` contract |
 | OpenCode reference drifts | §2 pins exact paths; re-verify rather than trusting this doc |
 

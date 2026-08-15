@@ -1,8 +1,11 @@
 //! Mouse support — replaces `joe/mouse.c`.
 //!
 //! Faithful C-ABI Path A port of JOE mouse (mouseopen/mouseclose/mousedn/mouseup/mousedrag/uxtmouse/uextmouse/utomouse/udefm*/mnow/reset_trig_time + floatmouse/rtbutton/joexterm/auto_scroll/auto_trig_time/auto_rate).
+//! GPM console mouse: see `gpm.zig` (`gpmopen`/`gpmclose`); wired when `-Dgpm=true` on Linux.
 
 const std = @import("std");
+const build_options = @import("build_options");
+const gpm = @import("gpm.zig");
 const ptrdiff_t = c_long;
 
 const MOUSE_MULTI_THRESH: c_int = 300;
@@ -1240,6 +1243,9 @@ pub export fn udefm3up(arg_w: [*c]W, arg_k: c_int) c_int {
     return 0;
 }
 pub export fn mouseopen() void {
+    if (comptime build_options.gpm) {
+        _ = gpm.gpmopen();
+    }
     if (usexmouse != 0) {
         ttputs("\x1b[?1002h");
         ttputs("\x1b[?1006h");
@@ -1257,5 +1263,8 @@ pub export fn mouseclose() void {
         ttputs("\x1b[?1006l");
         ttputs("\x1b[?1002l");
         _ = ttflsh();
+    }
+    if (comptime build_options.gpm) {
+        gpm.gpmclose();
     }
 }

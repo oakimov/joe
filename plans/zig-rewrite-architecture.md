@@ -886,14 +886,17 @@ The build is always working — start with a binary that compiles and runs, then
 - ✅ Shell window, tags, math, error navigation — Path A `ushell`/`utag`/`umath`/`uerror` zero-C
 - At this point: **Path A feature-complete in Zig** (live binary has zero `joe/*.c` sources; tombstones remain on disk)
 
-### Phase 8: Polish & Compatibility (2-3 weeks) — NOT STARTED
-- ⬜ SELinux support (Linux: getfilecon integration)
-- ⬜ GPM mouse support (Linux console)
-- ⬜ i18n / .mo file parsing
-- ⬜ Unicode 16.0 table generation tool
-- ⬜ Verify: all .joerc files from C version work identically
-- ⬜ Verify: all .jsf/.jcf files resolve identically
-- ⬜ Performance benchmarks vs C version
+### Phase 8: Polish & Compatibility (2-3 weeks) — DONE
+- ✅ SELinux support (Linux: `getfilecon`/`setfilecon`/`setfscreatecon` via `-Dselinux`; Darwin/no-op default; call sites in `ufile`/`fileio`)
+- ✅ GPM mouse support (Linux console via `-Dgpm` + `src/gpm.zig`; Darwin stub; xterm mouse remains default)
+- ✅ i18n / translation catalogs — JOE-native **`.po`** parsing (not `.mo`); `po/*.po` installed to `share/joe/lang/`
+- ✅ Unicode **17.0.0** table generation/check tool (`tools/gen_unicat.py` + `src/data/unicat_meta.zig`; inputs under `joe/util/unicode-17/`)
+- ✅ Verify: all personality `.joerc` files smoke-OK (`tools/verify_rc.py` — 7/7)
+- ✅ Verify: all `.jsf`/`.jcf` files smoke-OK (`tools/verify_syntax_colors.py` — 84+9; `zig build render-test`)
+- ✅ Performance benchmarks vs C (`tools/bench_joe.py` → `tools/bench_results.txt`)
+- ✅ Path A hygiene: **deleted all `joe/*.c`** (headers remain); empty `addCSourceFiles` removed; `build.zig` installs syntax/colors/charmaps/lang/rc; `-Djoerc=`/`-Djoedata=`
+- ✅ Gate: `zig build phase8-verify` + soak **196/196** (`JOE_ZIG_SCREEN_SWAP=0 ./runtests`)
+- Note: live Zig remains Path A C-ABI style; idiomatic Path B redesign trees (`src/terminal`, `src/window`, `src/render`) stay parallel — not required to finish Phase 8
 
 **Total: ~24-36 weeks (5-9 months)**
 

@@ -80,6 +80,7 @@ pub extern fn joe_write(fd: c_int, buf: ?*const anyopaque, siz: ptrdiff_t) ptrdi
 pub extern fn unlink(path: [*c]const u8) c_int;
 pub extern fn fstat(fd: c_int, buf: [*c]struct_stat) c_int;
 pub extern fn utime(path: [*c]const u8, times: [*c]const struct_utimbuf) c_int;
+pub extern fn copy_security_context(from_file: [*c]const u8, to_file: [*c]const u8) c_int;
 pub extern var ITEM: ?*anyopaque;
 pub extern var QUEUE: ?*anyopaque;
 pub extern var LAST: ?*anyopaque;
@@ -563,6 +564,8 @@ pub fn cp(arg_from: [*c]u8, arg_to: [*c]u8) callconv(.c) c_int {
     utbuf.actime = sbuf.st_atimespec.tv_sec;
     utbuf.modtime = sbuf.st_mtimespec.tv_sec;
     _ = utime(to, &utbuf);
+    // Always call Zig export (no-op when SELinux disabled / non-Linux).
+    _ = copy_security_context(from, to);
     return 0;
 }
 pub fn backup(arg_bw_1: [*c]BW) callconv(.c) c_int {

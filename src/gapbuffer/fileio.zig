@@ -113,6 +113,8 @@ extern fn utf16r_encode(buf: [*c]u8, c: c_int) isize;
 
 
 extern fn zcmp(a: ?*const anyopaque, b: ?*const anyopaque) c_int;
+extern fn match_default_security_context(from_file: [*c]const u8) c_int;
+extern fn reset_default_security_context() c_int;
 extern fn zdup(s: ?*const anyopaque) ?*anyopaque;
 extern fn ztoo(s: [*c]const u8) i64;
 extern fn skip_digits(s: [*c]const u8) [*c]const u8;
@@ -852,9 +854,13 @@ pub export fn bsave(p: ?*P, as: [*c]const u8, size_in: i64, flag: c_int) c_int {
         if (break_links.* != 0 or break_symlinks.* != 0) {
             var lsbuf: [144]u8 = undefined;
             if (lstat(dq(@ptrCast(s)), @ptrCast(&lsbuf)) == 0) {
+                // Preserve SELinux label across unlink+creat (C b.c used getfilecon/
+                // setfilecon; helpers are no-ops when SELinux is off).
+                _ = match_default_security_context(dq(@ptrCast(s)));
                 _ = unlink(dq(@ptrCast(s)));
                 const g = creat(dq(@ptrCast(s)), 0o666);
                 _ = close(g);
+                _ = reset_default_security_context();
             } else {
                 _ = unlink(dq(@ptrCast(s)));
             }

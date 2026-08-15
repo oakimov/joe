@@ -19,8 +19,8 @@ const SHELL_TYPE_RAW: c_int = 2;
 const PWFLAG_COMMAND: c_int = 8;
 const YES_CODE: c_int = -10;
 
-/// build.zig sets `JOERC` to `""` for the Zig hybrid build.
-const JOERC = "";
+/// System rc dir from `-Djoerc=` (empty → relative shell scripts / builtins).
+const JOERC = @import("build_options").joerc;
 
 export var runhist: ?*GapB = null;
 export var buildhist: ?*GapB = null;

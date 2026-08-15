@@ -72,6 +72,8 @@ comptime {
     _ = @import("help.zig");
     // Path A: live mouse → Zig JOE mouse.h ABI exports.
     _ = @import("mouse.zig");
+    // Path A: GPM console mouse (Linux + -Dgpm; stub otherwise).
+    _ = @import("gpm.zig");
     // Path A: live gettext → Zig JOE gettext.h ABI exports.
     _ = @import("gettext.zig");
     // Path A: live state → Zig JOE state.h ABI exports.

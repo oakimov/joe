@@ -3,7 +3,16 @@
 //! Faithful C-ABI Path A port of JOE path/directory helpers (`joesep`/`namprt`/`mkpath`/`mktmp`/`rmatch`/`rexpnd*`/`chpwd`/`pwd`/`xdg_*`/`open_*_file`).
 
 const std = @import("std");
+const build_options = @import("build_options");
 const ptrdiff_t = c_long;
+
+/// System data/config roots from `-Djoedata=` / `-Djoerc=` (empty → skip, use builtins/XDG).
+fn joedataPtr() [*c]const u8 {
+    return (build_options.joedata ++ "\x00").ptr;
+}
+fn joercPtr() [*c]const u8 {
+    return (build_options.joerc ++ "\x00").ptr;
+}
 
 const X_OK: c_int = 1;
 const S_IFMT: c_int = 0o170000;
@@ -687,24 +696,8 @@ pub export fn xdg_state_dir() [*c]const u8 {
     return static_local_xdg.xdg;
 }
 pub export fn open_config_file(arg_result: [*c]?*JFILE, arg_prefix: [*c]const u8, arg_name: [*c]const u8, arg_suffix: [*c]const u8) [*c]u8 {
-    var result = arg_result;
-    _ = &result;
-    var prefix = arg_prefix;
-    _ = &prefix;
-    var name = arg_name;
-    _ = &name;
-    var suffix = arg_suffix;
-    _ = &suffix;
-    return open_configrc_file(result, "", prefix, name, suffix);
+    return open_configrc_file(arg_result, joedataPtr(), arg_prefix, arg_name, arg_suffix);
 }
 pub export fn open_rc_file(arg_result: [*c]?*JFILE, arg_prefix: [*c]const u8, arg_name: [*c]const u8, arg_suffix: [*c]const u8) [*c]u8 {
-    var result = arg_result;
-    _ = &result;
-    var prefix = arg_prefix;
-    _ = &prefix;
-    var name = arg_name;
-    _ = &name;
-    var suffix = arg_suffix;
-    _ = &suffix;
-    return open_configrc_file(result, "", prefix, name, suffix);
+    return open_configrc_file(arg_result, joercPtr(), arg_prefix, arg_name, arg_suffix);
 }

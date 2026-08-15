@@ -30,3 +30,4 @@ charmaps/klingon
 zig-out/
 .DS_Store
 .obsidian/
+tools/bench_results.txt

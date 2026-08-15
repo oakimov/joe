@@ -1,7 +1,8 @@
 //! Path A live port of JOE gettext (`joe/gettext.c`).
 //!
 //! JOE `gettext.h` ABI lives here (`my_gettext`, `init_gettext`).
-//! `joe/gettext.c` is a tombstone.
+//! JOE uses **`.po` text catalogs** under `lang/` (installed from `po/`),
+//! not GNU binary `.mo` files — see `po/HOWTO`. Phase 8 i18n = `.po` parity.
 
 extern fn htmk(len: isize) ?*anyopaque;
 extern fn htadd(ht: ?*anyopaque, name: ?*anyopaque, val: ?*anyopaque) ?*anyopaque;

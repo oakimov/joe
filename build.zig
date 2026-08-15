@@ -4,10 +4,29 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Phase 8: optional Linux-only deps (never required on Darwin).
+    const want_selinux = b.option(bool, "selinux", "Link libselinux and enable SELinux helpers") orelse false;
+    const want_gpm = b.option(bool, "gpm", "Link libgpm and enable Linux console mouse") orelse false;
+    // System config/data dirs (empty → builtins + ~/.joe / XDG; production installs should set these).
+    const joerc = b.option([]const u8, "joerc", "JOERC system rc directory (trailing slash)") orelse "";
+    const joedata = b.option([]const u8, "joedata", "JOEDATA system data directory (trailing slash)") orelse "";
+
+    const is_linux = target.result.os.tag == .linux;
+    const enable_selinux = want_selinux and is_linux;
+    const enable_gpm = want_gpm and is_linux;
+
+    const build_opts = b.addOptions();
+    build_opts.addOption(bool, "selinux", enable_selinux);
+    build_opts.addOption(bool, "gpm", enable_gpm);
+    build_opts.addOption([]const u8, "joerc", joerc);
+    build_opts.addOption([]const u8, "joedata", joedata);
+
+    // Path A is fully Zig-owned. The executable is still linked as a libc
+    // host with a Zig object providing every former joe/*.c export.
     const exe = b.addExecutable(.{
         .name = "joe",
         .root_module = b.createModule(.{
-            .root_source_file = null, // C-only build
+            .root_source_file = null,
             .target = target,
             .optimize = optimize,
             .link_libc = true,
@@ -18,18 +37,20 @@ pub fn build(b: *std.Build) void {
 
     // ── System libraries ─────────────────────────────────────────────
     mod.linkSystemLibrary("ncurses", .{});
+    if (enable_selinux) mod.linkSystemLibrary("selinux", .{});
+    if (enable_gpm) mod.linkSystemLibrary("gpm", .{});
 
-    // ── Include paths ────────────────────────────────────────────────
-    mod.addIncludePath(b.path("joe")); // for #include "b.h", "config.h" etc.
+    // ── Include paths (C headers remain the JOE declaration surface) ─
+    mod.addIncludePath(b.path("joe"));
     mod.addIncludePath(.{ .cwd_relative = "/opt/local/include" }); // MacPorts ncurses
 
-    // ── Preprocessor defines ─────────────────────────────────────────
-    mod.addCMacro("JOERC", "\"\"");
-    mod.addCMacro("JOEDATA", "\"\"");
+    // Keep preprocessor macros for any residual C tooling / header guards.
+    mod.addCMacro("JOERC", b.fmt("\"{s}\"", .{joerc}));
+    mod.addCMacro("JOEDATA", b.fmt("\"{s}\"", .{joedata}));
+    if (enable_selinux) mod.addCMacro("WITH_SELINUX", "1");
+    if (enable_gpm) mod.addCMacro("MOUSE_GPM", "1");
 
     // ── Zig-native terminal redesign (Phase 3) ────────────────────
-    // Parallel module tree; hybrid `src/tty.zig` may import it for the
-    // gated `Screen.out` → obuf drain (default off). Not a screen swap.
     const terminal_mod = b.createModule(.{
         .root_source_file = b.path("src/terminal/root.zig"),
         .target = target,
@@ -41,7 +62,6 @@ pub fn build(b: *std.Build) void {
     terminal_mod.addLibraryPath(.{ .cwd_relative = "/opt/local/lib" });
 
     // ── Zig-native rendering pipeline (Phase 6) ─────────────────
-    // Native render pipeline (parallel Path A lives in bw_lgen.zig).
     const render_mod = b.createModule(.{
         .root_source_file = b.path("src/render/root.zig"),
         .target = target,
@@ -50,106 +70,79 @@ pub fn build(b: *std.Build) void {
     render_mod.addImport("terminal", terminal_mod);
 
     // ── Zig-native window redesign (Phase 5) ──────────────────────
-    // Parallel module tree; hybrid `src/{w,tw,pw,qw,menu,mmenu}.zig`
-    // remain the live path. Not wired into joe yet.
     const window_mod = b.createModule(.{
         .root_source_file = b.path("src/window/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    // Paint bridge may write into Zig-native terminal.Screen cells (tests-only).
     window_mod.addImport("terminal", terminal_mod);
     window_mod.addImport("render", render_mod);
 
-    // ── Pure Zig modules (replacing ported C files) ──────────────────
-    // Each Zig module is compiled as an object and linked into the executable.
-    // The Zig code exports C ABI functions that the remaining C code calls,
-    // enabling gradual per-module replacement.
+    // ── Live editor (Path A Zig) ───────────────────────────────────
     const ported_mod = b.createModule(.{
         .root_source_file = b.path("src/ported.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
+    ported_mod.addOptions("build_options", build_opts);
     ported_mod.addImport("terminal", terminal_mod);
-    // Path A: gated live `lgen` bridge (`src/bw_lgen.zig`) paints via Phase 6.
     ported_mod.addImport("render", render_mod);
+    if (enable_selinux) {
+        ported_mod.linkSystemLibrary("selinux", .{});
+        ported_mod.addCMacro("WITH_SELINUX", "1");
+    }
+    if (enable_gpm) {
+        ported_mod.linkSystemLibrary("gpm", .{});
+        ported_mod.addCMacro("MOUSE_GPM", "1");
+    }
     const ported_obj = b.addObject(.{
         .name = "ported",
         .root_module = ported_mod,
     });
     mod.addObject(ported_obj);
 
-    // ── C source files ───────────────────────────────────────────────
-    // From joe_SOURCES in joe/Makefile.am. Remove files as they are
-    // ported to Zig (they get added to ported_mod instead).
-    mod.addCSourceFiles(.{
-        .files = &.{
-            // REMOVED: joe/b.c — replaced by src/gapbuffer.zig
-            // REMOVED: joe/blocks.c — replaced by src/blocks.zig
-            // REMOVED: joe/bw.c — replaced by src/bw_lgen.zig JOE bw.h ABI exports
-            // REMOVED: joe/cmd.c — replaced by src/cmd.zig
-            // REMOVED: joe/hash.c — replaced by src/hash.zig
-            // REMOVED: joe/help.c — replaced by src/help.zig JOE help.h ABI exports
-            // REMOVED: joe/kbd.c — replaced by src/kbd.zig
-            // REMOVED: joe/macro.c — replaced by src/macro.zig
-            // REMOVED: joe/main.c — replaced by src/main.zig JOE main.h ABI exports
-            // REMOVED: joe/menu.c — replaced by src/menu.zig
-            // REMOVED: joe/path.c — replaced by src/path.zig JOE path.h ABI exports
-            // REMOVED: joe/poshist.c — replaced by src/poshist.zig JOE poshist.h ABI exports
-            // REMOVED: joe/pw.c — replaced by src/pw.zig
-            // REMOVED: joe/queue.c — replaced by src/queue.zig
-            // REMOVED: joe/qw.c — replaced by src/qw.zig
-            // REMOVED: joe/rc.c — replaced by src/rc.zig
-            // REMOVED: joe/regex.c — replaced by src/regex.zig
-            // REMOVED: joe/scrn.c — replaced by src/scrn.zig
-            // REMOVED: joe/tab.c — replaced by src/tab.zig JOE tab.h ABI exports
-            // REMOVED: joe/termcap.c — replaced by src/termcap.zig
-            // REMOVED: joe/tty.c — replaced by src/tty.zig
-            // REMOVED: joe/tw.c — replaced by src/tw.zig
-            // REMOVED: joe/ublock.c — replaced by src/ublock.zig JOE ublock.h ABI exports
-            // REMOVED: joe/uedit.c — replaced by src/uedit.zig JOE uedit.h ABI exports
-            // REMOVED: joe/uerror.c — replaced by src/uerror.zig JOE uerror.h ABI exports
-            // REMOVED: joe/ufile.c — replaced by src/ufile.zig JOE ufile.h ABI exports
-            // REMOVED: joe/uformat.c — replaced by src/uformat.zig JOE uformat.h ABI exports
-            // REMOVED: joe/uisrch.c — replaced by src/uisrch.zig JOE uisrch.h ABI exports
-            // REMOVED: joe/umath.c — replaced by src/umath.zig JOE umath.h ABI exports
-            // REMOVED: joe/undo.c — replaced by src/undo.zig
-            // REMOVED: joe/usearch.c — replaced by src/usearch.zig JOE usearch.h ABI exports
-            // REMOVED: joe/ushell.c — replaced by src/ushell.zig JOE ushell.h ABI exports
-            // REMOVED: joe/utag.c — replaced by src/utag.zig JOE utag.h ABI exports
-            // REMOVED: joe/va.c — replaced by src/va.zig
-            // REMOVED: joe/vfile.c — replaced by src/vfile.zig
-            // REMOVED: joe/vs.c — replaced by src/vs.zig
-            // REMOVED: joe/w.c — replaced by src/w.zig
-            // REMOVED: joe/utils.c — replaced by src/utils.zig
-            // REMOVED: joe/syntax.c — replaced by src/syntax.zig
-            // REMOVED: joe/utf8.c — replaced by src/utf8.zig
-            // REMOVED: joe/selinux.c — replaced by src/selinux.zig JOE selinux.h ABI exports
-            // REMOVED: joe/charmap.c — replaced by src/charmap.zig
-            // REMOVED: joe/mouse.c — replaced by src/mouse.zig JOE mouse.h ABI exports
-            // REMOVED: joe/lattr.c — replaced by src/lattr.zig
-            // REMOVED: joe/gettext.c — replaced by src/gettext.zig JOE gettext.h ABI exports
-            // REMOVED: joe/builtin.c — replaced by src/builtin.zig
-            // REMOVED: joe/builtins.c — replaced by src/builtins_data.zig JOE builtins[] data
-            // REMOVED: joe/vt.c — replaced by src/vt.zig JOE vt.h ABI exports
-            // REMOVED: joe/mmenu.c — replaced by src/mmenu.zig
-            // REMOVED: joe/state.c — replaced by src/state.zig JOE state.h ABI exports
-            // REMOVED: joe/options.c — replaced by src/options.zig
-            // REMOVED: joe/cclass.c — replaced by src/cclass.zig JOE cclass.h ABI exports
-            // REMOVED: joe/frag.c — replaced by src/frag.zig
-            // REMOVED: joe/colors.c — replaced by src/colors.zig
-            // REMOVED: joe/unicat-17.0.0.c — replaced by src/unicat.zig JOE unicode.h data tables
-        },
-        .flags = &.{
-            // Match GCC/Clang default for signed overflow
-            "-fwrapv",
-        },
-    });
-
-    // ── Install ──────────────────────────────────────────────────────
+    // ── Install binary + data (Phase 8) ───────────────────────────
     b.installArtifact(exe);
 
+    // System data layout mirrors historical $(data_joedir) / $(sysconf_joedir).
+    b.installDirectory(.{
+        .source_dir = b.path("syntax"),
+        .install_dir = .{ .custom = "share/joe/syntax" },
+        .install_subdir = "",
+        .exclude_extensions = &.{ ".am", ".in" },
+    });
+    b.installDirectory(.{
+        .source_dir = b.path("colors"),
+        .install_dir = .{ .custom = "share/joe/colors" },
+        .install_subdir = "",
+        .exclude_extensions = &.{ ".am", ".in" },
+    });
+    b.installDirectory(.{
+        .source_dir = b.path("charmaps"),
+        .install_dir = .{ .custom = "share/joe/charmaps" },
+        .install_subdir = "",
+        .exclude_extensions = &.{ ".am", ".in" },
+    });
+    // JOE reads translations as lang/<locale>.po (not GNU .mo).
+    b.installDirectory(.{
+        .source_dir = b.path("po"),
+        .install_dir = .{ .custom = "share/joe/lang" },
+        .install_subdir = "",
+        .include_extensions = &.{".po"},
+    });
+    b.installDirectory(.{
+        .source_dir = b.path("rc"),
+        .install_dir = .{ .custom = "etc/joe" },
+        .install_subdir = "",
+        .exclude_extensions = &.{ ".am", ".in" },
+    });
+
+    // Personality aliases (jmacs/jstar/rjoe/jpico → joe) are created by
+    // packagers / `tools/verify_rc.py` as needed; JOE selects rc via argv[0].
+
+
+    // ── Unit-test steps (native redesign trees) ───────────────────
     const terminal_tests = b.addTest(.{
         .name = "terminal-tests",
         .root_module = terminal_mod,
@@ -174,9 +167,18 @@ pub fn build(b: *std.Build) void {
     const window_test_step = b.step("window-test", "Run Zig-native window unit tests");
     window_test_step.dependOn(&run_window_tests.step);
 
+    // Phase 8 verification suite (rc/jsf/jcf/unicat/bench).
+    const phase8 = b.addSystemCommand(&.{ "sh", "tools/phase8_verify.sh" });
+        phase8.step.dependOn(b.getInstallStep());
+    const phase8_step = b.step("phase8-verify", "Run Phase 8 compatibility verification tools");
+    phase8_step.dependOn(&phase8.step);
+
     // ── Run step ─────────────────────────────────────────────────────
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_cmd.addArgs(args);
+    }
     const run_step = b.step("run", "Run the JOE editor");
     run_step.dependOn(&run_cmd.step);
 }

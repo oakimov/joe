@@ -25,6 +25,7 @@ charmaps/klingon
 /missing
 
 .claude/settings.local.json
+.claude/worktrees/
 .pytest_cache/
 .zig-cache/
 zig-out/

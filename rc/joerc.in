@@ -154,9 +154,16 @@
 
 -joe_state     Use ~/.joe_state file
 
- -mouse		Enable xterm mouse support.  When enabled, left-click will
-		position the cursor and left-click-drag will select blocks
-		For normal xterm cut and paste, hold the shift key down.
+-mouse		Enable xterm mouse support (default on). Left-click positions
+		the cursor; left-click-drag selects a JOE block (^KB/^KK).
+		For terminal-native cut/paste, hold Shift. Use -nomouse to disable.
+
+-mouseclip	On mouse selection release, copy to the terminal clipboard via
+		OSC 52 (default on). Selection highlight stays. Right-click (or
+		middle-click) pastes. Use -nomouseclip to disable.
+
+ -mousewheel 4	Lines to scroll per mouse-wheel notch (1-32; light acceleration
+		applies when notches arrive quickly).
 
  -joexterm	If you are using XTerm version 212 or higher, and if it was
 		configured with --enable-paste64, set this flag: it allows
@@ -523,6 +530,9 @@ mode,"left",rtn	L Columns to scroll left %Zleft%
 mode,"right",rtn R Columns to scroll right %Zright%
 mode,"floatmouse",rtn	% % Click past end %Zfloatmouse%
 mode,"rtbutton",rtn	% % Right button %Zrtbutton%
+mode,"mouse",rtn	% % Enable mouse %Zmouse%
+mode,"mouseclip",rtn	% % Mouse copy to clipboard %Zmouseclip%
+mode,"mousewheel",rtn	% % Mouse wheel lines %Zmousewheel%
 
 :defmenu marking menu,"more-options",rtn
 mode,"autoswap",rtn	% % Autoswap mode %Zautoswap%
@@ -1038,7 +1048,7 @@ delbol		^[ ^O		Delete to beginning of line
 dnslide		^[ z		Scroll down one line
 dnslide		^[ Z		Scroll down one line
 dnslide		^[ ^Z		Scroll down one line
-dnslide,dnslide,dnslide,dnslide		MWDOWN
+dnslide		MWDOWN
 compile		^[ c		Compile
 compile		^[ C
 compile		^[ ^C		Compile
@@ -1078,7 +1088,7 @@ txt		^[ I		Prompt for text and insert it
 upslide		^[ w		Scroll up one line
 upslide		^[ ^W		Scroll up one line
 upslide		^[ W		Scroll up one line
-upslide,upslide,upslide,upslide		MWUP
+upslide		MWUP
 yank		^[ y		Undelete text
 yankpop		^[ ^Y		Undelete text
 yank		^[ Y		Undelete text

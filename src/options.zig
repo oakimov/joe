@@ -229,6 +229,8 @@ pub extern var opt_usetabs: c_int;
 pub extern var assume_color: c_int;
 pub extern var assume_256color: c_int;
 pub extern var joexterm: c_int;
+pub extern var mouseclip: c_int;
+pub extern var mousewheel: c_int;
 pub extern var restore_file_pos: c_int;
 pub extern var std_regex: c_int;
 pub extern var square: c_int;
@@ -626,7 +628,7 @@ pub const struct_glopts = extern struct {
     low: c_int = 0,
     high: c_int = 0,
 };
-pub export var glopts: [111]struct_glopts = [111]struct_glopts{
+pub export var glopts: [113]struct_glopts = [113]struct_glopts{
     struct_glopts{
         .name = "overwrite",
         .@"type" = LOC_OPT_BOOL,
@@ -2166,6 +2168,34 @@ pub export var glopts: [111]struct_glopts = [111]struct_glopts{
         .ofst = 0,
         .low = 0,
         .high = 0,
+    },
+    struct_glopts{
+        .name = "mouseclip",
+        .@"type" = GLO_OPT_BOOL,
+        .set = union_opt_storage_p{
+            .v = @ptrCast(@alignCast(&mouseclip)),
+        },
+        .addr = null,
+        .yes = null,
+        .no = null,
+        .menu = "Copy mouse selection to clipboard",
+        .ofst = 0,
+        .low = 0,
+        .high = 0,
+    },
+    struct_glopts{
+        .name = "mousewheel",
+        .@"type" = GLO_OPT_INT,
+        .set = union_opt_storage_p{
+            .v = @ptrCast(@alignCast(&mousewheel)),
+        },
+        .addr = null,
+        .yes = "Mouse wheel lines per notch (%d): ",
+        .no = null,
+        .menu = "Mouse wheel lines",
+        .ofst = 0,
+        .low = 1,
+        .high = 32,
     },
     struct_glopts{
         .name = null,

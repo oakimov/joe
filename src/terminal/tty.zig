@@ -377,7 +377,7 @@ pub const Tty = struct {
         }
     }
 
-    /// Enable xterm mouse tracking + SGR 1006 coordinates (JOE `mouseopen`).
+    /// Enable xterm mouse tracking (1000+1002) + SGR 1006 (JOE `mouseopen`).
     pub fn enableMouse(self: Tty) !void {
         try self.writeAll(mouse_enable_sgr);
     }
@@ -484,10 +484,10 @@ pub fn getSizeFd(fd: posix.fd_t) !Size {
     return .{ .rows = ws.row, .cols = ws.col };
 }
 
-/// Enable xterm mouse tracking + SGR 1006 coordinates (matches JOE mouseopen).
-pub const mouse_enable_sgr = "\x1b[?1000h\x1b[?1006h";
-/// Disable xterm mouse tracking + SGR 1006.
-pub const mouse_disable_sgr = "\x1b[?1000l\x1b[?1006l";
+/// Enable xterm basic+button-event mouse + SGR 1006 (matches JOE mouseopen).
+pub const mouse_enable_sgr = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+/// Disable xterm mouse tracking + button-event + SGR 1006.
+pub const mouse_disable_sgr = "\x1b[?1006l\x1b[?1002l\x1b[?1000l";
 
 /// Enter xterm alternate screen buffer (ANSI fallback when terminfo `smcup` absent).
 pub const alt_screen_enter = "\x1b[?1049h";
@@ -656,8 +656,10 @@ test "KeyParser SGR mouse press release and drag" {
 
 test "mouse enable/disable SGR sequences" {
     try testing.expect(std.mem.indexOf(u8, mouse_enable_sgr, "?1000h") != null);
+    try testing.expect(std.mem.indexOf(u8, mouse_enable_sgr, "?1002h") != null);
     try testing.expect(std.mem.indexOf(u8, mouse_enable_sgr, "?1006h") != null);
     try testing.expect(std.mem.indexOf(u8, mouse_disable_sgr, "?1000l") != null);
+    try testing.expect(std.mem.indexOf(u8, mouse_disable_sgr, "?1002l") != null);
     try testing.expect(std.mem.indexOf(u8, mouse_disable_sgr, "?1006l") != null);
 }
 

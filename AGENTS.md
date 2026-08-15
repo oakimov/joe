@@ -159,6 +159,7 @@ way. CI may still mention Autoconf for other branches.
 
 ## Key constraints
 
+- Mouse: **default on** via xterm/SGR (`-mouse`); `-nomouse` to disable; `-mouseclip` on by default (OSC 52 copy-on-select; selection stays; right-click pastes) and `-mousewheel N`. GPM remains Linux-only (`-Dgpm`).
 - Live binary deps: **libc + ncurses** (+ optional Linux selinux/gpm)
 - Terminal degradation: truecolor → 256 → 16 → attributes
 - Viewmode must not modify buffer text

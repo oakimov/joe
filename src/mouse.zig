@@ -2,6 +2,8 @@
 //!
 //! Faithful C-ABI Path A port of JOE mouse (mouseopen/mouseclose/mousedn/mouseup/mousedrag/uxtmouse/uextmouse/utomouse/udefm*/mnow/reset_trig_time + floatmouse/rtbutton/joexterm/auto_scroll/auto_trig_time/auto_rate).
 //! GPM console mouse: see `gpm.zig` (`gpmopen`/`gpmclose`); wired when `-Dgpm=true` on Linux.
+//! Default-on xterm/SGR mouse (`-mouse`); optional `-mouseclip` OSC 52 copy-on-select;
+//! `-mousewheel N` lines per notch (+ light acceleration).
 
 const std = @import("std");
 const build_options = @import("build_options");
@@ -678,7 +680,7 @@ pub fn tomousestay() callconv(.c) c_int {
 pub fn select_done(arg_map: [*c]struct_charmap) callconv(.c) void {
     var map = arg_map;
     _ = &map;
-    if ((joexterm != 0) and (markv(1) != 0)) {
+    if ((((mouseclip != 0) or (joexterm != 0)) and (markv(1) != 0))) {
         var left: off_t = markb.*.xcol;
         _ = &left;
         var right: off_t = markk.*.xcol;
@@ -875,6 +877,10 @@ pub export var auto_trig_time: c_long = 0;
 pub export var rtbutton: c_int = 0;
 pub export var floatmouse: c_int = 0;
 pub export var joexterm: c_int = 0;
+/// When set (or with `-joexterm`), mouse selection end pushes OSC 52 clipboard.
+pub export var mouseclip: c_int = 1; // default on: copy selection to clipboard (OSC 52)
+/// Lines to scroll per wheel notch (before acceleration). Default matches old 4× rc macro.
+pub export var mousewheel: c_int = 4;
 pub var selecting: c_int = 0;
 pub var Cb: c_int = 0;
 pub var Cx: ptrdiff_t = 0;
@@ -886,26 +892,52 @@ pub fn mcoord(arg_x: ptrdiff_t) callconv(.c) ptrdiff_t {
     _ = &x;
     if ((x >= @as(ptrdiff_t, 33)) and (x <= @as(ptrdiff_t, 240))) return (x - @as(ptrdiff_t, 33)) + @as(ptrdiff_t, 1) else if (x == @as(ptrdiff_t, 32)) return -@as(c_int, 1) + @as(c_int, 1) else if (x > @as(ptrdiff_t, 240)) return (x - @as(ptrdiff_t, 257)) + @as(ptrdiff_t, 1) else return 0;
 }
+var wheel_last_ms: c_long = 0;
+var wheel_mult: c_int = 1;
+
+/// Lines for one wheel notch: `mousewheel` × streak multiplier (cap 3) when
+/// notches arrive within 150ms (OpenCode-like light accel).
+fn wheel_lines() c_int {
+    var base = mousewheel;
+    if (base < 1) base = 1;
+    if (base > 32) base = 32;
+    const now = mnow();
+    if ((wheel_last_ms != 0) and ((now - wheel_last_ms) < @as(c_long, 150))) {
+        if (wheel_mult < 3) wheel_mult += 1;
+    } else {
+        wheel_mult = 1;
+    }
+    wheel_last_ms = now;
+    return base * wheel_mult;
+}
+
 pub fn mouse_event(arg_w: [*c]W) callconv(.c) c_int {
     var w = arg_w;
     _ = &w;
     if ((Cb & Cb_BUTTON_MASK) == Cb_WHEEL_UP) {
-        fake_key(KEY_MWUP);
+        var n = wheel_lines();
+        while (n > 0) : (n -= 1) fake_key(KEY_MWUP);
         return 0;
     }
     if ((Cb & Cb_BUTTON_MASK) == Cb_WHEEL_DOWN) {
-        fake_key(KEY_MWDOWN);
+        var n = wheel_lines();
+        while (n > 0) : (n -= 1) fake_key(KEY_MWDOWN);
         return 0;
     }
+    // Select button: left (or right if -rtbutton). Paste button: middle, and the
+    // other side button (right by default) so right-click pastes the clipboard /
+    // JOE selection.
+    const select_btn: c_int = if (rtbutton != 0) Cb_BUTTON_RIGHT else Cb_BUTTON_LEFT;
+    const paste_btn: c_int = if (rtbutton != 0) Cb_BUTTON_LEFT else Cb_BUTTON_RIGHT;
     if ((Cb & Cb_RELEASE) == Cb_RELEASE) {
         mouseup(Cx, Cy);
-    } else if ((Cb & Cb_BUTTON_MASK) == (if (rtbutton != 0) Cb_BUTTON_RIGHT else Cb_BUTTON_LEFT)) {
+    } else if ((Cb & Cb_BUTTON_MASK) == select_btn) {
         if (!((Cb & Cb_DRAG) == Cb_DRAG)) {
             mousedn(Cx, Cy, 0);
         } else {
             mousedrag(Cx, Cy);
         }
-    } else if (((Cb & Cb_BUTTON_MASK) == Cb_BUTTON_MIDDLE) and !((Cb & Cb_DRAG) == Cb_DRAG)) {
+    } else if ((((Cb & Cb_BUTTON_MASK) == Cb_BUTTON_MIDDLE) or ((Cb & Cb_BUTTON_MASK) == paste_btn)) and !((Cb & Cb_DRAG) == Cb_DRAG)) {
         mousedn(Cx, Cy, 1);
     }
     return 0;
@@ -978,12 +1010,16 @@ pub export fn udefmiddledown(arg_w: [*c]W, arg_k: c_int) c_int {
     if (utomouse(w, 0) != 0) return -@as(c_int, 1);
     w = maint.*.curwin;
     if (!((w.*.watom.*.what == TYPETW) or (w.*.watom.*.what == TYPEPW))) return -@as(c_int, 1);
-    if (joexterm != 0) {
-        ttputs("\x1b]52;;?\x1b\\");
-        return 0;
-    } else {
+    // Paste JOE highlighted block first (k=-2 keeps marks / selection highlight).
+    if (markv(1) != 0) {
         return ublkcpy(w, -@as(c_int, 2));
     }
+    // No JOE block: request terminal clipboard (OSC 52) when copy-on-select or joexterm.
+    if ((mouseclip != 0) or (joexterm != 0)) {
+        ttputs("\x1b]52;;?\x1b\\");
+        return 0;
+    }
+    return ublkcpy(w, -@as(c_int, 2));
 }
 pub export fn udefmiddleup(arg_xx: [*c]W, arg_k: c_int) c_int {
     var xx = arg_xx;
@@ -1247,6 +1283,8 @@ pub export fn mouseopen() void {
         _ = gpm.gpmopen();
     }
     if (usexmouse != 0) {
+        // OpenCode-like: basic + button-event + SGR (skip 1003 any-event/hover).
+        ttputs("\x1b[?1000h");
         ttputs("\x1b[?1002h");
         ttputs("\x1b[?1006h");
         if (joexterm != 0) {
@@ -1262,6 +1300,7 @@ pub export fn mouseclose() void {
         }
         ttputs("\x1b[?1006l");
         ttputs("\x1b[?1002l");
+        ttputs("\x1b[?1000l");
         _ = ttflsh();
     }
     if (comptime build_options.gpm) {

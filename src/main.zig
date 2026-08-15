@@ -477,7 +477,7 @@ pub extern var vmem: ?*VFILE;
 pub export var exmsg: [*c]u8 = null;
 pub export var xmsg: [*c]u8 = null;
 pub export var usexmouse: c_int = 0;
-pub export var xmouse: c_int = 0;
+pub export var xmouse: c_int = 1; // default on (xterm mouse; -nomouse to disable)
 pub export var nonotice: c_int = 0;
 pub export var noexmsg: c_int = 0;
 pub export var pastehack: c_int = 0;
@@ -1058,11 +1058,9 @@ pub export fn main(arg_argc: c_int, arg_real_argv: [*c][*c]u8, arg_envv: [*c]con
             }
         }
     }
-    if (((xmouse != 0) and ((blk: {
-        const tmp = getenv("TERM");
-        s = tmp;
-        break :blk tmp;
-    }) != null)) and (strstr(s, "xterm") != null)) {
+    // Enable xterm/SGR mouse whenever -mouse is set (default on). Do not require
+    // TERM to contain "xterm" — tmux/screen/kitty names still speak the protocol.
+    if (xmouse != 0) {
         usexmouse = 1;
     }
     if (!((blk: {

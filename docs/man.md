@@ -2847,10 +2847,20 @@ root of the options menu system.
 
 ## Xterm Mouse support
 
-There are two levels of mouse support.  The -mouse option enables the
-first level, which will work with any stock Xterm.  If -joexterm is also
-set, mouse support is enhanced, but you need a recent version of XTerm,
-and it needs to be ./configured with the --enable-paste64 option.
+Mouse support is **on by default** (`-mouse`). It uses the xterm / SGR mouse
+protocol (works on macOS Terminal, iTerm, Kitty, etc. — no GPM). Disable with
+`-nomouse`. If `-joexterm` is also set, mouse support is enhanced for paste64,
+but you need a recent XTerm built with `--enable-paste64`.
+
+Optional related flags:
+
+* `-mouseclip` — on mouse selection release, copy the selection to the
+  terminal clipboard via OSC 52 (**on by default**; use `-nomouseclip` to
+  disable). The JOE selection highlight stays after copy. Right-click or
+  middle-click pastes (JOE block if marked; otherwise OSC 52 clipboard request
+  when mouseclip/joexterm is on).
+* `-mousewheel N` — lines scrolled per wheel notch (default 4); rapid notches
+  get light acceleration (up to 3×).
 
 When -mouse is set, you can:
 
@@ -2877,11 +2887,10 @@ a menu item to select it (same as hitting return with cursor on it).</li>
 * If your mouse has a wheel, turning the wheel will scroll the window with
 the cursor.
 
-Unfortunately, when -mouse is selected, cut and paste between X windows
-does not work as it normally does in a shell window (left-click and drag to
-select, middle click to paste).  Instead, you have to hold the shift key
-down to do this: shift-left-click and drag to select, and shift-middle click
-to paste.  Note that pasting text into JOE this way has problems: any \`
+When -mouse is selected, the terminal’s own click-drag selection is replaced
+by JOE’s block selection. For the emulator’s native cut and paste, hold the
+Shift key: shift-left-click and drag to select, and shift-middle click to
+paste.  Note that pasting text into JOE this way has problems: any \`
 characters will get messed up because \` means quote the following control
 character.  Also if auto-indent is enabled, pasted text will not be indented
 properly.

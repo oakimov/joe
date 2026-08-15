@@ -624,6 +624,60 @@ test "lgenLine applies viewmode hide and substitute" {
     try testing.expectEqual(@as(u21, 'q'), term2.cells[2].cp);
 }
 
+// Plan §4 / R5: painted column must equal `col_map[byte]` for every visible
+// byte. `buildColMap` already treats hidden bytes as zero-width (this was
+// true before Phase 1.2 too — see `view.zig`'s `buildColMap`); the paint
+// loop does not yet (`resolveCp` still emits a space per hidden byte, which
+// consumes a column). Written first, expected RED until the Phase 1.2
+// collapse lands in `lgenLine`'s paint loop — then it passes with no
+// further edits. Do not "fix" this test to match today's paint; that would
+// defeat its purpose.
+test "lgenLine painted column matches col_map for every visible byte (Phase 1.2 gate)" {
+    var tables = ViewTables.init(testing.allocator);
+    defer tables.deinit();
+
+    // "# Hi!" — heading hash + space hidden (bytes 0-1), H/i/! visible and
+    // individually distinguishable so a cell match is unambiguous.
+    const line = "# Hi!";
+    try analyzeLine(&tables, line, null);
+
+    var term = try TermScreen.init(testing.allocator, 10, 1);
+    defer term.deinit();
+    _ = lgenLine(&term, 0, 0, 10, line, .{ .view = &tables }, .none);
+
+    // Visible bytes: 2='H', 3='i', 4='!'. Once conceal collapses, they paint
+    // at columns 0, 1, 2 respectively (col_map already predicts this).
+    const h_col = tables.col_map[2];
+    const i_col = tables.col_map[3];
+    const bang_col = tables.col_map[4];
+    try testing.expectEqual(@as(u21, 'H'), term.cells[@intCast(h_col)].cp);
+    try testing.expectEqual(@as(u21, 'i'), term.cells[@intCast(i_col)].cp);
+    try testing.expectEqual(@as(u21, '!'), term.cells[@intCast(bang_col)].cp);
+
+    // A hidden run in the MIDDLE of a line, not just the start.
+    var tables2 = ViewTables.init(testing.allocator);
+    defer tables2.deinit();
+    const line2 = "Some **bold** text";
+    try analyzeLine(&tables2, line2, null);
+
+    var term2 = try TermScreen.init(testing.allocator, 32, 1);
+    defer term2.deinit();
+    _ = lgenLine(&term2, 0, 0, 32, line2, .{ .view = &tables2 }, .none);
+
+    // "bold" is bytes 7-10 of "Some **bold** text" (0-indexed: S=0,o=1,m=2,
+    // e=3, =4,*=5,*=6,b=7,o=8,l=9,d=10,*=11,*=12, =13,t=14...).
+    inline for (.{ 7, 8, 9, 10 }, .{ 'b', 'o', 'l', 'd' }) |byte_idx, ch| {
+        const col = tables2.col_map[byte_idx];
+        try testing.expectEqual(@as(u21, ch), term2.cells[@intCast(col)].cp);
+    }
+    // And "text" after the trailing "**" must follow immediately, not two
+    // columns further right where the space-padded paint would leave it.
+    inline for (.{ 14, 15, 16, 17 }, .{ 't', 'e', 'x', 't' }) |byte_idx, ch| {
+        const col = tables2.col_map[byte_idx];
+        try testing.expectEqual(@as(u21, ch), term2.cells[@intCast(col)].cp);
+    }
+}
+
 test "lgenLine applies viewmode link urls onto cells" {
     var tables = ViewTables.init(testing.allocator);
     defer tables.deinit();

@@ -255,6 +255,29 @@ pub fn analyzeLineStart(tables: *ViewTables, line: []const u8, tab: u16) bool {
         }
     }
 
+    // Feature 4.2.1(d): Indented code block — 4+ display columns of leading
+    // whitespace, not otherwise recognized above (headings/fences/quotes/
+    // tasks/HR already returned). No block-context (blank-line-before)
+    // tracking; single line-start test only, unlike fenced regions which
+    // need `zig_bw_fence_detect`. Skip a plain bullet marker so a deeply
+    // nested list item's content isn't misread as code.
+    {
+        var i: usize = 0;
+        var col: u16 = 0;
+        while (i < line.len and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {
+            col += if (line[i] == '\t') tab_u - (col % tab_u) else 1;
+        }
+        if (col >= 4 and i < line.len) {
+            const c = line[i];
+            const next_is_ws = i + 1 < line.len and (line[i + 1] == ' ' or line[i + 1] == '\t');
+            const looks_like_bullet = (c == '*' or c == '-' or c == '+') and next_is_ws;
+            if (!looks_like_bullet) {
+                buildColMap(tables, line, tab_u);
+                return true;
+            }
+        }
+    }
+
     return false;
 }
 
@@ -639,6 +662,21 @@ test "view horizontal rule becomes box-drawing dashes" {
     try expectRendered(testing.allocator, "***", "\u{2500}\u{2500}\u{2500}");
     try expectRendered(testing.allocator, "- - -", "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
     try expectRendered(testing.allocator, "-- not a rule", "-- not a rule");
+}
+
+test "view indented code block leaves markdown-looking content verbatim" {
+    try expectRendered(testing.allocator, "    **not bold**", "    **not bold**");
+    try expectRendered(testing.allocator, "    # not a heading", "    # not a heading");
+    try expectRendered(testing.allocator, "    [not](a link)", "    [not](a link)");
+}
+
+test "view indented code block requires 4+ display columns" {
+    // 3 spaces: below CommonMark's indented-code threshold; still emphasis.
+    try expectRendered(testing.allocator, "   **bold**", "     bold  ");
+}
+
+test "view indented code block does not swallow a nested bullet" {
+    try expectRendered(testing.allocator, "    - nested item", "    - nested item");
 }
 
 test "view emphasis hides delimiters as spaces" {

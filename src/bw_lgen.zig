@@ -374,6 +374,149 @@ pub export fn zig_bw_table_detect(
     return 0;
 }
 
+const FenceOpen = struct { start: usize, len: usize, ch: u8 };
+
+/// Match a fence delimiter line: leading spaces/tabs, then a run of `>=3`
+/// identical backtick/tilde characters (same leading-ws rule as
+/// `render.analyzeLineStart` Feature 1.5 — no CommonMark 0-3-space cap).
+fn matchFenceOpen(line: []const u8) ?FenceOpen {
+    var i: usize = 0;
+    while (i < line.len and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {}
+    if (i >= line.len) return null;
+    const ch = line[i];
+    if (ch != '`' and ch != '~') return null;
+    var j = i;
+    while (j < line.len and line[j] == ch) : (j += 1) {}
+    const run = j - i;
+    if (run < 3) return null;
+    return .{ .start = i, .len = run, .ch = ch };
+}
+
+/// True when `line` closes a fence opened with `open_ch`/`open_len`: same
+/// character, run length `>=` opening length, nothing but trailing
+/// whitespace after the run (CommonMark closing-fence rule). A fence
+/// delimiter of the *other* character never closes it — the mismatched
+/// marker is body text, not a close.
+fn matchFenceClose(line: []const u8, open_ch: u8, open_len: usize) bool {
+    const m = matchFenceOpen(line) orelse return false;
+    if (m.ch != open_ch or m.len < open_len) return false;
+    var k = m.start + m.len;
+    while (k < line.len) : (k += 1) {
+        if (line[k] != ' ' and line[k] != '\t') return false;
+    }
+    return true;
+}
+
+/// Bounded backward-then-forward scan window for fence-body detection, in
+/// the same style and order of magnitude as the table detector's 50-back /
+/// 199-forward window (each `bwReadLine` call reseeks from `anchor`, so
+/// total cost is the same class of pointer walk as table detection — not
+/// `readLineBytesAdvance`'s single-pass `pgetb` walk, which corrupted an
+/// unrelated `P`'s state on multi-line scans; see git history for that
+/// attempt and revert reasoning). Fences beyond this window in either
+/// direction are a documented limitation (plan §4.2.1), not a correctness
+/// bug: body lines outside the window fall back to being parsed as ordinary
+/// markdown, same as before this feature existed.
+const fence_scan_window_lines: i64 = 300;
+
+/// Feature 4.2.1 fence-body region detect (plan R1). Simulates fence
+/// open/close state **forward** from a bounded window before `buf_line`
+/// (fences don't nest, but a body line that merely *looks* like a
+/// different-type fence marker — e.g. a `~~~` line inside a ` ``` ` fence —
+/// must not toggle state, so backward nearest-marker matching is not
+/// sufficient; forward simulation from a known "not in fence" starting
+/// assumption is).
+///
+/// `out_start`/`out_end` are `-1` when `buf_line` is not inside a fence body
+/// (ordinary text, or is itself the opening/closing delimiter line — the
+/// caller's existing single-line check handles delimiter lines directly).
+/// Returns `0` always; Path A owns fence detection (no C fallback).
+pub export fn zig_bw_fence_detect(
+    anchor: ?*P,
+    buf_line: i64,
+    out_start: ?*i64,
+    out_end: ?*i64,
+) c_int {
+    if (anchor == null or out_start == null or out_end == null) return -1;
+    if (buf_line < 0) return -1;
+
+    const eof_line = zig_c_bw_eof_line(anchor);
+    if (eof_line < 0 or buf_line > eof_line) {
+        out_start.?.* = -1;
+        out_end.?.* = -1;
+        return 0;
+    }
+
+    const back_lim: i64 = @max(@as(i64, 0), buf_line - fence_scan_window_lines);
+
+    var tmp: [16 * 1024]u8 = undefined;
+    var open: ?FenceOpen = null;
+    var region_start: i64 = -1;
+
+    var li: i64 = back_lim;
+    while (li < buf_line) : (li += 1) {
+        const rc = bwReadLine(anchor, li, &tmp, @intCast(tmp.len));
+        if (rc >= 0) {
+            const slice = tmp[0..@intCast(rc)];
+            if (open) |o| {
+                if (matchFenceClose(slice, o.ch, o.len)) {
+                    open = null;
+                    region_start = -1;
+                }
+            } else if (matchFenceOpen(slice)) |m| {
+                open = m;
+                region_start = li;
+            }
+        }
+        // rc < 0 (too long, or unreadable): not a fence delimiter; continue.
+    }
+
+    if (open == null) {
+        out_start.?.* = -1;
+        out_end.?.* = -1;
+        return 0;
+    }
+
+    const o = open.?;
+    const fwd_lim: i64 = @min(eof_line, buf_line + fence_scan_window_lines);
+    var lj: i64 = buf_line;
+    while (lj <= fwd_lim) : (lj += 1) {
+        const rc = bwReadLine(anchor, lj, &tmp, @intCast(tmp.len));
+        if (rc >= 0) {
+            const slice = tmp[0..@intCast(rc)];
+            if (matchFenceClose(slice, o.ch, o.len)) {
+                out_start.?.* = region_start;
+                out_end.?.* = lj + 1;
+                return 0;
+            }
+        }
+    }
+    // Unterminated within the scan window: treat the remainder as body
+    // through the window bound. Matches the table detector's precedent of
+    // a bounded, not unbounded, scan.
+    out_start.?.* = region_start;
+    out_end.?.* = fwd_lim + 1;
+    return 0;
+}
+
+test "matchFenceOpen recognizes backtick and tilde runs" {
+    try std.testing.expect(matchFenceOpen("```") != null);
+    try std.testing.expect(matchFenceOpen("```python") != null);
+    try std.testing.expect(matchFenceOpen("~~~~") != null);
+    try std.testing.expect(matchFenceOpen("  ```") != null);
+    try std.testing.expect(matchFenceOpen("``") == null);
+    try std.testing.expect(matchFenceOpen("plain text") == null);
+}
+
+test "matchFenceClose requires matching char and sufficient run length" {
+    try std.testing.expect(matchFenceClose("```", '`', 3));
+    try std.testing.expect(matchFenceClose("````", '`', 3)); // longer close OK
+    try std.testing.expect(!matchFenceClose("``", '`', 3)); // shorter close: no
+    try std.testing.expect(!matchFenceClose("~~~", '`', 3)); // wrong char: no
+    try std.testing.expect(!matchFenceClose("``` trailing text", '`', 3)); // not bare
+    try std.testing.expect(matchFenceClose("```   ", '`', 3)); // trailing ws OK
+}
+
 /// Path A cursor follow for text windows (`bwfllwt`).
 /// Returns `0` on success, `-1` to fall back to C.
 pub export fn zig_bw_bwfllwt(
@@ -979,6 +1122,9 @@ pub export fn zig_bw_lgen_view(
     tab: c_int,
     buf_line: i64,
     cursor: ?*P,
+    fence_region_start: ?*i64,
+    fence_region_end: ?*i64,
+    fence_cached_for_line: ?*i64,
     table_region_start: ?*i64,
     table_region_end: ?*i64,
     table_separator_line: ?*i64,
@@ -996,6 +1142,8 @@ pub export fn zig_bw_lgen_view(
 ) c_int {
     if (line_ptr == null or hide == null or subst == null or col_map == null or col_map_line == null) return -1;
     if (cursor == null or p == null) return -1;
+    if (fence_region_start == null or fence_region_end == null) return -1;
+    if (fence_cached_for_line == null) return -1;
     if (table_region_start == null or table_region_end == null or table_separator_line == null) return -1;
     if (table_cached_for_line == null or table_no_region_line == null or table_col_count == null) return -1;
     if (table_col_width == null or table_col_align == null or table_cap <= 0) return -1;
@@ -1008,6 +1156,63 @@ pub export fn zig_bw_lgen_view(
     if (col_map_len < @as(c_int, @intCast(clear_n))) return -1;
     if (urls == null or urls_len < @as(c_int, @intCast(clear_n))) return -1;
     if (atr == null or atr_len <= 0) return -1;
+
+    // 0) Fence-body region cache + gate (plan §4.2.1 / R1). Body lines skip
+    // every markdown analyzer below — including the line-start dispatch —
+    // so a code comment that starts with `#` or contains `**`/`~~~` is
+    // never reinterpreted as a heading, emphasis, or a mismatched fence
+    // marker. Delimiter lines (the opening/closing fence itself) are NOT
+    // gated here: they fall through to the existing single-line check in
+    // `zig_bw_view_line_start`, which already recognizes them correctly
+    // without needing region context.
+    if (fence_cached_for_line.?.* != buf_line) {
+        if (buf_line >= fence_region_start.?.* and buf_line < fence_region_end.?.*) {
+            fence_cached_for_line.?.* = buf_line;
+        } else {
+            // No negative-cache shortcut here (unlike the table detector's
+            // `±10` window): a delimiter line correctly reporting "not in a
+            // body" says nothing about whether the NEXT line is body — that
+            // would require caching a state transition point, not a single
+            // query result. Always re-detect on a region miss; each call is
+            // a single bounded forward pass (`fence_scan_window_lines`),
+            // not the quadratic-ish cost this shortcut exists to avoid.
+            fence_region_start.?.* = -1;
+            fence_region_end.?.* = -1;
+            const zfd = zig_bw_fence_detect(p, buf_line, fence_region_start, fence_region_end);
+            if (zfd < 0) return -1;
+            fence_cached_for_line.?.* = buf_line;
+        }
+    }
+
+    const in_fence_body: bool = fence_region_start.?.* != -1 and
+        buf_line > fence_region_start.?.* and buf_line < fence_region_end.?.* - 1;
+
+    if (in_fence_body) {
+        // Force a fresh col_map build below: hide/subst are all-zero here
+        // (no analyzer has touched them), but `col_map_line` may still hold
+        // some earlier, unrelated line's index. Setting it to `buf_line`
+        // directly — without building — would make `zig_bw_view_finish`'s
+        // own `col_map_line != buf_line` guard skip the rebuild and leave
+        // `col_map` holding stale data from whatever line was last mapped.
+        col_map_line.?.* = -1;
+        if (zig_bw_view_finish(
+            line_ptr,
+            line_len,
+            hide,
+            hide_len,
+            subst,
+            subst_len,
+            col_map,
+            col_map_len,
+            col_map_line,
+            buf_line,
+            tab,
+            cursor,
+            1,
+        ) < 0)
+            return -1;
+        return 0;
+    }
 
     // 1) Line-start Feature 1.3/1.5/1.7/1.8 (+ task).
     const zls = zig_bw_view_line_start(
@@ -1232,6 +1437,17 @@ var vm_table_no_region_line: i64 = -1;
 var vm_table_col_count: c_int = 0;
 var vm_table_col_width: [vm_max_table_cols]c_int = [_]c_int{0} ** vm_max_table_cols;
 var vm_table_col_align: [vm_max_table_cols]c_int = [_]c_int{0} ** vm_max_table_cols;
+// Feature 4.2.1 fence-body region cache (plan §4.2.1 / R1) — mirrors the
+// table-region cache above so fenced code content is never re-parsed as
+// markdown. `vm_fence_region_end` is exclusive (one past the closing
+// delimiter line); a line equal to start or end-1 is a delimiter line and
+// falls through to the existing single-line fence-marker conceal. No
+// negative-cache field (unlike the table's `no_region_line`) — see the
+// comment at its one use site in `zig_bw_lgen_view` for why that shortcut
+// is unsound here.
+var vm_fence_region_start: i64 = -1;
+var vm_fence_region_end: i64 = -1;
+var vm_fence_cached_for_line: i64 = -1;
 var vm_ready: c_int = 0;
 var vm_last_bw: ?*BW = null;
 
@@ -1264,6 +1480,9 @@ pub export fn zig_bw_vm_prepare(bw: ?*BW, need: c_int) c_int {
         vm_table_cached_for_line = -1;
         vm_table_no_region_line = -1;
         vm_table_col_count = 0;
+        vm_fence_region_start = -1;
+        vm_fence_region_end = -1;
+        vm_fence_cached_for_line = -1;
         vm_col_map_line = -1;
         vm_last_bw = bw;
     }
@@ -1362,6 +1581,15 @@ pub export fn zig_bw_vm_tcfl_ptr() ?*i64 {
 pub export fn zig_bw_vm_tnrl_ptr() ?*i64 {
     return &vm_table_no_region_line;
 }
+pub export fn zig_bw_vm_frs_ptr() ?*i64 {
+    return &vm_fence_region_start;
+}
+pub export fn zig_bw_vm_fre_ptr() ?*i64 {
+    return &vm_fence_region_end;
+}
+pub export fn zig_bw_vm_fcfl_ptr() ?*i64 {
+    return &vm_fence_cached_for_line;
+}
 pub export fn zig_bw_vm_tcc_ptr() ?*c_int {
     return &vm_table_col_count;
 }
@@ -1436,6 +1664,9 @@ pub export fn zig_bw_vm_cleanup() void {
     vm_table_col_count = 0;
     @memset(&vm_table_col_width, 0);
     @memset(&vm_table_col_align, 0);
+    vm_fence_region_start = -1;
+    vm_fence_region_end = -1;
+    vm_fence_cached_for_line = -1;
     vm_ready = 0;
     vm_last_bw = null;
 }
@@ -1678,6 +1909,9 @@ pub export fn zig_bw_lgen_view_entry(
     const col_map = zig_bw_vm_col_map() orelse return -1;
     const col_map_size = zig_bw_vm_col_map_size();
     const col_map_line = zig_bw_vm_col_map_line_ptr() orelse return -1;
+    const frs = zig_bw_vm_frs_ptr() orelse return -1;
+    const fre = zig_bw_vm_fre_ptr() orelse return -1;
+    const fcfl = zig_bw_vm_fcfl_ptr() orelse return -1;
     const trs = zig_bw_vm_trs_ptr() orelse return -1;
     const tre = zig_bw_vm_tre_ptr() orelse return -1;
     const tsl = zig_bw_vm_tsl_ptr() orelse return -1;
@@ -1719,6 +1953,9 @@ pub export fn zig_bw_lgen_view_entry(
         tab,
         buf_line,
         cursor,
+        frs,
+        fre,
+        fcfl,
         trs,
         tre,
         tsl,

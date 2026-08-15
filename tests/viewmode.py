@@ -334,16 +334,12 @@ class ViewModeTests(joefx.JoeTestBase):
     # --- Feature 1.6: Link delimiter hiding ---
 
     def test_viewmode_inline_link(self):
-        """Inline link [text](url) delimiters hidden at zero width"""
+        """Inline link [text](url): brackets/parens/destination all concealed (plan §3.2)"""
         self.workdir.fixtureData("test.md", "Click [here](http://example.com)\n")
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        # [ ] ( ) hidden at zero width; label and URL abut with no separator
-        # since nothing in the source sits between "here" and "(". Phase 2
-        # (plan §3.2) conceals the URL entirely, which removes this seam —
-        # not fixed here, this is the correct Phase-1-only rendering.
-        self.assertTextAt("Click herehttp://example.com", x=0)
+        self.assertTextAt("Click here", x=0)
         self.exitJoe()
         self.assertExited()
 
@@ -353,7 +349,7 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("linkhttp://x.com", x=0)
+        self.assertTextAt("link", x=0)
         self.exitJoe()
         self.assertExited()
 
@@ -363,29 +359,27 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        # Both links have delimiters hidden at zero width
-        self.assertTextAt("onehttp://a.com and twohttp://b.com", x=0)
+        self.assertTextAt("one and two", x=0)
         self.exitJoe()
         self.assertExited()
 
     def test_viewmode_reference_link(self):
-        """Reference-style link [text][ref] delimiters hidden at zero width"""
+        """Reference-style link [text][ref]: brackets and reference label concealed"""
         self.workdir.fixtureData("test.md", "See [docs][reference] here\n")
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("See docsreference here", x=0)
+        self.assertTextAt("See docs here", x=0)
         self.exitJoe()
         self.assertExited()
 
     def test_viewmode_link_with_title(self):
-        """Link with title [text](url "title") delimiters hidden at zero width"""
+        """Link with title [text](url "title"): destination and title both concealed"""
         self.workdir.fixtureData("test.md", "[click](http://x.com \"Title\") here\n")
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        # Delimiters hidden at zero width; URL + title visible (Phase 1)
-        self.assertTextAt('clickhttp://x.com "Title" here', x=0)
+        self.assertTextAt("click here", x=0)
         self.exitJoe()
         self.assertExited()
 

@@ -497,51 +497,89 @@ fn applyInlineCode(tables: *ViewTables, line: []const u8) void {
     }
 }
 
+fn hideSpan(tables: *ViewTables, start: usize, end: usize) void {
+    var p = start;
+    while (p < end) : (p += 1) tables.hide[p] = 1;
+}
+
+/// Feature 2.1-2.5: `[a](u)`, `[a](u "title")`, `[a][r]`, `[a][]`, `[a]`,
+/// `![alt](u)` → label/alt text only. §3.2 deliberately deviates from
+/// OpenCode here: the destination (and title) are concealed, not just the
+/// bracket syntax, so the label survives as the sole visible content.
+/// Autolinks (`<u>`) and bare URLs have no label to fall back on, so they
+/// are handled elsewhere (styled, never concealed) and never reach here.
 fn applyLinks(tables: *ViewTables, line: []const u8, attrs: ?[]Attribute) void {
     var i: usize = 0;
     while (i < line.len) {
-        if (line[i] == '[') {
-            var j = i + 1;
-            while (j < line.len and line[j] != ']') : (j += 1) {}
-            if (j < line.len and j + 1 < line.len and line[j + 1] == '(') {
-                var k = j + 2;
-                while (k < line.len and line[k] != ')') : (k += 1) {}
-                if (k < line.len) {
-                    tables.hide[i] = 1;
-                    tables.hide[j] = 1;
-                    tables.hide[j + 1] = 1;
-                    tables.hide[k] = 1;
-                    const url = line[j + 2 .. k];
-                    if (url.len > 0) {
-                        var lp = i + 1;
-                        while (lp < j) : (lp += 1) tables.link_url[lp] = url;
-                        styleLinkText(attrs, i + 1, j);
-                    }
-                    i = k + 1;
-                    continue;
+        const bang = line[i] == '!' and i + 1 < line.len and line[i + 1] == '[';
+        if (line[i] != '[' and !bang) {
+            i += 1;
+            continue;
+        }
+        const bracket_start = if (bang) i + 1 else i;
+        var j = bracket_start + 1;
+        while (j < line.len and line[j] != ']') : (j += 1) {}
+        if (j >= line.len) {
+            i += 1;
+            continue;
+        }
+
+        // Inline: [a](u) / [a](u "title") / image ![a](u)
+        if (j + 1 < line.len and line[j + 1] == '(') {
+            var k = j + 2;
+            while (k < line.len and line[k] != ')') : (k += 1) {}
+            if (k < line.len) {
+                if (bang) tables.hide[i] = 1;
+                tables.hide[bracket_start] = 1;
+                tables.hide[j] = 1;
+                tables.hide[j + 1] = 1;
+                hideSpan(tables, j + 2, k);
+                tables.hide[k] = 1;
+                const url = line[j + 2 .. k];
+                if (url.len > 0) {
+                    var lp = bracket_start + 1;
+                    while (lp < j) : (lp += 1) tables.link_url[lp] = url;
                 }
-            }
-            // Reference-style [text][ref]
-            if (j < line.len and j + 1 < line.len and line[j + 1] == '[') {
-                var k = j + 2;
-                while (k < line.len and line[k] != ']') : (k += 1) {}
-                if (k < line.len) {
-                    tables.hide[i] = 1;
-                    tables.hide[j] = 1;
-                    tables.hide[j + 1] = 1;
-                    tables.hide[k] = 1;
-                    const ref = line[j + 2 .. k];
-                    if (ref.len > 0) {
-                        var lp = i + 1;
-                        while (lp < j) : (lp += 1) tables.link_url[lp] = ref;
-                    }
-                    styleLinkText(attrs, i + 1, j);
-                    i = k + 1;
-                    continue;
-                }
+                if (!bang) styleLinkText(attrs, bracket_start + 1, j);
+                i = k + 1;
+                continue;
             }
         }
-        i += 1;
+
+        // Reference-style: [a][r], collapsed [a][]
+        if (j + 1 < line.len and line[j + 1] == '[') {
+            var k = j + 2;
+            while (k < line.len and line[k] != ']') : (k += 1) {}
+            if (k < line.len) {
+                if (bang) tables.hide[i] = 1;
+                tables.hide[bracket_start] = 1;
+                tables.hide[j] = 1;
+                tables.hide[j + 1] = 1;
+                hideSpan(tables, j + 2, k);
+                tables.hide[k] = 1;
+                const ref = line[j + 2 .. k];
+                const link_name = if (ref.len > 0) ref else line[bracket_start + 1 .. j];
+                var lp = bracket_start + 1;
+                while (lp < j) : (lp += 1) tables.link_url[lp] = link_name;
+                if (!bang) styleLinkText(attrs, bracket_start + 1, j);
+                i = k + 1;
+                continue;
+            }
+        }
+
+        // Shortcut reference: [a] — images need an explicit destination,
+        // so `![a]` alone (no `(...)`/`[...]` following) is left untouched.
+        if (!bang) {
+            const label = line[bracket_start + 1 .. j];
+            if (label.len > 0) {
+                tables.hide[bracket_start] = 1;
+                tables.hide[j] = 1;
+                var lp = bracket_start + 1;
+                while (lp < j) : (lp += 1) tables.link_url[lp] = label;
+                styleLinkText(attrs, bracket_start + 1, j);
+            }
+        }
+        i = j + 1;
     }
 }
 
@@ -707,15 +745,51 @@ test "view links hide delimiters and style attrs" {
     const line = "Click [here](http://example.com)";
     var attrs: [64]Attribute = .{Attribute.none} ** 64;
     try analyzeLine(&tables, line, attrs[0..line.len]);
-    try expectRendered(testing.allocator, line, "Click  here  http://example.com ");
+    try expectRendered(testing.allocator, line, "Click  here                     ");
     // 'h' of here is at byte 7
     try testing.expect(attrs[7].underline);
     try testing.expect(Color.eql(attrs[7].fg, link_fg));
     try testing.expectEqualStrings("http://example.com", tables.linkAt(7).?);
 }
 
-test "view reference link hides brackets" {
-    try expectRendered(testing.allocator, "See [docs][reference] here", "See  docs  reference  here");
+test "view reference link hides brackets and label" {
+    try expectRendered(testing.allocator, "See [docs][reference] here", "See  docs             here");
+}
+
+test "view collapsed reference link hides brackets" {
+    try expectRendered(testing.allocator, "See [docs][] here", "See  docs    here");
+}
+
+test "view shortcut reference link hides brackets" {
+    var tables = ViewTables.init(testing.allocator);
+    defer tables.deinit();
+    const line = "See [docs] here";
+    try analyzeLine(&tables, line, null);
+    try expectRendered(testing.allocator, line, "See  docs  here");
+    try testing.expectEqualStrings("docs", tables.linkAt(5).?);
+}
+
+test "view inline link with title hides destination and title" {
+    try expectRendered(
+        testing.allocator,
+        "[a](http://x \"T\") end",
+        " a                end",
+    );
+}
+
+test "view image hides bang/brackets/destination, leaves alt visible" {
+    var tables = ViewTables.init(testing.allocator);
+    defer tables.deinit();
+    const line = "![alt](http://x.png) end";
+    try analyzeLine(&tables, line, null);
+    try expectRendered(testing.allocator, line, "  alt                end");
+    // Images aren't styled as clickable link text (no underline/color).
+    try testing.expectEqualStrings("http://x.png", tables.linkAt(2).?);
+}
+
+test "view autolink and bare URL stay visible (no label to conceal to)" {
+    try expectRendered(testing.allocator, "See <http://x> here", "See <http://x> here");
+    try expectRendered(testing.allocator, "See http://x here", "See http://x here");
 }
 
 test "view col_map treats hide as zero width" {

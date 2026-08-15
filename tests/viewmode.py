@@ -693,6 +693,35 @@ class ViewModeTests(joefx.JoeTestBase):
         self.exitJoe()
         self.assertExited()
 
+    def test_viewmode_hscroll_uses_collapsed_columns(self):
+        """Plan §4 task 1.4: horizontal scroll must key off collapsed
+        (post-conceal) columns, not raw byte positions. A heading whose
+        text runs past the terminal width already relies on col_map/xcol
+        (both collapsed pre-Phase-1.2) to decide when to scroll — this
+        pins that the paint loop's own column bookkeeping (Phase 1.2)
+        stays consistent with it: no leftover "# " ghost, no truncated or
+        misaligned fill once scrolled to the end of a long concealed line."""
+        content = "# " + ("x" * 100) + "\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        # Unscrolled: heading collapses, so column 0 starts directly on the
+        # 100-x run (not on a phantom "# " prefix).
+        self.assertTextAt("x" * 78, x=0)
+        self.writectl("{end}")
+        # Scrolled to the end of a 100-column run of plain 'x': the visible
+        # window must be entirely 'x' (JOE's scroll heuristic keeps a
+        # right-hand margin, so the exact width isn't 80 — that margin is
+        # unrelated to this fix). No '#' or blank gap must appear, which
+        # is what a raw-byte-offset (uncollapsed) scroll would produce.
+        self.assertTrue(self.joe.expect(
+            lambda: self.joe.readLine(1, 0, self.joe.size.X).rstrip() != ''
+            and set(self.joe.readLine(1, 0, self.joe.size.X).rstrip()) == {'x'}
+        ))
+        self.exitJoe()
+        self.assertExited()
+
     # --- Regression: viewmode off preserves delimiters ---
 
     def test_viewmode_off_preserves_delimiters(self):

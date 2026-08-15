@@ -1954,6 +1954,9 @@ pub export fn nopen(arg_cap_1: [*c]CAP) [*c]SCRN {
     t.*.htab = @ptrCast(@alignCast(joe_malloc(@as(ptrdiff_t, 256) * @as(ptrdiff_t, @bitCast(@as(c_ulong, @truncate(@sizeOf(struct_hentry))))))));
     _ = nresize(t, co, li);
     mouseopen();
+    // Ensure caret is shown; blink when idle (held steady after keys).
+    zigScrnHardwareCursorShow();
+    zigScrnHardwareCursorBlinkOn();
     return t;
 }
 pub fn relcost(arg_t: [*c]SCRN, arg_x: ptrdiff_t, arg_y: ptrdiff_t, arg_ox: ptrdiff_t, arg_oy: ptrdiff_t) callconv(.c) ptrdiff_t {
@@ -2740,6 +2743,8 @@ pub export fn nreturn(arg_t: [*c]SCRN) void {
     if (t.*.brp != null) {
         texec(t.*.cap, t.*.brp, 1, 0, 0, 0, 0);
     }
+    zigScrnHardwareCursorShow();
+    zigScrnHardwareCursorBlinkOn();
     nredraw(t);
 }
 pub export fn nclose(arg_t: [*c]SCRN) void {
@@ -3398,6 +3403,9 @@ pub export fn setextpal(arg_t: [*c]SCRN, arg_palette: [*c]c_int) void {
 /// C-visible gate (also set from `JOE_ZIG_SCREEN_SWAP` in `ttopnn`). Default 1.
 pub export var zig_screen_swap_enabled: c_int = 1;
 
+/// From `colors.zig` — scheme `-cursor` (default INVERSE).
+pub extern var bg_cursor: c_int;
+
 var zig_scr_storage: ?terminal.Screen = null;
 
 fn zigScrnSwapEnsure(t: [*c]SCRN) ?*terminal.Screen {
@@ -3437,6 +3445,109 @@ fn zigPaletteSlice(t: [*c]SCRN) ?[]const i32 {
     return @as([*]const i32, @ptrCast(t.*.palette))[0..256];
 }
 
+/// Soft-paint caret inside a selection. Returns true when the caret is in soft
+/// mode (caller hides the hardware cursor). While moving the soft caret stays
+/// lit; when idle it blinks by skipping the paint on alternate half-periods.
+/// Blanks and letters clear inverse + underline (blank caret is underline-only).
+fn zigScrnApplySoftCursor(scr: *terminal.Screen, x: u16, y: u16, palette: ?[]const i32) bool {
+    if (x >= scr.width or y >= scr.height) return false;
+    const idx = @as(usize, y) * @as(usize, scr.width) + @as(usize, x);
+    const before = scr.cells[idx];
+    const cell = terminal.applySoftCursorCell(before, @intCast(bg_cursor), palette);
+    if (!terminal.softCursorApplied(before, cell)) return false;
+    if (zigScrnSoftCursorLit()) {
+        scr.writeCell(x, y, cell);
+    }
+    // Blink-off: leave the selection cell as-is (caret disappears into the mark).
+    return true;
+}
+
+extern fn mnow() c_long;
+
+/// How long after a key to keep the caret steady (no blink), ms.
+const cursor_blink_hold_ms: c_long = 500;
+/// Soft-caret idle half-period (ms). Matched by a shorter `tickon` alarm.
+const cursor_soft_blink_half_ms: c_long = 500;
+
+var cursor_blink_held: bool = false;
+var cursor_blink_hold_until: c_long = 0;
+var cursor_hw_hidden: bool = false;
+/// True when the caret is inside a selection (HW cursor hidden; soft paint used).
+var cursor_soft_mode: bool = false;
+
+fn zigScrnHardwareCursorShow() void {
+    ttputs(@ptrCast(@constCast("\x1b[?25h")));
+    cursor_hw_hidden = false;
+}
+
+fn zigScrnHardwareCursorHide() void {
+    ttputs(@ptrCast(@constCast("\x1b[?25l")));
+    cursor_hw_hidden = true;
+}
+
+fn zigScrnHardwareCursorBlinkOff() void {
+    ttputs(@ptrCast(@constCast("\x1b[?12l")));
+}
+
+fn zigScrnHardwareCursorBlinkOn() void {
+    ttputs(@ptrCast(@constCast("\x1b[?12h")));
+}
+
+/// Soft caret is always lit while moving; when idle it toggles on a half-period.
+fn zigScrnSoftCursorLit() bool {
+    if (cursor_blink_held) return true;
+    const phase = @divTrunc(mnow(), cursor_soft_blink_half_ms);
+    return (phase & 1) == 0;
+}
+
+/// Call after each key: keep caret lit (no blink) for `cursor_blink_hold_ms`.
+pub export fn zig_scrn_cursor_activity() void {
+    cursor_blink_held = true;
+    cursor_blink_hold_until = mnow() + cursor_blink_hold_ms;
+    zigScrnHardwareCursorBlinkOff();
+    // Ensure visible unless soft-cursor path hides it for a selection cell.
+    if (!cursor_hw_hidden) zigScrnHardwareCursorShow();
+}
+
+/// Keep idle blink engaged whenever the hardware caret is visible.
+///
+/// Must run on the first paint (before any key): `ninit` turns blink on, but
+/// later cup/flush/attr traffic can clear it; re-assert here so JOE blinks from
+/// open, not only after the first move→hold→expire cycle. Soft caret blinks via
+/// `zigScrnSoftCursorLit` on idle redraws while HW is hidden.
+pub export fn zig_scrn_cursor_maybe_blink() void {
+    if (cursor_blink_held) {
+        if (mnow() < cursor_blink_hold_until) return;
+        cursor_blink_held = false;
+    }
+    if (!cursor_hw_hidden) zigScrnHardwareCursorBlinkOn();
+}
+
+/// Idle alarm interval for `tickon`: faster while a soft caret needs to blink,
+/// or just before the post-key hold expires so HW blink resumes promptly.
+pub export fn zig_scrn_cursor_alarm_ms() c_long {
+    const now = mnow();
+    if (cursor_blink_held) {
+        const rem = cursor_blink_hold_until - now;
+        if (rem > 0 and rem < 1000) return if (rem < 1) 1 else rem;
+        return 1000;
+    }
+    if (cursor_soft_mode) return cursor_soft_blink_half_ms;
+    return 1000;
+}
+
+fn zigScrnSetHardwareCursorForSoft(soft_active: bool) void {
+    cursor_soft_mode = soft_active;
+    if (soft_active) {
+        // Soft paint is the caret inside a mark; HW cursor would cancel it on text.
+        zigScrnHardwareCursorHide();
+    } else if (cursor_hw_hidden) {
+        zigScrnHardwareCursorShow();
+        // Restore blink policy for the visible HW caret.
+        if (cursor_blink_held) zigScrnHardwareCursorBlinkOff() else zigScrnHardwareCursorBlinkOn();
+    }
+}
+
 /// End-of-frame swap emit: sync hybrid shadow → Zig Screen → flush → drain.
 /// Places the cursor at `(x, y)`. No-op when the swap gate is off.
 pub export fn zig_scrn_swap_flush(arg_t: [*c]SCRN, arg_x: ptrdiff_t, arg_y: ptrdiff_t) void {
@@ -3454,14 +3565,19 @@ pub export fn zig_scrn_swap_flush(arg_t: [*c]SCRN, arg_x: ptrdiff_t, arg_y: ptrd
 
     const cells: [*]const [4]i32 = @ptrCast(@alignCast(t.*.scrn));
     const attrs: [*]const i32 = @ptrCast(@alignCast(t.*.attr));
+    const pal = zigPaletteSlice(t);
     terminal.syncHybridGridToScreen(
         scr,
         cells,
         attrs,
         @intCast(t.*.co),
         @intCast(t.*.li),
-        zigPaletteSlice(t),
+        pal,
     );
+
+    // Soft-cursor before flush so the caret contrasts with mark inverse.
+    const soft_active = zigScrnApplySoftCursor(scr, @intCast(x), @intCast(y), pal);
+    zigScrnSetHardwareCursorForSoft(soft_active);
 
     // Final cursor want. Invalidate first: previous frame may have left the
     // physical cursor elsewhere (prompt/message). Presetting cursor_* without
@@ -3478,6 +3594,72 @@ pub export fn zig_scrn_swap_flush(arg_t: [*c]SCRN, arg_x: ptrdiff_t, arg_y: ptrd
     defer tty.zig_screen_drain_enabled = old_drain;
     _ = tty.drainZigScreen(scr) catch {};
 
+    // After paint/drain so idle blink is not cleared by cup/attr traffic.
+    // Engages from the first frame, before any keypress. Flush so ?12h leaves
+    // the obuf before we block in ttgetch.
+    zig_scrn_cursor_maybe_blink();
+    _ = ttflsh();
+
     t.*.x = x;
     t.*.y = y;
+}
+
+/// Soft-paint caret in the hybrid shadow and emit it (non-swap / `cpos` path).
+/// No-op when screen swap is on (`zig_scrn_swap_flush` already soft-paints).
+pub export fn zig_scrn_soft_cursor(arg_t: [*c]SCRN, arg_x: ptrdiff_t, arg_y: ptrdiff_t) void {
+    const t = arg_t;
+    var x = arg_x;
+    var y = arg_y;
+    if (zig_screen_swap_enabled != 0 or t == null) return;
+    if (t.*.scrn == null or t.*.attr == null) return;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x >= t.*.co) x = t.*.co - 1;
+    if (y >= t.*.li) y = t.*.li - 1;
+
+    const co: usize = @intCast(t.*.co);
+    const idx = @as(usize, @intCast(y)) * co + @as(usize, @intCast(x));
+    const cells: [*][4]c_int = @ptrCast(@alignCast(t.*.scrn));
+    const attrs: [*]c_int = @ptrCast(@alignCast(t.*.attr));
+    const raw = cells[idx][0];
+    // Unknown cells become spaces (same as swap sync); still soft-paint them.
+    const cp: u21 = if (raw < 0 or raw == '\n') ' ' else @intCast(raw);
+
+    const pal = zigPaletteSlice(t);
+    const cell_attr = terminal.attributeFromHybrid(attrs[idx], pal);
+    const before = terminal.screen.Cell{ .cp = cp, .attr = cell_attr };
+    const soft_cell = terminal.applySoftCursorCell(before, @intCast(bg_cursor), pal);
+    const soft_active = terminal.softCursorApplied(before, soft_cell);
+    zigScrnSetHardwareCursorForSoft(soft_active);
+    zig_scrn_cursor_maybe_blink();
+    if (!soft_active) return;
+    // Idle soft blink: skip emitting the hole so the mark inverse shows through.
+    if (!zigScrnSoftCursorLit()) return;
+
+    var tc_pal: terminal.TruecolorPalette = .{};
+    if (pal) |p| {
+        var pi: u8 = 1;
+        while (pi < 255 and pi < p.len) : (pi += 1) {
+            const v = p[pi];
+            if (v >= 0) {
+                tc_pal.slots[pi] = @intCast(v);
+                if (tc_pal.next <= pi) tc_pal.next = pi +% 1;
+            }
+        }
+    }
+    const new_atr: c_int = terminal.attributeToHybrid(soft_cell.attr, &tc_pal) catch return;
+    const out_cp: c_int = @intCast(soft_cell.cp);
+
+    // Force outatr to emit: mark attr dirty then rewrite with soft style.
+    attrs[idx] = attrs[idx] ^ 1;
+    outatr(locale_map, t, @ptrCast(cells + idx), @ptrCast(attrs + idx), x, y, out_cp, new_atr);
+    var ci: usize = 1;
+    while (ci < COMPOSE) : (ci += 1) {
+        const mark = cells[idx][ci];
+        if (mark <= 0) break;
+        // Blank caret uses a replacement glyph — skip stale combining marks.
+        if (out_cp != raw) break;
+        outatr(locale_map, t, @ptrCast(cells + idx), @ptrCast(attrs + idx), x, y, mark, new_atr);
+    }
+    outatr_complete(t);
 }

@@ -149,6 +149,7 @@ pub extern fn exemac(m: [*c]MACRO, k: c_int) c_int;
 pub extern fn timer_play() [*c]MACRO;
 pub extern fn do_auto_scroll() void;
 pub extern fn mnow() c_long;
+pub extern fn zig_scrn_cursor_alarm_ms() c_long;
 pub extern fn utf8_decode(sm: [*c]struct_utf8_sm, c: u8) c_int;
 pub extern fn to_uni(map: [*c]struct_charmap, c: c_int) c_int;
 pub extern var maint: [*c]Screen;
@@ -804,8 +805,12 @@ pub export fn tickon() void {
         val.it_value.tv_sec = 0;
         val.it_value.tv_usec = @truncate(tim);
     } else {
-        val.it_value.tv_sec = 1;
-        val.it_value.tv_usec = 0;
+        // Soft-caret idle blink / post-key hold resume may need sub-second wakes.
+        var ms: c_long = zig_scrn_cursor_alarm_ms();
+        _ = &ms;
+        if (ms < @as(c_long, 1)) ms = 1;
+        val.it_value.tv_sec = @divTrunc(ms, 1000);
+        val.it_value.tv_usec = @truncate(@rem(ms, 1000) * 1000);
     }
     ticked = 0;
     _ = joe_set_signal(SIGALRM, dotick);

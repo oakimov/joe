@@ -387,6 +387,9 @@ pub extern fn nresize(t: [*c]SCRN, w: ptrdiff_t, h: ptrdiff_t) c_int;
 pub extern fn nscroll(t: [*c]SCRN, atr: c_int) void;
 pub extern fn cpos(t: [*c]SCRN, x: ptrdiff_t, y: ptrdiff_t) c_int;
 pub extern fn zig_scrn_swap_flush(t: [*c]SCRN, x: ptrdiff_t, y: ptrdiff_t) void;
+pub extern fn zig_scrn_soft_cursor(t: [*c]SCRN, x: ptrdiff_t, y: ptrdiff_t) void;
+pub extern fn zig_scrn_cursor_activity() void;
+pub extern fn zig_scrn_cursor_maybe_blink() void;
 pub extern fn screate(scrn: [*c]SCRN) [*c]Screen;
 pub extern fn sresize(t: [*c]Screen) void;
 pub extern fn lastw(t: [*c]Screen) [*c]W;
@@ -522,7 +525,11 @@ pub export fn edupd(arg_flg: c_int) void {
     if (zig_screen_swap_enabled != 0) {
         zig_scrn_swap_flush(maint.*.t, maint.*.curwin.*.x + maint.*.curwin.*.curx, maint.*.curwin.*.y + maint.*.curwin.*.cury);
     } else {
+        zig_scrn_soft_cursor(maint.*.t, maint.*.curwin.*.x + maint.*.curwin.*.curx, maint.*.curwin.*.y + maint.*.curwin.*.cury);
         _ = cpos(maint.*.t, maint.*.curwin.*.x + maint.*.curwin.*.curx, maint.*.curwin.*.y + maint.*.curwin.*.cury);
+        // cpos/attr traffic can clear blink; re-assert idle blink from first paint.
+        zig_scrn_cursor_maybe_blink();
+        _ = ttflsh();
     }
     staupd = 0;
 }
@@ -579,6 +586,8 @@ pub export fn edloop(arg_flg: c_int) c_int {
         } else {
             c = ttgetch();
         }
+        // Key received: keep caret lit (no blink) briefly so position stays clear while moving.
+        zig_scrn_cursor_activity();
         w = maint.*.curwin;
         while (true) {
             if (w.*.y != @as(ptrdiff_t, -@as(c_int, 1))) {

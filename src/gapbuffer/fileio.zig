@@ -148,9 +148,27 @@ const S_IWUSR: c_uint = 0x80;
 const ENOENT: c_int = 2;
 const EEXIST: c_int = 17;
 
-extern var __error: c_int;
-fn errno_() c_int { return __error; }
-extern fn __error_get() [*c]c_int;
+// Darwin: __error() returns int*; Linux: __errno_location().
+// Declaring __error as a variable (old bug) never yields real errno, so ENOENT
+// on a missing path was misreported as "Error opening file" instead of "New File".
+const builtin = @import("builtin");
+const errno_fn = if (builtin.os.tag == .linux)
+    struct {
+        extern fn __errno_location() [*c]c_int;
+        fn get() c_int {
+            return __errno_location().*;
+        }
+    }
+else
+    struct {
+        extern fn __error() [*c]c_int;
+        fn get() c_int {
+            return __error().*;
+        }
+    };
+fn errno_() c_int {
+    return errno_fn.get();
+}
 
 
 // Cast an opaque C string pointer to [*c]const u8 for libc calls.

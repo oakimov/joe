@@ -1,190 +1,227 @@
-# Markdown WYSIWYG Enhancement — Task List
+# Markdown rich viewmode — Task List
 
-> **Source:** `plans/markdown-wysiwyg-feasibility.md`
-> **Status:** Phase 1 complete (Features 1.1–1.10). Phase 2 Features 2.1–2.3 complete (core + paragraph spacing). Features 2.4–2.5 deferred (moved to `plans/future-roadmap.md`).
-> **Constraint:** C only, libc only. No external dependencies.
-
----
-
-## Phase 1 — View Mode
-
-Goal: Add a toggle between edit mode and view mode. In view mode, markdown delimiters are hidden and content is rendered with visual formatting. Rewrite `md.jsf` with proper DFA states. Requires C code changes and jsf changes.
-
-### Feature 1.1 — View Mode Infrastructure ✅ COMPLETE
-`[prerequisite for all Phase 1 features]`
-
-- [x] **1.1.1** Add a new boolean field `int viewmode` to the `OPTIONS` struct in `joe/b.h` (line 113)
-- [x] **1.1.2** Add a keybinding in `rc/joerc.in` for toggling view mode → Implemented via ^T M Options menu (`mode,"viewmode",rtn`)
-- [x] **1.1.3** Implement the toggle function: flip `viewmode`, then call repaint to trigger a full redraw → Uses existing `mode` toggle mechanism (`umode()` in `options.c`)
-- [x] **1.1.4** In `bw.c:lgen()`, split into `lgen()` dispatcher + `lgen_core()` rendering engine. `lgen()` checks `bw->o.viewmode` and routes to `lgen_view()` or `lgen_core()`
-- [x] **1.1.5** Create `lgen_view()` that parses the line, builds a `viewmode_hide[]` bitmap of delimiter positions, then delegates rendering to `lgen_core()` with `viewmode_skip_parse` flag
-- [x] **1.1.6** Test: confirm toggle works and view mode hides delimiters. Build successful, no segfaults.
-
-### Feature 1.2 — Markdown Syntax DFA Rewrite ✅ COMPLETE
-`[depends on 1.1]` `[independent within phase]`
-
-- [x] **1.2.1** Define six color classes in `syntax/md.jsf` for heading levels H1–H6: MdH1-MdH6 with gold, sky blue, pale green, plum, khaki, silver colors
-- [x] **1.2.2** Rewrite the heading DFA states in `md.jsf` to detect 1–6 `#` characters at line start and enter the correct color state
-- [x] **1.2.3** Add a DFA state for italic (`*text*` and `_text_`) distinct from bold (`**text**` and `__text__`), using the ITALIC attribute
-- [x] **1.2.4** Add a DFA state for bold+italic (`***text***`), combining BOLD + ITALIC attributes
-- [x] **1.2.5** Add a DFA state for strikethrough (`~~text~~`), using the `stricken` capability flag (see `scrn.c:201-207`)
-- [x] **1.2.6** Assign distinct foreground colors to each inline style so they are visually distinguishable even on terminals that lack italic or strikethrough support
-- [x] **1.2.7** Add DFA states for fenced code blocks: detect opening ` ``` ` and closing ` ``` `, track multi-line state. Apply background color tint to all lines inside the code fence. Detect inline code (`` `code` ``) with distinct background + foreground color
-- [x] **1.2.8** Add DFA state for table separator lines (`|---|---|`) with dim/underline style, header rows with bold + background tint, pipe characters `|` in distinct color
-- [x] **1.2.9** Add DFA states for inline links (`[text](url)`), reference-style links (`[text][ref]`), and image syntax (`![alt](url)`) with distinct highlighting for link text, URL, and delimiters
-- [x] **1.2.10** Add DFA states for blockquote lines (`> text`, `>> text`) with vertical bar indicator color, list markers (`-`, `*`, `1.`) with distinct color, task list checkboxes (`[ ]`, `[x]`) with green/check and red/empty styling
-- [x] **1.2.11** Add markdown-specific color definitions to `colors/*.jcf` files. Ensure graceful degradation on 256-color and 16-color terminals → Updated default.jcf and gruvbox.jcf
-- [x] **1.2.12** Test: open a comprehensive markdown file and verify all constructs render with distinct colors and attributes
-
-### Feature 1.3 — Heading Delimiter Hiding ✅ PARTIAL
-`[depends on 1.1]` `[independent within phase]`
-
-- [x] **1.3.1** In `lgen_view()`, when line starts with 1–6 `#` characters followed by a space, hide all `#` chars and the trailing space by marking them in `viewmode_hide[]` → Rendered as spaces
-- [x] **1.3.2** Apply the heading color/attribute from Feature 1.2 to the remaining heading text → Already applied by syntax DFA via `attr_buf`
-- [x] **1.3.3** Ensure cursor positioning is correct when the user moves the cursor onto a heading line (the cursor should map to the correct buffer position even though fewer cells are displayed) → Column mapping implemented in `lgen_view()`
-- [x] **1.3.4** Test: toggle view mode on a file with headings of all six levels; verify `#` marks are hidden and text is colored correctly → 6 tests (h1–h6) passing
-
-### Feature 1.4 — Inline Style Delimiter Hiding ✅ COMPLETE
-`[depends on 1.1]` `[independent within phase]`
-
-- [x] **1.4.1** In `lgen_view()`, when `**` or `__` delimiters are found, hide opening and closing pairs via `viewmode_hide[]` → Bold visual attribute already applied by syntax DFA
-- [x] **1.4.2** When `*` or `_` single delimiters are found, hide opening and closing → Italic attribute already applied by syntax DFA
-- [x] **1.4.3** When `~~` delimiters are found, hide opening and closing → Strikethrough attribute already applied by syntax DFA
-- [x] **1.4.4** Handle bold+italic (`***`) — `***text***` and `___text___` now properly detected, colored with MdBoldItalic class, and all 3 delimiter chars hidden on both opening and closing
-- [x] **1.4.5** Emphasis processing now respects code spans (delimiters inside backticks are not hidden) and handles nested styles correctly (e.g., `**bold *italic* bold**`)
-- [x] **1.4.6** Cursor movement maps displayed positions to buffer positions when delimiters are hidden → Column mapping implemented in `lgen_view()` and `bwgen()`
-- [x] **1.4.7** Test: 123 tests in `tests/viewmode.py` covering all Phase 1 features and Feature 2.1 — headings (H1-H6), bold/italic/strikethrough/bold+italic, code spans, fenced code blocks, links, blockquotes, lists, horizontal rules, file integrity, nested styles, emphasis inside code spans, mdtest.md-based constructs, and box-drawing tables
-
-### Feature 1.5 — Code Block Rendering in View Mode ✅ COMPLETE
-`[depends on 1.1]` `[independent within phase]`
-
-- [x] **1.5.1** In `lgen_view()`, detect fenced code block boundaries (the ` ``` ` lines) and skip rendering the fence delimiters → Fence markers hidden, language identifier visible
-- [x] **1.5.2** Apply the background color tint to code block content lines → Already applied by syntax DFA for fenced code
-- [x] **1.5.3** Detect the optional language identifier after opening fence (e.g., ` ```python `) and display it visible in dim `MdCodeFence` color → Fence markers (```/~~~) hidden, language identifier remains visible with dim styling
-- [x] **1.5.4** For inline code (`` `code` ``), hide the backtick delimiters via `viewmode_hide[]` → Background tint already applied by syntax DFA
-- [x] **1.5.5** Test: 5 tests in `tests/viewmode.py` — fenced code with backticks, tildes, language identifiers (python, javascript), trailing spaces, closing fences
-
-### Feature 1.6 — Link Rendering with OSC 8 ✅ COMPLETE
-`[depends on 1.1]` `[independent within phase]`
-
-- [x] **1.6.1** In `lgen_view()`, when `[text](url)` is detected, hide `[`, `](`, and `)` delimiters via `viewmode_hide[]`
-- [x] **1.6.2** Use `OUT_osc8`/`END_osc8` macros to emit clickable hyperlink for the link text portion → Added `out_osc8_link()`/`end_osc8_link()` functions that emit OSC 8 sequences around link text in `lgen_core()`
-- [x] **1.6.3** Apply underline + blue foreground to the link text → Modified `attr_buf` in `lgen_view()` to add `UNDERLINE` and `FG_BLUE` for link text positions
-- [x] **1.6.4** Handle reference-style links: `[text][ref]` delimiters hidden, ref stored as URL for OSC 8
-- [x] **1.6.5** Test: 5 tests in `tests/viewmode.py` — inline links, links at start, multiple links, reference-style links, links with titles
-
-### Feature 1.7 — Blockquote and List Rendering in View Mode
-
-- [x] **1.7.1** In `lgen_view()`, hide `>` characters and following space via `viewmode_hide[]`
-- [x] **1.7.2** For nested blockquotes, render multiple vertical bars with progressive indentation → `>` substituted with `│` (U+2502), nested `>>` becomes `││`
-- [x] **1.7.3** List markers (* - +) at line start are preserved (not hidden as emphasis)
-- [x] **1.7.4** Replace `[ ]` with `☐` (U+2610) and `[x]` with `☑` (U+2611) for task lists
-- [x] **1.7.5** Test: verify blockquotes show vertical bars, lists show bullets, and task checkboxes render as box characters → 123 tests passing
-
-### Feature 1.8 — Horizontal Rule Substitution
-
-- [x] **1.8.1** In `lgen_view()`, detect horizontal rules (3+ `-`, `*`, or `+` with only spaces) and hide the entire line
-- [x] **1.8.2** Render a full-width Unicode line `──────────────` (U+2500) instead of just hiding → Every character in the rule line is substituted with `─`
-- [x] **1.8.3** Test: verify `---`, `***`, and `+++` all render as horizontal lines in view mode
-
-### Feature 1.9 — Table Highlighting in View Mode
-
-- [x] **1.9.1** In `lgen_view()`, detect table regions (consecutive lines with `|` delimiters) and identify structure (column count, header vs separator vs body rows)
-- [x] **1.9.2** Highlight table header rows with bold + background tint
-- [x] **1.9.3** Apply alternating background tints to body rows (odd/even)
-- [x] **1.9.4** Handle alignment indicators (`:---`, `:---:`, `---:`) — render them in a dim color
-- [x] **1.9.5** Test: render a 4-column table with header, separator, and 5+ body rows; verify distinct header/body styling and alternating row colors
-
-### Feature 1.10 — Cursor Position Mapping
-
-- [x] **1.10.1** Implement a display-to-buffer position mapping that accounts for hidden delimiters and substituted characters → `viewmode_col_map[]` built in `lgen_view()`
-- [x] **1.10.2** When the user moves the cursor in view mode, translate the displayed column position to the correct buffer offset → `xcol` updated in `lgen_view()` and `bwgen()`
-- [x] **1.10.3** When the user types in view mode, insert at the correct buffer position (not the displayed position) → Buffer position unchanged, only display column mapping
-- [x] **1.10.4** Consider: should editing be allowed in view mode? If yes, the mapping must be bidirectional. If no, make view mode read-only and display a message on keypress → Editing works at buffer position; display column mapping is for visual cursor placement only
-- [x] **1.10.5** Test: navigate through a file with headings, bold, italic, links, and code in view mode; verify cursor position is always correct; test basic typing if editing is enabled → 7 cursor tests added
+> **Branch:** work on **`markdown`** (synced from `zig-rewrite`).
+> **Source:** `plans/markdown-wysiwyg-feasibility.md` (OpenCode-style plan; Zig Path A)
+> **Status:** Phase 1–2 baseline **shipped**. Active work = Phases 1–7 below (Phase 0 done).
+> **Constraint:** Self-contained Zig — borrow ideas from koino/MD4C/OpenCode; **no** vendored markdown libs.
+> **Reference checkout:** `~/Projects/opencode-research` — see plan §2 for exact file paths.
+> **Deferred:** nested fence HL + images → `plans/future-roadmap.md` (2.5 / 2.6)
 
 ---
 
-## Phase 2 — Advanced Rendering
+## Read first
 
-Goal: Full visual polish — Unicode table borders, nested syntax highlighting in code blocks, paragraph spacing, image rendering.
+Three facts that change how you implement this. Full detail in the plan.
 
-### Feature 2.1 — Unicode Box-Drawing Table Borders ✅ COMPLETE
-`[depends on 1.1]` `[independent within phase]`
-
-- [x] **2.1.1** Add a table detection pass: in `lgen_view()`, when a table region is detected (consecutive lines with `|` delimiters), identify the structure (column count, column widths, header row, separator row, body rows) → Scan-ahead up to 200 lines, caches region boundaries, invalidates on buffer change
-- [x] **2.1.2** Replace the first row's leading `|` with `┌`, internal `|` with `┬`, trailing `|` with `┐` → Via `viewmode_substitute[]`
-- [x] **2.1.3** Replace the separator row (`|---|---|`) with `├───┼───┤` → Pipes → ├/┼/┤, dashes/colons → ─
-- [x] **2.1.4** Replace body row `|` characters with `│` → Via `viewmode_substitute[]`
-- [x] **2.1.5** Replace the last row's `|` with `└`, `┴`, `┘` → Via `viewmode_substitute[]`
-- [x] **2.1.6** Apply BOLD + background tint to header row cells → BOLD attribute applied to entire header row
-- [x] **2.1.7** Apply alternating background tints to body rows (odd/even) → BOLD applied to all non-separator rows (header/body/last)
-- [x] **2.1.8** Handle alignment indicators (`:---`, `:---:`, `---:`) — strip them from display but remember alignment for future cell padding → Colons and dashes in separator row replaced with ─
-- [x] **2.1.9** Test: render a 4-column table with header, separator, and 5+ body rows; verify complete box-drawing border and alternating row colors → 123 tests passing (6 new table tests added)
-
-### Feature 2.2 — Full Table Layout Engine (terminal-grade rendering) ✅ PARTIAL
-`[depends on 1.1, 1.9, 2.1, 1.10]` `[independent within phase]`
-
-- [x] **2.2.1** Build a table layout pass in `lgen_view()` that parses each table row into logical cells, splitting on `|` and trimming leading/trailing whitespace from cell content. Cell boundaries stored in `cells[]` struct with display width computed via `joe_wcwidth`. Escaped pipes and inline markdown within cells deferred.
-- [x] **2.2.2** Table scan extended to compute per-column max display width using `joe_wcwidth` across all rows in the region. Widths cached in `table_col_width[]` array (max 64 columns), recomputed on cache invalidation.
-- [x] **2.2.3** `render_padded_table_row()` writes directly to screen buffer via `outatr()`, bypassing `lgen_core` since padded output can exceed buffer line length. Each cell rendered as `│` + 1-space pad + content + alignment-padding + 1-space pad. Content width clamped to column width; extra whitespace distributed per alignment rule.
-- [x] **2.2.4** Separator row scanning detects alignment markers (`:---` → left, `:---:` → center, `---:` → right) and stores in `table_col_align[]`. Applied during cell rendering: left-aligned (default), center (even split of padding on both sides), right-aligned (padding on left).
-- [ ] **2.2.5** Handle narrow terminals: basic clipping implemented (`total_width` capped at `w - x`), but no wrapping or horizontal scroll fallback.
-- [ ] **2.2.6** Support multiline/wrapped cell rendering with row height expansion so wrapped lines remain inside their column boundaries — not yet implemented.
-- [x] **2.2.7** `render_padded_table_row()` now builds `viewmode_col_map[]` mapping buffer byte positions to their correct display columns. Each pipe maps to the border `│` position, each content byte maps to its display column (tracked through UTF-8 decoding + `joe_wcwidth`), and trailing whitespace within cells maps to the end of the content display area. The cursor update code in `lgen_view()` runs for all rows (both regular and table-rendered), using the map to set `bw->cursor->xcol`. Test added verifying cursor movement on a padded table row does not modify the file.
-- [x] **2.2.8** Test: 7 new tests added covering padded columns, alignment (left/center/right), varying column widths, single-column table, two-table separation, and cursor positioning. 192 tests total, all passing. No regressions when view mode is off.
-
-### Feature 2.3 — Smart Paragraph Spacing in View Mode
-`[depends on 1.1]` `[independent within phase]`
-
-- [ ] **2.3.1** In `lgen_view()`, detect blank lines between paragraphs and render them as a visual gap (optionally add a faint separator line)
-- [ ] **2.3.2** Detect tight line breaks (two spaces at end of line followed by newline) and render as a continuation without visual gap
-- [ ] **2.3.3** Add vertical padding above headings by rendering an extra blank line before H1/H2 headings (cosmetic, buffer unchanged)
-- [ ] **2.3.4** Test: verify paragraph spacing, tight line breaks, and heading padding all render correctly in view mode
+1. **`hide` currently paints a space, not zero width** (`src/render/view.zig:568`). Conceal must
+   *collapse*. Plan §4.
+2. **JOE conceals link destinations — a deliberate deviation from OpenCode.** `[a](u)` → `a`.
+   OpenCode renders `a (u)`; we don't. Autolinks and bare URLs stay visible (no label to fall
+   back on). `^T A` to edit mode shows the source. Plan §3.2.
+3. **62 of 125 `tests/viewmode.py` tests encode the space-padded layout** and must be rewritten in
+   the Phase 1 commit. Link tests change again in Phase 2. Plan §4.3.
 
 ---
 
-## Cross-Cutting Concerns
+## Completed baseline (archive)
 
-### Testing and Validation
-`[ongoing]`
+Shipped on the Zig paint path (`src/bw_lgen.zig`, `src/render/{view,table,lgen}.zig`,
+`syntax/md.jsf`, `colors/*.jcf`, `^T A` viewmode). Do not re-implement.
 
-- [x] **T.1** Create a comprehensive test markdown file (`mdtest.md`) containing all supported constructs: headings (H1–H6), bold, italic, bold+italic, strikethrough, inline code, fenced code blocks (with and without language), tables, links (inline, reference, autolink), images, blockquotes (nested), ordered lists, unordered lists, task lists, horizontal rules, tight/loose paragraphs → Created as `mdtest.md`. Automated tests in `tests/viewmode.py` with 123 tests covering all Phase 1 features and Feature 2.1 box-drawing tables.
-- [ ] **T.2** Test on `TERM=xterm` (16-color)
-- [ ] **T.3** Test on `TERM=xterm-256color` (256-color)
-- [ ] **T.4** Test on `TERM=xterm-direct` (truecolor)
-- [ ] **T.5** Test on at least 3 terminal emulators: xterm, Kitty or iTerm2, GNOME Terminal or VTE-based
-- [ ] **T.6** Test with `JOETERM=xterm` override to verify fallback paths
-- [ ] **T.7** Performance test: open a 10,000-line markdown file and verify no noticeable lag in both edit and view mode
+| Area | Done |
+|---|---|
+| Viewmode toggle + hide/subst/`col_map` | yes |
+| ATX headings, emphasis, strike, inline/fenced code | yes |
+| Blockquotes, lists, tasks, HR | yes |
+| OSC 8 **emit** on link text | yes |
+| Unicode padded tables (2.1 + most of 2.2) | yes |
+| Cursor mapping / buffer integrity soak | yes |
 
-### Documentation
-`[ongoing]`
+**Closed as out-of-scope** (plan §5 — they change row count, which breaks
+`buf_line = top_line + y - win_y`):
 
-- [ ] **D.1** Add a `docs/markdown-view-mode.md` documenting the feature, keybinding, and what is supported
-- [ ] **D.2** Update `MAN.md` or equivalent man page with view mode documentation
-- [ ] **D.3** Add comments in `md.jsf` explaining the DFA state machine structure (for future maintainers)
+- ~~2.2.6 Multiline wrapped table cells~~
+- ~~2.3.* Smart paragraph spacing~~
+
+Still open, still in scope:
+
+- [ ] **2.2.5** Narrow-terminal table wrap / horizontal-scroll fallback
 
 ---
 
-## Execution Notes for LLM Agents
+## Phase 0 — Spec freeze ✅
 
-1. **Always read before editing.** Before modifying any file, read the current version in full to understand existing structure.
-2. **Start with Feature 1.1** (view mode infrastructure) — it is the prerequisite for everything else.
-3. **Feature 1.2** (DFA rewrite) can be done in parallel with Features 1.3–1.9 but must be complete before Phase 2.
-4. **Features 1.3–1.9** are independent of each other within Phase 1. They all depend on Feature 1.1.
-5. **Feature 1.10** (cursor mapping) is the critical last step of Phase 1 — it must come after all other view mode features.
-6. **Phase 2 features** are all independent and optional polish.
-7. **Test incrementally.** After each feature, run the test items listed for that feature before moving on.
-8. **Preserve existing behavior.** When `view_mode` is off, rendering must be identical to the current version. Verify this with a diff of screenshot/output before and after changes.
-9. **Key files reference:**
-   - `syntax/md.jsf` — Markdown syntax DFA definition
-   - `joe/bw.c` — Buffer window rendering (contains `lgen()`, `outatr()`, `OUT_osc8`/`END_osc8`)
-   - `joe/bw.h` — Buffer window types (`struct bw`)
-   - `joe/scrn.c` — Screen attribute handling (contains `set_attr()`, truecolor support)
-   - `joe/scrn.h` — Screen types (attribute flags, `struct scrn`)
-   - `joe/lattr.c` — Line attribute cache
-   - `joe/syntax.c` — Syntax DFA interpreter
-   - `joe/syntax.h` — Syntax types (`struct high_state`, `struct high_cmd`, `struct high_syntax`)
-   - `colors/*.jcf` — Color scheme files
-   - `rc/joerc.in` — Keybinding and configuration
-   - `rc/ftyperc` — Filetype associations (markdown registered at lines 703-707)
+- [x] **0.1** OpenCode token/attr matrix verified against the reference checkout (plan §2, §6)
+- [x] **0.2** `Md*` inventory vs target tokens, incl. the 7 schemes with no markdown tokens (§6.1)
+- [x] **0.3** Conceal semantics transcribed from the tree-sitter queries (§3.1)
+- [x] **0.4** Link-conceal decision corrected to match OpenCode (§3.2)
+- [x] **0.5** Line-grid constraint decided — no block margins, no dropped lines (§5)
+
+---
+
+## Phase 1 — Zero-width conceal (foundation)
+
+Ship alone. No style changes in this commit.
+
+- [ ] **1.0a** Add fence statics (`vm_fence_region_start` / `_end` / `_cached_for_line` /
+      `_no_region_line` / `_char` / `_len`) next to the table statics at `src/bw_lgen.zig:1227`;
+      reset them in `zig_bw_vm_prepare` when `vm_last_bw` changes
+- [ ] **1.0b** Add `zig_bw_fence_detect`, shaped like `zig_bw_table_detect` — backward scan over
+      the `P` pointer, `±10`-line window, positive **and** negative caching
+- [ ] **1.0c** Wire into `zig_bw_lgen_view` between steps 1 and 2: delimiter line → keep marker
+      conceal; **body** → skip `zig_bw_view_line_start`, `_table_hl`, `_inline`, build `col_map`
+      from raw bytes, return
+- [ ] **1.0d** Indented (4-space) code blocks — early bail in `zig_bw_view_line_start`, no region
+      scan needed
+
+      *Verified bug (plan §4.2.1): inside a ```python fence, `# c` → `  c`, `a ** b` → `a    b`,
+      `---` → `───`. **Must land before or with 1.2** — collapse turns a cosmetic misalignment
+      into deleted characters.*
+- [ ] **1.1** Add the column-identity unit test **first** (painted column == `col_map[byte]`) so it
+      fails before the change and passes after
+- [ ] **1.2** `src/render/lgen.zig` — in the `lgenLine` loop (~L344-366), skip hidden bytes without
+      advancing `sx`; drop the `' '` branch from `resolveCp` (keep `substitute`)
+- [ ] **1.3** `src/bw_lgen.zig` — recompute `applyLinearMarkInverse` (~L2728) and
+      `applySquareMarkInverse` (~L2844) against collapsed display columns
+- [ ] **1.4** Verify horizontal scroll (`scr` / `bw->offset`) on long concealed lines
+- [ ] **1.5** Cursor semantics per plan R5: forward skip already exists in `zig_bw_view_finish`
+      (`src/bw_lgen.zig:860`); **add the backward case**, clamp at end of line, column 0 for a
+      fully concealed line
+- [ ] **1.5b** Round-trip test: left-then-right across a concealed span returns to the same byte
+      (the two skip directions must agree)
+- [ ] **1.6** Rewrite the 62 space-padded assertions in `tests/viewmode.py`
+- [ ] **1.7** Add paired edit-mode assertions pinning source byte-fidelity
+- [ ] **1.8** Update the soak count in `AGENTS.md` (currently 197)
+- [ ] **1.8b** Soak: markdown-ish content inside a fenced body stays byte-exact on screen
+      (`# c`, `a ** b`, `---`, `[a](u)`) — currently untested; every existing fence test uses a
+      body with no markdown characters
+- [ ] **1.9** Fix the stale header comment in `src/render/view.zig:7` ("not wired into live joe" —
+      it is; `zig_bw_view_line_start` calls it)
+
+---
+
+## Phase 2 — Conceal coverage + link destinations
+
+Target = plan §3.1 "JOE result" column, with the §3.2 deviation.
+
+- [ ] **2.1** Inline `[a](u)` → `a`: conceal `[`, `]`, `(`, destination, `)`
+- [ ] **2.2** Inline with title `[a](u "T")` → `a`: conceal the title too
+- [ ] **2.3** Reference `[a][r]` → `a` (conceal `[`, `]`, and the label)
+- [ ] **2.4** Collapsed `[a][]` and shortcut `[a]` → `a`
+- [ ] **2.5** Image `![alt](u)` → `alt` only (no image chrome; roadmap 2.6)
+- [ ] **2.6** Autolinks `<u>` and bare URLs stay **visible** — the deliberate exception; add a
+      negative test so a later refactor can't quietly conceal them
+- [ ] **2.7** HTML entities: `&nbsp;`/`&ensp;`/`&emsp;`→`" "`, `&lt;`→`<`, `&gt;`→`>`,
+      `&amp;`→`&`, `&quot;`→`"`
+- [ ] **2.8** List markers: normalise `*`/`+`/`-` → `-`
+- [ ] **2.9** ~~Ordered marker right-alignment~~ — **dropped** (plan R6). Left-align as authored;
+      no list-extent region. Unordered `-` normalisation (2.8) still applies
+- [ ] **2.10** Attach `link_url` / OSC 8 to the surviving label cells (URL cells no longer exist)
+- [ ] **2.11** Soak fixtures for each of the above at collapsed positions, including an explicit
+      "screen does not contain the URL" assertion for 2.1–2.5, and a paired edit-mode assertion
+      that the same fixture still shows the URL
+
+---
+
+## Phase 3 — OpenCode style mapping
+
+- [ ] **3.1** `syntax/md.jsf` — six state retargets per plan R4: `:ordered_list` and
+      `:ordered_mark` → `MdListEnum`; `:image_url` → `MdImageUrl`; `:idle`, `:line_start`,
+      `:list_content` → `MdText`. `MdConceal` is **not** needed (table grid uses the existing
+      `MdTableSeparator`)
+- [ ] **3.2** Expand the plan §6.2.1 template with §6.2.2 values into **all 9** `colors/*.jcf`,
+      **both** `.colors` sections each (`default` 16-only, `xoria` 256-only, `solarized` uses
+      `.set` names so one text works for both). Rewrite the existing `default`/`gruvbox` blocks
+      from the template rather than patching them
+- [ ] **3.2b** Optional: try `=MdCode +String bold` on one line — if the parser accepts a `+Ref`
+      chain plus a spec (plan §6.2.3, unverified), collapse the block to inheritance
+- [ ] **3.3** View attrs: H1 bold+underline; H2–H6 bold; strong bold; emph italic; quote italic;
+      link label and URL underlined
+- [ ] **3.4** Exact colors per plan §6 (note `markdownLink` `#fab283` and
+      `markdownListEnumeration` `#56b6c2`, both missing from the old matrix)
+- [ ] **3.5** Edit mode: all source visible; soft-align highlight to the same palette
+- [ ] **3.6** Degradation check: truecolor → 256 → 16 → attributes, every `Md*` legible at 16
+- [ ] **3.7** Visual check against OpenCode default dark side by side
+
+---
+
+## Phase 4 — In-tree `md_event` layer
+
+- [ ] **4.1** Add `src/render/md_event.zig` with MD4C-shaped enter/leave block/span/text callbacks
+- [ ] **4.2** Node taxonomy (koino-inspired): Heading, Emph, Strong, Strike, Code, CodeBlock, Link,
+      List/Item/Task, BlockQuote, HR, Table/*, Text, breaks; **ignore Image**
+- [ ] **4.3** Sink events into existing `ViewTables` + attr overrides (no HTML backend)
+- [ ] **4.4** Migrate `applyEmphasis` (`src/render/view.zig:301`, ~140 lines of unrolled delimiter
+      cases) to events; add CommonMark flanking rules
+- [ ] **4.5** Migrate remaining `view.zig` scanners where it fixes nesting/autolink
+- [ ] **4.6** Unit tests for events → tables; keep `table.zig` as layout backend
+- [ ] **4.7** Wire through `bw_lgen` view entry; full viewmode soak green
+
+---
+
+## Phase 5 — Clickable links (OSC 8 + mouse open)
+
+- [ ] **5.1** Harden OSC 8 emit on concealed labels (C0/C1 strip exists at
+      `src/terminal/screen.zig:1438`)
+- [ ] **5.2** Hit-test display cell → buffer byte → URL using the collapsed `col_map`
+- [ ] **5.2b** Reference-link definitions per plan R2: **no cache**. OSC 8 on paint covers inline
+      links only; on *click*, scan the buffer once for `^[ \t]{0,3}\[<label>\]:[ \t]*<dest>`
+      (label match case-insensitive). Conceal already works without this
+- [ ] **5.3** Hook `udefmup` (`src/mouse.zig:1246`); simple click = `mouseup` with `selecting == 0`
+- [ ] **5.4** Open via `execlp` + argv — **never** `/bin/sh -c` with the URL interpolated
+      (injection: `[x](http://a;rm -rf ~)`); precedent at `src/ublock.zig:1323`
+- [ ] **5.5** Scheme allowlist: `http`, `https`, `mailto`, `file` — reject everything else
+- [ ] **5.6** macOS `open` / Linux `xdg-open`; fork + `_exit` on failure, never block the editor
+- [ ] **5.7** Do not steal selection drag, right-click paste (`udefm3up`), or wheel
+- [ ] **5.8** Optional rc/help note (click + terminal Cmd/Ctrl-click)
+- [ ] **5.9** Unit-test hit-test and scheme rejection; soak or hook for open if practical
+
+---
+
+## Phase 6 — Scoped CM/GFM gaps
+
+- [ ] **6.1** Autolinks / bare URLs: detect and attach OSC 8 + click. Text stays the URL itself —
+      conceal does not apply (task 2.6)
+- [ ] **6.2** Setext headings (both lines visible, heading-styled — matches OpenCode)
+- [ ] **6.3** Table header cells styled `markup.heading` (bold + heading color)
+- [ ] **6.4** Table pipes / delimiter row muted (`punctuation.special`)
+
+**Out of scope here:** images, footnotes, raw HTML, math, nested fence language HL (roadmap 2.5),
+block margins, dropped fence lines, wrapped table cells (plan §5).
+
+---
+
+## Phase 7 — Docs & gate
+
+- [ ] **7.1** Keep plan + this TODO aligned with code
+- [ ] **7.2** User-facing note (help and/or `docs/`) for viewmode + clickable links
+- [ ] **7.3** Document the deliberate deviations from OpenCode so they read as choices — the full
+      list is in the plan appendix (link conceal §3.2, line grid §5). Note that viewmode hides
+      link URLs and `^T A` shows the source
+- [ ] **7.4** `cp -f zig-out/bin/joe joe/joe && ./runtests` green at the updated count
+
+---
+
+## Cross-cutting (still open)
+
+- [ ] **T.2–T.6** Multi-TERM / multi-emulator checks (16 / 256 / truecolor)
+- [ ] **T.7** Large-file viewmode performance smoke (≈10k lines)
+- [ ] **D.3** Maintain comments on `md.jsf` DFA for edit-mode highlight
+
+---
+
+## Execution notes for agents
+
+1. Read `plans/markdown-wysiwyg-feasibility.md` before coding — especially §3 (conceal
+   semantics), §4 (the space-padding gap), and §5 (line-grid constraint).
+2. **Phase 1 is a prerequisite for everything visual.** Do not start Phase 3 styling before
+   conceal collapses; you would be tuning colors on a layout that is about to change.
+3. Reuse `ViewTables`, `table.zig`, OSC 8 emit, and soak tests — extend, don't fork a second
+   paint path.
+4. When `viewmode` is off, rendering must stay source-faithful (edit highlight only).
+5. **Key files:** `src/render/lgen.zig`, `src/render/view.zig`, `src/render/table.zig`,
+   `src/bw_lgen.zig`, `src/mouse.zig`, `syntax/md.jsf`, `colors/*.jcf` (all 9),
+   `tests/viewmode.py`, `rc/joerc.in`.
+6. No new dependency in `build.zig` for markdown parsing.
+7. Verify OpenCode claims against `~/Projects/opencode-research` rather than trusting this doc —
+   the reference moves.

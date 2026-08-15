@@ -8,14 +8,24 @@ sources are Zig under `src/`, exporting the historical JOE C ABI so behavior and
 the Python soak suite stay intact.
 
 **Repository:** https://github.com/oakimov/joe (fork of joe-editor/joe)  
-**Current branch:** `zig-rewrite`  
 **Architecture plan:** `plans/zig-rewrite-architecture.md`  
 **Install (Zig):** see top of `INSTALL.md`
 
-Markdown viewmode (Phase 1–2 features) is **already landed** in the live Zig
-paint path (`src/bw_lgen.zig` + `src/render/`). Markdown task history lives in
-`plans/TODO.md` / `plans/markdown-wysiwyg-feasibility.md` (historical C-era
-notes — do not treat “C only” there as current build law).
+### Branches
+
+| Branch | Role |
+|---|---|
+| `zig-rewrite` | Zig Path A port — the live editor baseline |
+| **`markdown`** | **Markdown rich viewmode work happens here.** Synced with `zig-rewrite`; the markdown plan lives on this branch |
+
+`markdown` was the original (C-era) viewmode branch, later fast-forwarded onto
+`zig-rewrite`. Rebase or merge it forward from `zig-rewrite` rather than the
+other way round.
+
+Markdown viewmode (Phase 1–2 baseline) is **already landed** in the live Zig
+paint path (`src/bw_lgen.zig` + `src/render/`). Active markdown plan:
+`plans/markdown-wysiwyg-feasibility.md` + `plans/TODO.md` (OpenCode-style rich
+viewmode; self-contained Zig — no vendored markdown libs).
 
 ## Current state (read this first)
 

@@ -148,14 +148,15 @@ pub fn cursorStyleIsInverseOnly(bg_cursor: i32) bool {
 /// Soft-cursor attribute for the caret cell.
 ///
 /// Hardware cursor stays visible (and may blink when idle). `-selection` and
-/// `-cursor` both default to `INVERSE`, so the caret vanishes inside a mark.
-/// For inverse-only `-cursor`, clear inverse + underline (readable hole / bare
-/// underline on blanks). Colored `-cursor` schemes replace attrs.
+/// `-cursor` both default to `INVERSE`, so a hardware block on a marked cell
+/// can vanish (inverse of inverse). For inverse-only `-cursor`, keep the
+/// selection inverse and add underline so the caret is visible *and* soak
+/// tests that walk pyte `reverse` around the caret still see one run.
+/// Colored `-cursor` schemes replace attrs.
 pub fn applySoftCursorAttr(cell: Attribute, bg_cursor: i32, palette: ?[]const i32) Attribute {
     if (cursorStyleIsInverseOnly(bg_cursor)) {
         if (!cell.inverse) return cell;
         var a = cell;
-        a.inverse = false;
         a.underline = true;
         return a;
     }
@@ -168,9 +169,8 @@ pub fn isSoftCursorBlankCp(cp: u21) bool {
 }
 
 /// Soft-cursor cell. Inverse-only `-cursor`: no-op outside selection.
-/// - Text: clear inverse + underline (letter stays readable in the mark).
-/// - Blank: clear inverse + underline on a space — caret is only the underline
-///   (no block glyph) against the surrounding selection inverse.
+/// Inside a mark, keep inverse and add underline (contiguous reverse run).
+/// Blank tabs/empty become a space so the underline has a glyph.
 /// Colored `-cursor`: replace attrs only.
 pub fn applySoftCursorCell(cell: screen.Cell, bg_cursor: i32, palette: ?[]const i32) screen.Cell {
     if (cursorStyleIsInverseOnly(bg_cursor) and !cell.attr.inverse) {
@@ -183,7 +183,6 @@ pub fn applySoftCursorCell(cell: screen.Cell, bg_cursor: i32, palette: ?[]const 
     }
     var out = cell;
     if (isSoftCursorBlankCp(cell.cp)) {
-        // Normalize tabs/empty to space; punch a hole so only underline shows.
         out.cp = ' ';
         out.combine = .{0} ** screen.COMPOSE_MARKS;
     }
@@ -340,10 +339,10 @@ pub fn syncHybridGridToScreen(
 
 // --- tests ---
 
-test "soft cursor clears inverse and underlines selected cell" {
+test "soft cursor keeps inverse and underlines selected cell" {
     const selected = Attribute{ .inverse = true, .bold = true };
     const out = applySoftCursorAttr(selected, Hybrid.INVERSE, null);
-    try testing.expect(!out.inverse);
+    try testing.expect(out.inverse);
     try testing.expect(out.underline);
     try testing.expect(out.bold);
 }
@@ -356,23 +355,23 @@ test "soft cursor leaves normal cell alone for hardware cursor" {
     try testing.expect(Attribute.eql(out, normal));
 }
 
-test "soft cursor blank cell uses underline-only hole inside selection" {
+test "soft cursor blank cell keeps inverse and adds underline inside selection" {
     const selected_space = screen.Cell{ .cp = ' ', .attr = .{ .inverse = true } };
     const out = applySoftCursorCell(selected_space, Hybrid.INVERSE, null);
-    try testing.expect(!out.attr.inverse);
+    try testing.expect(out.attr.inverse);
     try testing.expect(out.attr.underline);
     try testing.expectEqual(@as(u21, ' '), out.cp);
     try testing.expect(softCursorApplied(selected_space, out));
 
     const selected_tab = screen.Cell{ .cp = '\t', .attr = .{ .inverse = true } };
     const out_tab = applySoftCursorCell(selected_tab, Hybrid.INVERSE, null);
-    try testing.expect(!out_tab.attr.inverse);
+    try testing.expect(out_tab.attr.inverse);
     try testing.expect(out_tab.attr.underline);
     try testing.expectEqual(@as(u21, ' '), out_tab.cp);
 
     const selected_letter = screen.Cell{ .cp = 'a', .attr = .{ .inverse = true } };
     const out_letter = applySoftCursorCell(selected_letter, Hybrid.INVERSE, null);
-    try testing.expect(!out_letter.attr.inverse);
+    try testing.expect(out_letter.attr.inverse);
     try testing.expect(out_letter.attr.underline);
     try testing.expectEqual(@as(u21, 'a'), out_letter.cp);
     try testing.expect(softCursorApplied(selected_letter, out_letter));
@@ -387,7 +386,7 @@ test "soft cursor blank cell uses underline-only hole inside selection" {
 test "soft cursor keeps glyph on non-blank selected cell" {
     const letter = screen.Cell{ .cp = 'a', .attr = .{ .inverse = true } };
     const out = applySoftCursorCell(letter, Hybrid.INVERSE, null);
-    try testing.expect(!out.attr.inverse);
+    try testing.expect(out.attr.inverse);
     try testing.expectEqual(@as(u21, 'a'), out.cp);
 }
 

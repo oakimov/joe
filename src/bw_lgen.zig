@@ -408,7 +408,12 @@ pub export fn zig_bw_bwfllwt(
         const origin = zig_c_bw_bof(top) orelse return -1;
         const newtop = pdup(origin, "zig_bw_bwfllwt") orelse return -1;
         zig_c_bw_pline(newtop, target);
-        zig_c_bw_nscrldn(t, win_y, win_y + win_h, win_h);
+        const delta = top_line - zig_c_bw_pline_no(newtop);
+        if (delta > 0 and delta < win_h) {
+            zig_c_bw_nscrldn(t, win_y, win_y + win_h, @intCast(delta));
+        } else {
+            zig_c_bw_msetI(updtab.? + @as(usize, @intCast(win_y)), 1, win_h);
+        }
         zig_c_bw_pset(top, newtop);
         prm(newtop);
     } else if (cur_line >= top_line + win_h) {
@@ -419,7 +424,12 @@ pub export fn zig_bw_bwfllwt(
         const origin = zig_c_bw_bof(top) orelse return -1;
         const newtop = pdup(origin, "zig_bw_bwfllwt") orelse return -1;
         zig_c_bw_pline(newtop, target);
-        zig_c_bw_nscrldn(t, win_y, win_y + win_h, win_h);
+        const delta = zig_c_bw_pline_no(newtop) - top_line;
+        if (delta > 0 and delta < win_h) {
+            zig_c_bw_nscrlup(t, win_y, win_y + win_h, @intCast(delta));
+        } else {
+            zig_c_bw_msetI(updtab.? + @as(usize, @intCast(win_y)), 1, win_h);
+        }
         zig_c_bw_pset(top, newtop);
         prm(newtop);
     }
@@ -1912,26 +1922,27 @@ fn zig_c_bw_gennum(
     const cur = bw.cursor orelse pathAAbort("Path A: zig_bw_gennum -1\n");
     const lin = top.line + y - bw.y;
     const atr: c_int = if (bw.o.hiline != 0 and lin == cur.line) bg_curlinum else bg_linum;
-    if (bw.lincols > 0) {
-        const b = bw.b orelse pathAAbort("Path A: zig_bw_gennum -1\n");
-        const eof_line = if (b.eof) |e| e.line else @as(i64, -1);
-        const have_number: c_int = if (lin <= eof_line) 1 else 0;
-        const line_1based: i64 = if (have_number != 0) lin + 1 else 0;
-        const charmap: ?*Charmap = @ptrCast(b.o.charmap);
-        const z = zig_bw_gennum(
-            t,
-            y,
-            screen,
-            attr_row,
-            compose,
-            bw.lincols,
-            have_number,
-            line_1based,
-            atr,
-            charmap,
-        );
-        if (z >= 0) return;
-    }
+    // C `gennum` is a no-op when the gutter is still 0 (`disptw` skips
+    // `calclincols` while typeahead is pending). Do not abort.
+    if (bw.lincols <= 0) return;
+    const b = bw.b orelse pathAAbort("Path A: zig_bw_gennum -1\n");
+    const eof_line = if (b.eof) |e| e.line else @as(i64, -1);
+    const have_number: c_int = if (lin <= eof_line) 1 else 0;
+    const line_1based: i64 = if (have_number != 0) lin + 1 else 0;
+    const charmap: ?*Charmap = @ptrCast(b.o.charmap);
+    const z = zig_bw_gennum(
+        t,
+        y,
+        screen,
+        attr_row,
+        compose,
+        bw.lincols,
+        have_number,
+        line_1based,
+        atr,
+        charmap,
+    );
+    if (z >= 0) return;
     pathAAbort("Path A: zig_bw_gennum -1\n");
 }
 /// JOE `bwgen` paint loops → Zig `bwGetto` / `lgen` / `gennum`.

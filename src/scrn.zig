@@ -1831,9 +1831,9 @@ pub export fn nopen(arg_cap_1: [*c]CAP) [*c]SCRN {
     // next paint only rewrites dirty rows). Always take JOE's "can't scroll"
     // path: dirty the region and rewrite.
     t.*.scroll = 0;
-    if (tty_baud < @as(c_long, 38400)) {
-        opt_mid = 1;
-    }
+    // Do not force `-mid` here. Classic JOE does that below 38400 baud to skip
+    // serial-line scrolling; with hardware scroll off it only recenters the
+    // caret (macOS ptys report 9600, which failed `test_bof_tw`).
     if ((((t.*.im != null) or (t.*.ic != null)) or (t.*.IC != null)) and ((t.*.dc != null) or (t.*.DC != null))) {
         t.*.insdel = 1;
     } else {
@@ -3480,7 +3480,7 @@ pub export fn zig_scrn_soft_cursor(arg_t: [*c]SCRN, arg_x: ptrdiff_t, arg_y: ptr
     zigScrnSetHardwareCursorForSoft(soft_active);
     zig_scrn_cursor_maybe_blink();
     if (!soft_active) return;
-    // Idle soft blink: skip emitting the hole so the mark inverse shows through.
+    // Idle soft blink: skip emitting the caret so the mark inverse shows through.
     if (!zigScrnSoftCursorLit()) return;
 
     var tc_pal: terminal.TruecolorPalette = .{};

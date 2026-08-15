@@ -412,89 +412,87 @@ pub export fn help_display(arg_t: [*c]Screen) void {
                                 break;
                             }
                         } else {
+                            // C is `if (*str == '\\') { switch (*++str) { ... continue; } }`
+                            // where `continue` advances the for-x loop. translate-c wrapped
+                            // this in `while (true)` so Zig `continue` restarted the while and
+                            // ate the next help glyph (REGION → EGION, etc.).
                             if (@as(c_int, str.*) == @as(c_int, '\\')) {
-                                while (true) {
-                                    switch (@as(c_int, (blk: {
-                                        const ref = &str;
-                                        ref.* += 1;
-                                        break :blk ref.*;
-                                    }).*)) {
-                                        @as(c_int, '|') => {
-                                            str += 1;
-                                            {
-                                                z = 0;
-                                                while (@as(ptrdiff_t, z) != spanwidth) : (z += 1) {
-                                                    outatr(if (help_is_utf8 != 0) utf8_map else locale_map, t.*.t, @ptrCast(@alignCast(((t.*.t.*.scrn + @as(usize, @bitCast(@as(isize, @intCast(x))))) + @as(usize, @bitCast(@as(isize, @intCast(@as(ptrdiff_t, y) * t.*.w))))) + @as(usize, @bitCast(@as(isize, @intCast(z)))))), ((t.*.t.*.attr + @as(usize, @bitCast(@as(isize, @intCast(x))))) + @as(usize, @bitCast(@as(isize, @intCast(@as(ptrdiff_t, y) * t.*.w))))) + @as(usize, @bitCast(@as(isize, @intCast(z)))), x + z, y, ' ', atr);
-                                                }
-                                            }
-                                            if ((blk: {
-                                                const ref = &spancount;
-                                                const tmp = ref.*;
-                                                ref.* += 1;
-                                                break :blk tmp;
-                                            }) >= spanextra) {
+                                str += 1;
+                                switch (@as(c_int, str.*)) {
+                                    @as(c_int, '|') => {
+                                        str += 1;
+                                        {
+                                            z = 0;
+                                            while (@as(ptrdiff_t, z) != spanwidth) : (z += 1) {
                                                 outatr(if (help_is_utf8 != 0) utf8_map else locale_map, t.*.t, @ptrCast(@alignCast(((t.*.t.*.scrn + @as(usize, @bitCast(@as(isize, @intCast(x))))) + @as(usize, @bitCast(@as(isize, @intCast(@as(ptrdiff_t, y) * t.*.w))))) + @as(usize, @bitCast(@as(isize, @intCast(z)))))), ((t.*.t.*.attr + @as(usize, @bitCast(@as(isize, @intCast(x))))) + @as(usize, @bitCast(@as(isize, @intCast(@as(ptrdiff_t, y) * t.*.w))))) + @as(usize, @bitCast(@as(isize, @intCast(z)))), x + z, y, ' ', atr);
-                                                z += 1;
                                             }
-                                            x += z - @as(c_int, 1);
-                                            continue;
-                                        },
-                                        @as(c_int, 'i'), @as(c_int, 'I') => {
-                                            atr ^= INVERSE;
-                                            atr = (atr & ~((@as(c_int, 1023) << @intCast(BG_SHIFT)) | (@as(c_int, 1023) << @intCast(FG_SHIFT)))) | ((if ((atr & INVERSE) != 0) bg_stalin else bg_menu) & ((@as(c_int, 1023) << @intCast(BG_SHIFT)) | (@as(c_int, 1023) << @intCast(FG_SHIFT))));
-                                            str += 1;
-                                            x -= 1;
-                                            continue;
-                                        },
-                                        @as(c_int, 'u'), @as(c_int, 'U') => {
-                                            atr ^= UNDERLINE;
-                                            str += 1;
-                                            x -= 1;
-                                            continue;
-                                        },
-                                        @as(c_int, 'd'), @as(c_int, 'D') => {
-                                            atr ^= DIM;
-                                            str += 1;
-                                            x -= 1;
-                                            continue;
-                                        },
-                                        @as(c_int, 'b'), @as(c_int, 'B') => {
-                                            atr ^= BOLD;
-                                            str += 1;
-                                            x -= 1;
-                                            continue;
-                                        },
-                                        @as(c_int, 'l'), @as(c_int, 'L') => {
-                                            atr ^= ITALIC;
-                                            str += 1;
-                                            x -= 1;
-                                            continue;
-                                        },
-                                        @as(c_int, 'f'), @as(c_int, 'F') => {
-                                            atr ^= BLINK;
-                                            str += 1;
-                                            x -= 1;
-                                            continue;
-                                        },
-                                        @as(c_int, 'z'), @as(c_int, 'Z') => {
-                                            atr ^= DOUBLE_UNDERLINE;
-                                            str += 1;
-                                            x -= 1;
-                                            continue;
-                                        },
-                                        @as(c_int, 's'), @as(c_int, 'S') => {
-                                            atr ^= CROSSED_OUT;
-                                            str += 1;
-                                            x -= 1;
-                                            continue;
-                                        },
-                                        @as(c_int, 0) => {
-                                            x -= 1;
-                                            continue;
-                                        },
-                                        else => {},
-                                    }
-                                    break;
+                                        }
+                                        if ((blk: {
+                                            const ref = &spancount;
+                                            const tmp = ref.*;
+                                            ref.* += 1;
+                                            break :blk tmp;
+                                        }) >= spanextra) {
+                                            outatr(if (help_is_utf8 != 0) utf8_map else locale_map, t.*.t, @ptrCast(@alignCast(((t.*.t.*.scrn + @as(usize, @bitCast(@as(isize, @intCast(x))))) + @as(usize, @bitCast(@as(isize, @intCast(@as(ptrdiff_t, y) * t.*.w))))) + @as(usize, @bitCast(@as(isize, @intCast(z)))))), ((t.*.t.*.attr + @as(usize, @bitCast(@as(isize, @intCast(x))))) + @as(usize, @bitCast(@as(isize, @intCast(@as(ptrdiff_t, y) * t.*.w))))) + @as(usize, @bitCast(@as(isize, @intCast(z)))), x + z, y, ' ', atr);
+                                            z += 1;
+                                        }
+                                        x += z - @as(c_int, 1);
+                                        continue;
+                                    },
+                                    @as(c_int, 'i'), @as(c_int, 'I') => {
+                                        atr ^= INVERSE;
+                                        atr = (atr & ~((@as(c_int, 1023) << @intCast(BG_SHIFT)) | (@as(c_int, 1023) << @intCast(FG_SHIFT)))) | ((if ((atr & INVERSE) != 0) bg_stalin else bg_menu) & ((@as(c_int, 1023) << @intCast(BG_SHIFT)) | (@as(c_int, 1023) << @intCast(FG_SHIFT))));
+                                        str += 1;
+                                        x -= 1;
+                                        continue;
+                                    },
+                                    @as(c_int, 'u'), @as(c_int, 'U') => {
+                                        atr ^= UNDERLINE;
+                                        str += 1;
+                                        x -= 1;
+                                        continue;
+                                    },
+                                    @as(c_int, 'd'), @as(c_int, 'D') => {
+                                        atr ^= DIM;
+                                        str += 1;
+                                        x -= 1;
+                                        continue;
+                                    },
+                                    @as(c_int, 'b'), @as(c_int, 'B') => {
+                                        atr ^= BOLD;
+                                        str += 1;
+                                        x -= 1;
+                                        continue;
+                                    },
+                                    @as(c_int, 'l'), @as(c_int, 'L') => {
+                                        atr ^= ITALIC;
+                                        str += 1;
+                                        x -= 1;
+                                        continue;
+                                    },
+                                    @as(c_int, 'f'), @as(c_int, 'F') => {
+                                        atr ^= BLINK;
+                                        str += 1;
+                                        x -= 1;
+                                        continue;
+                                    },
+                                    @as(c_int, 'z'), @as(c_int, 'Z') => {
+                                        atr ^= DOUBLE_UNDERLINE;
+                                        str += 1;
+                                        x -= 1;
+                                        continue;
+                                    },
+                                    @as(c_int, 's'), @as(c_int, 'S') => {
+                                        atr ^= CROSSED_OUT;
+                                        str += 1;
+                                        x -= 1;
+                                        continue;
+                                    },
+                                    @as(c_int, 0) => {
+                                        x -= 1;
+                                        continue;
+                                    },
+                                    else => {},
                                 }
                             }
                             len = @divExact(@as(c_long, @bitCast(@intFromPtr(eol) -% @intFromPtr(str))), @sizeOf(u8));

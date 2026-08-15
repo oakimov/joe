@@ -91,7 +91,10 @@ Ship alone. No style changes in this commit.
       (the two skip directions must agree)
 - [ ] **1.6** Rewrite the 62 space-padded assertions in `tests/viewmode.py`
 - [ ] **1.7** Add paired edit-mode assertions pinning source byte-fidelity
-- [ ] **1.8** Update the soak count in `AGENTS.md` (currently 197)
+- [ ] **1.8** `AGENTS.md`: update the soak count (currently 197)
+- [ ] **1.8a** `AGENTS.md:163` says *"Viewmode **hides** markdown delimiters"* — after this phase
+      that is wrong in the exact way §4 is about. Reword to "conceals at zero width". Also drop
+      the phase-numbering warning near the top once the old/new Phase 1 collision is gone
 - [ ] **1.8b** Soak: markdown-ish content inside a fenced body stays byte-exact on screen
       (`# c`, `a ** b`, `---`, `[a](u)`) — currently untested; every existing fence test uses a
       body with no markdown characters

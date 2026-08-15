@@ -738,7 +738,7 @@ is a single-line decision needing no region at all. Recorded as deviation 6 in t
 | `syntax/md.jsf` | Six state retargets (R4): `MdText`, `MdListEnum`, `MdImageUrl` |
 | `colors/*.jcf` (**all 9**) | OpenCode-like tokens |
 | `tests/viewmode.py` | 62 rewritten assertions + conceal/style/click fixtures |
-| `AGENTS.md` | Updated soak count |
+| `AGENTS.md` | Soak count; "hides delimiters" → conceal wording; phase-numbering note |
 | `rc/joerc.in` / help | Optional click hint |
 
 ---

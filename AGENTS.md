@@ -22,10 +22,14 @@ the Python soak suite stay intact.
 `zig-rewrite`. Rebase or merge it forward from `zig-rewrite` rather than the
 other way round.
 
-Markdown viewmode (Phase 1–2 baseline) is **already landed** in the live Zig
-paint path (`src/bw_lgen.zig` + `src/render/`). Active markdown plan:
+An initial markdown viewmode is **already landed** in the live Zig paint path
+(`src/bw_lgen.zig` + `src/render/`). Active markdown plan:
 `plans/markdown-wysiwyg-feasibility.md` + `plans/TODO.md` (OpenCode-style rich
 viewmode; self-contained Zig — no vendored markdown libs).
+
+> **Phase numbers were renumbered.** What shipped is the *old* Phase 1–2 feature
+> set, archived in `plans/TODO.md`. The plan's **current** Phase 1 is zero-width
+> conceal and has **not** started. Do not read "Phase 1 landed" from this file.
 
 ## Current state (read this first)
 

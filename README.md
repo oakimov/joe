@@ -16,7 +16,7 @@
 
 [Download source](https://sourceforge.net/projects/joe-editor/files/)
 
-[Build instructions](INSTALL.md)
+[Build instructions](INSTALL.md) (Zig on `zig-rewrite`; Autoconf for classic C)
 
 [History](docs/history.md)
 

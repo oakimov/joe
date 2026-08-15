@@ -1,6 +1,84 @@
 # Joe's Own Editor Installation Instructions
 
-## Typical Installation
+## Zig build (recommended on `zig-rewrite`)
+
+The live editor on the `zig-rewrite` branch is built with [Zig](https://ziglang.org/)
+(`build.zig`). This replaces `./configure && make && make install` for that tree.
+
+### Requirements
+
+- Zig (same major version the branch is developed with; check `zig version`)
+- **ncurses** (terminfo only) — e.g. `ncurses-dev` / `libncurses-dev` on Linux,
+  or MacPorts/Homebrew ncurses on macOS
+- **libc** (always linked)
+
+macOS and Linux are supported. **Windows native is not** (POSIX TTY/PTY); use
+WSL or another Unix environment.
+
+### Build and install
+
+Dev build (artifacts under `./zig-out/`):
+
+	zig build
+	./zig-out/bin/joe -help
+
+Release install into a prefix (Zig’s analogue of `make install`):
+
+	zig build -Doptimize=ReleaseFast --prefix /usr/local \
+	  -Djoerc=/usr/local/etc/joe/ \
+	  -Djoedata=/usr/local/share/joe/
+
+	# or: sudo zig build -Doptimize=ReleaseFast --prefix /usr/local ...
+
+Layout under the prefix:
+
+	bin/joe
+	etc/joe/                 # rc files, shell helpers
+	share/joe/syntax/
+	share/joe/colors/
+	share/joe/charmaps/
+	share/joe/lang/          # .po catalogs (JOE does not use .mo)
+
+Useful options:
+
+	-Doptimize=ReleaseFast   # or ReleaseSafe / ReleaseSmall / Debug
+	-Djoerc=DIR/             # system rc dir (trailing slash); empty → builtins/XDG
+	-Djoedata=DIR/           # system data dir (trailing slash); empty → builtins/XDG
+	-Dselinux=true           # Linux only: link libselinux
+	-Dgpm=true               # Linux only: console GPM mouse
+	--prefix DIR             # install root (default involves zig-out/)
+
+Other steps: `zig build uninstall`, `zig build run -- file.txt`,
+`zig build terminal-test`, `zig build phase8-verify`.
+
+Optional personality aliases (classic `make install` created these as symlinks):
+
+	ln -s joe /usr/local/bin/jmacs
+	ln -s joe /usr/local/bin/jstar
+	ln -s joe /usr/local/bin/rjoe
+	ln -s joe /usr/local/bin/jpico
+
+Notes:
+
+- With empty `-Djoerc=` / `-Djoedata=` (the default), JOE still runs using
+  **embedded builtins** plus `~/.joe` / XDG config.
+- Man pages are not installed by `zig build` yet; see `docs/man.md`.
+- On Linux, if the linker cannot find ncurses, pass library/include search
+  paths via Zig/clang flags or install the distro `-dev` package. The current
+  `build.zig` also looks under `/opt/local` (MacPorts).
+
+Soak tests (from a built tree):
+
+	cp -f zig-out/bin/joe joe/joe
+	JOE_ZIG_SCREEN_SWAP=0 ./runtests
+
+---
+
+## Typical Installation (Autoconf / C)
+
+The sections below document the historical **C** build (`./configure`,
+`make`, `make install`). Use them when building a classic Automake checkout,
+not the Zig `zig-rewrite` editor binary.
 
 	./configure --prefix=/usr --sysconfdir=/etc
 

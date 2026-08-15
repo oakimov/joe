@@ -3805,7 +3805,7 @@ Resize windows with the mouse: click and hold on a status line dividing two wind
 Select menu entries (such as any completion menu or the \fB^T\fR options menu): click on the menu item to position the cursor on it\. Double\-click on a menu item to select it (same as hitting return with cursor on it)\.
 .
 .IP "\(bu" 4
-If your mouse has a wheel, turning the wheel will scroll the window with the cursor\.
+If your mouse has a wheel, turning it moves the caret like the up/down arrows (tilt or trackpad left/right is left/right arrow)\. The window follows only when the caret would leave the view\. \-mousewheel N sets steps per notch (default 1)\.
 .
 .IP "" 0
 .

@@ -2859,8 +2859,9 @@ Optional related flags:
   disable). The JOE selection highlight stays after copy. Right-click or
   middle-click pastes (JOE block if marked; otherwise OSC 52 clipboard request
   when mouseclip/joexterm is on).
-* `-mousewheel N` — lines scrolled per wheel notch (default 4); rapid notches
-  get light acceleration (up to 3×).
+* `-mousewheel N` — caret steps per wheel notch (1–32, **default 1**). Vertical
+  wheel is the same as up/down arrow; horizontal wheel (tilt or trackpad) is
+  left/right arrow. The window follows only when the caret would leave the view.
 
 When -mouse is set, you can:
 
@@ -2884,8 +2885,9 @@ dividing two windows to move it.
 menu): click on the menu item to position the cursor on it.  Double-click on
 a menu item to select it (same as hitting return with cursor on it).</li>
 
-* If your mouse has a wheel, turning the wheel will scroll the window with
-the cursor.
+* If your mouse has a wheel, turning it moves the caret like the up/down
+arrows. A tilt wheel or trackpad two-finger left/right moves like the
+left/right arrows. The view pans only when the caret would leave the window.
 
 When -mouse is selected, the terminal’s own click-drag selection is replaced
 by JOE’s block selection. For the emulator’s native cut and paste, hold the

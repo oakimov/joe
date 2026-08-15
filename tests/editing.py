@@ -72,3 +72,36 @@ const CCre = /(([a-zA-Z\-]+)\s*(=\s*(("([^"\\]|\\.)*")|([^"\s]+))?))*/;
         self.assertTextAt("MNOP", x=8, y=12)
         self.assertTextAt("ABCD", x=8, y=1)
         self.assertTextAt("ABCD", x=8, y=5)
+
+
+class MouseWheelTests(joefx.JoeTestBase):
+    def _wheel(self, button, x=2, y=2):
+        # Same-axis ticks closer than 16ms are dropped (Ghostty double-tick filter).
+        time.sleep(0.05)
+        self.write("\x1b[<%d;%d;%dM" % (button, x, y))
+
+    def test_wheel_matches_arrows(self):
+        """SGR wheel: vertical = up/down arrow, horizontal = left/right arrow."""
+        self.config.globalopts.mouse = True
+        self.startJoe()
+        self.write("ab")
+        self.rtn()
+        self.write("cd")
+        self.cmd("bof")
+        self.assertCursor(x=0, y=1)
+
+        self._wheel(65)  # down
+        self.assertCursor(x=0, y=2)
+        self._wheel(64, y=3)  # up
+        self.assertCursor(x=0, y=1)
+
+        self._wheel(67)  # right onto 'b'
+        self.assertCursor(x=1, y=1)
+        self._wheel(67)  # right onto newline (JOE rtarw sits on EOL before wrap)
+        self.assertCursor(x=2, y=1)
+        self._wheel(66)  # left back onto 'b'
+        self.assertCursor(x=1, y=1)
+        self._wheel(66)  # left back onto 'a'
+        self.assertCursor(x=0, y=1)
+
+

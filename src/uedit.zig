@@ -778,86 +778,46 @@ pub export fn scrdn(bw_in: ?*anyopaque, n: isize, flg: c_int) void {
     }
 }
 
-/// Walk `p` to bol of `dest` by pnextl/pprevl. Buffer is not mutating, so
-/// that is O(|delta|) and stays on the right bytes. Fall back to `pline`
-/// only if the walk misses (bof/eof).
-fn walk_to_line(p: *GapP, dest: i64) void {
-    if (p.line == dest) {
-        _ = p_goto_bol(p);
-        return;
-    }
-    if (dest > p.line) {
-        while (p.line < dest) {
-            if (pnextl(p) == null) break;
+/// Mouse wheel: same vertical caret motion as N × up/down arrow.
+/// The caret moves first; `bwfllwt` in `edupd` scrolls the window only when
+/// it would leave the view. Goal column (`xcol`) is kept, like `uuparw`/`udnarw`.
+pub export fn uvscroll(w: ?*anyopaque, n: isize) c_int {
+    if (n == 0) return -1;
+    var moved: c_int = -1;
+    var i: isize = 0;
+    if (n > 0) {
+        while (i < n) : (i += 1) {
+            if (udnarw(w, 0) != 0) break;
+            moved = 0;
         }
     } else {
-        while (p.line > dest) {
-            if (pprevl(p) == null) break;
-            _ = p_goto_bol(p);
+        while (i < -n) : (i += 1) {
+            if (uuparw(w, 0) != 0) break;
+            moved = 0;
         }
     }
-    if (p.line != dest) {
-        _ = p_goto_bof(p);
-        _ = pline(p, dest);
-    }
-    _ = p_goto_bol(p);
+    if (moved == 0) dostaupd = 1;
+    return moved;
 }
 
-/// Viewport scroll for the mouse wheel: move `top` by `n` lines (`n>0` down,
-/// `n<0` up). The caret stays on the same screen row (it follows the view).
-/// If that cell is past EOL or in the empty region after EOF, snap to the
-/// last character of the line — do not sit in a column with no text.
-pub export fn uvscroll(w: ?*anyopaque, n: isize) c_int {
-    const bw = windBw(w) orelse return -1;
+/// Horizontal mouse wheel: same caret motion as N × left/right arrow.
+pub export fn uhscroll(w: ?*anyopaque, n: isize) c_int {
     if (n == 0) return -1;
-
-    if (bw.o.hex != 0) {
-        if (n < 0) scrup(bw, -n, 0) else scrdn(bw, n, 0);
-        return 0;
-    }
-
-    const top = bw.top orelse return -1;
-    const cur = bw.cursor orelse return -1;
-    const b = top.b orelse return -1;
-    const eof = b.eof orelse return -1;
-
-    const old_top: i64 = top.line;
-    const old_cur: i64 = cur.line;
-    const eof_line: i64 = eof.line;
-    const h: i64 = bw.h;
-
-    var dest_top = old_top + @as(i64, n);
-    if (dest_top < 0) dest_top = 0;
-    const max_top: i64 = if (eof_line + 1 > h) eof_line - h + 1 else 0;
-    if (dest_top > max_top) dest_top = max_top;
-
-    var dest_cur = old_cur + @as(i64, n);
-    const bot_line = dest_top + h - 1;
-    if (dest_cur < dest_top) dest_cur = dest_top;
-    if (dest_cur > bot_line) dest_cur = bot_line;
-    if (dest_cur > eof_line) dest_cur = eof_line;
-    if (dest_cur < 0) dest_cur = 0;
-
-    const goal = cur.xcol;
-    walk_to_line(top, dest_top);
-    if (dest_cur != old_cur) walk_to_line(cur, dest_cur);
-    _ = pcol(cur, goal);
-    if (bw.o.picture == 0) {
-        // pcol stops at EOL on a short line; drop the sticky goal column so
-        // the caret sits on a real character (or at EOL), not in the void.
-        cur.xcol = piscol(cur);
+    var moved: c_int = -1;
+    var i: isize = 0;
+    if (n > 0) {
+        while (i < n) : (i += 1) {
+            if (u_goto_right(w, 0) != 0) break;
+            moved = 0;
+        }
     } else {
-        cur.xcol = goal;
+        while (i < -n) : (i += 1) {
+            if (u_goto_left(w, 0) != 0) break;
+            moved = 0;
+        }
     }
-
-    if (dest_top == old_top and dest_cur == old_cur and cur.xcol == goal) return -1;
-
-    dostaupd = 1;
-    const parent = bw.parent orelse return 0;
-    if (parent.y != -1) {
-        if (scrnOf(bw)) |t| nscrldn(t, bw.y, bw.y + bw.h, bw.h);
-    }
-    return 0;
+    if (moved == 0) dostaupd = 1;
+    return moved;
 }
 
 fn menuPageTarget(w_in: ?*anyopaque) ?*anyopaque {

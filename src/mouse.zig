@@ -3,7 +3,7 @@
 //! Faithful C-ABI Path A port of JOE mouse (mouseopen/mouseclose/mousedn/mouseup/mousedrag/uxtmouse/uextmouse/utomouse/udefm*/mnow/reset_trig_time + floatmouse/rtbutton/joexterm/auto_scroll/auto_trig_time/auto_rate).
 //! GPM console mouse: see `gpm.zig` (`gpmopen`/`gpmclose`); wired when `-Dgpm=true` on Linux.
 //! Default-on xterm/SGR mouse (`-mouse`); optional `-mouseclip` OSC 52 copy-on-select;
-//! `-mousewheel N` lines per notch (OpenCode default 3; caret stays put).
+//! `-mousewheel N` lines per notch (default 1; same motion as up/down arrow).
 
 const std = @import("std");
 const build_options = @import("build_options");
@@ -35,6 +35,8 @@ const Cb_BUTTON_MIDDLE: c_int = 1;
 const Cb_BUTTON_RIGHT: c_int = 2;
 const Cb_WHEEL_UP: c_int = 0x40;
 const Cb_WHEEL_DOWN: c_int = 0x41;
+const Cb_WHEEL_LEFT: c_int = 0x42;
+const Cb_WHEEL_RIGHT: c_int = 0x43;
 
 pub extern fn printf(fmt: [*c]const u8, ...) c_int;
 pub extern fn snprintf(buf: [*c]u8, n: c_ulong, fmt: [*c]const u8, ...) c_int;
@@ -360,6 +362,7 @@ pub extern fn from_uni(map: [*c]struct_charmap, c: c_int) c_int;
 pub extern fn to_uni(map: [*c]struct_charmap, c: c_int) c_int;
 pub extern fn watpos(t: [*c]Screen, x: ptrdiff_t, y: ptrdiff_t) [*c]W;
 pub extern fn uvscroll(w: [*c]W, n: ptrdiff_t) c_int;
+pub extern fn uhscroll(w: [*c]W, n: ptrdiff_t) c_int;
 pub extern fn menujump(m: [*c]MENU, x: ptrdiff_t, y: ptrdiff_t) void;
 pub extern fn wgrowup(w: [*c]W) c_int;
 pub extern fn wgrowdown(w: [*c]W) c_int;
@@ -935,8 +938,8 @@ pub export var floatmouse: c_int = 0;
 pub export var joexterm: c_int = 0;
 /// When set (or with `-joexterm`), mouse selection end pushes OSC 52 clipboard.
 pub export var mouseclip: c_int = 1; // default on: copy selection to clipboard (OSC 52)
-/// Lines to scroll per wheel notch (before acceleration). OpenCode default is 3.
-pub export var mousewheel: c_int = 3;
+/// Lines to move the caret per wheel notch (same as N × up/down arrow).
+pub export var mousewheel: c_int = 1;
 pub var selecting: c_int = 0;
 pub var Cb: c_int = 0;
 pub var Cx: ptrdiff_t = 0;
@@ -948,7 +951,8 @@ pub fn mcoord(arg_x: ptrdiff_t) callconv(.c) ptrdiff_t {
     _ = &x;
     if ((x >= @as(ptrdiff_t, 33)) and (x <= @as(ptrdiff_t, 240))) return (x - @as(ptrdiff_t, 33)) + @as(ptrdiff_t, 1) else if (x == @as(ptrdiff_t, 32)) return -@as(c_int, 1) + @as(c_int, 1) else if (x > @as(ptrdiff_t, 240)) return (x - @as(ptrdiff_t, 257)) + @as(ptrdiff_t, 1) else return 0;
 }
-var wheel_last_ms: c_long = 0;
+var wheel_v_last_ms: c_long = 0;
+var wheel_h_last_ms: c_long = 0;
 
 /// Window under the pointer, or `fallback`. Prompt windows scroll their text.
 fn wheel_target(fallback: [*c]W) [*c]W {
@@ -963,22 +967,21 @@ fn wheel_target(fallback: [*c]W) [*c]W {
     return w;
 }
 
-/// OpenCode default is `CustomSpeedScroll(3)`: a fixed line count per notch,
-/// no exponential flick accel (that is what made JOE jump by a page). Ghostty
-/// often emits a second tick ~4ms later (OpenTUI `minTickInterval=6`); drop it
-/// so one physical notch is one step.
-fn wheel_lines() c_int {
+/// One caret step per accepted tick (`mousewheel`, default 1). Ghostty often
+/// emits a second tick ~4ms later; drop ticks closer than 16ms so a notch is
+/// one step and a flick is a stream of single-cell moves, not jumps.
+fn wheel_lines(last: *c_long) c_int {
     var n = mousewheel;
     if (n < 1) n = 1;
     if (n > 32) n = 32;
     const now = mnow();
-    if (wheel_last_ms != 0 and (now - wheel_last_ms) < 6) return 0;
-    wheel_last_ms = now;
+    if (last.* != 0 and (now - last.*) < 16) return 0;
+    last.* = now;
     return n;
 }
 
 fn wheel_apply(w: [*c]W, down: bool) void {
-    const n = wheel_lines();
+    const n = wheel_lines(&wheel_v_last_ms);
     if (n <= 0) return;
     const target = wheel_target(w);
     const what: c_int = if (target != null and target.*.watom != null) target.*.watom.*.what else 0;
@@ -1001,6 +1004,18 @@ fn wheel_apply(w: [*c]W, down: bool) void {
     while (i > 0) : (i -= 1) fake_key(key);
 }
 
+fn wheel_apply_h(w: [*c]W, right: bool) void {
+    const n = wheel_lines(&wheel_h_last_ms);
+    if (n <= 0) return;
+    const target = wheel_target(w);
+    const what: c_int = if (target != null and target.*.watom != null) target.*.watom.*.what else 0;
+    if ((what & (TYPETW | TYPEPW)) != 0) {
+        const delta: ptrdiff_t = if (right) n else -n;
+        _ = uhscroll(target, delta);
+        return;
+    }
+}
+
 pub fn mouse_event(arg_w: [*c]W) callconv(.c) c_int {
     var w = arg_w;
     _ = &w;
@@ -1010,6 +1025,14 @@ pub fn mouse_event(arg_w: [*c]W) callconv(.c) c_int {
     }
     if ((Cb & Cb_BUTTON_MASK) == Cb_WHEEL_DOWN) {
         wheel_apply(w, true);
+        return 0;
+    }
+    if ((Cb & Cb_BUTTON_MASK) == Cb_WHEEL_LEFT) {
+        wheel_apply_h(w, false);
+        return 0;
+    }
+    if ((Cb & Cb_BUTTON_MASK) == Cb_WHEEL_RIGHT) {
+        wheel_apply_h(w, true);
         return 0;
     }
     // Select button: left (or right if -rtbutton). Paste button: middle, and the

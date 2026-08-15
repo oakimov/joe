@@ -13,6 +13,19 @@ const GapOptions = gap_types.OPTIONS;
 const TYPETW: c_int = 0x0100;
 const TYPEPW: c_int = 0x0200;
 
+/// Plan R5 follow-up: `piscol`/`pcol` (`gapbuffer/pointer.zig`) compute
+/// cursor.xcol from raw byte widths with no idea markdown viewmode conceals
+/// anything, and that raw xcol is what's actually displayed for a pure
+/// cursor move (no content change forces a full-line repaint, so
+/// `zig_bw_view_finish`'s paint-time correction never gets a chance to
+/// run). Movement commands call this afterward to correct it against the
+/// collapsed column model when applicable. No-op when viewmode is off, the
+/// line isn't markdown, or the cursor is past the last byte (see the
+/// function's own doc comment in `bw_lgen.zig` for why EOL is out of scope
+/// here). `bw` is `uedit.zig`'s own `BwRec`, ABI-identical to `bw_lgen.zig`'s
+/// opaque `BW` — passed across as `anyopaque` rather than sharing the type.
+extern fn zig_bw_viewmode_fixup_cursor(bw: ?*anyopaque) c_int;
+
 /// PgUp/PgDn lines to keep (`-pg`); owned here, still read by remaining C.
 export var pgamnt: c_int = -1;
 
@@ -296,6 +309,7 @@ pub export fn u_goto_bol(w: ?*anyopaque, k: c_int) c_int {
     } else {
         _ = p_goto_bol(cur);
         cur.xcol = piscol(cur);
+        _ = zig_bw_viewmode_fixup_cursor(bw);
     }
     return 0;
 }
@@ -316,6 +330,10 @@ pub export fn u_goto_eol(w: ?*anyopaque, k: c_int) c_int {
     } else {
         _ = p_goto_eol(cur);
         cur.xcol = piscol(cur);
+        // Not fixed up here: EOL is the one case
+        // `zig_bw_viewmode_fixup_cursor` deliberately leaves alone (see its
+        // doc comment in bw_lgen.zig) since col_map has no entry past the
+        // last byte.
     }
     if (bw.o.viewmode != 0) cur.valcol = 0;
     return 0;
@@ -358,6 +376,7 @@ pub export fn uuparw(w: ?*anyopaque, k: c_int) c_int {
     if (cur.line != 0) {
         _ = pprevl(cur);
         _ = pcol(cur, cur.xcol);
+        _ = zig_bw_viewmode_fixup_cursor(bw);
         return 0;
     }
     return -1;
@@ -384,6 +403,7 @@ pub export fn udnarw(w: ?*anyopaque, k: c_int) c_int {
     if (cur.line != eof.line) {
         _ = pnextl(cur);
         _ = pcol(cur, cur.xcol);
+        _ = zig_bw_viewmode_fixup_cursor(bw);
         return 0;
     } else if (bw.o.picture != 0) {
         _ = p_goto_eol(cur);
@@ -470,6 +490,12 @@ pub export fn u_goto_left(w: ?*anyopaque, k: c_int) c_int {
     if (bw.o.viewmode != 0) {
         if (prgetc(cur) != NO_MORE_DATA) {
             cur.valcol = 0;
+            // `clampHiddenOffset` only skips forward, so landing just
+            // before a hidden run "bounces" back to the visible byte after
+            // it rather than stopping before — the direction-aware half of
+            // plan R5 that's still out of scope (see bw_lgen.zig). Still
+            // strictly better than the previous raw/uncorrected xcol.
+            _ = zig_bw_viewmode_fixup_cursor(bw);
             return 0;
         }
         return -1;
@@ -503,6 +529,10 @@ pub export fn u_goto_right(w: ?*anyopaque, k: c_int) c_int {
         rtn = 0;
     }
     if (cur.xcol != piscol(cur)) cur.xcol = piscol(cur);
+    // Must run after the raw re-sync above, not before: that unconditional
+    // `piscol` check would otherwise stomp the collapsed-column correction
+    // right back to the raw value.
+    if (rtn == 0) _ = zig_bw_viewmode_fixup_cursor(bw);
     return rtn;
 }
 

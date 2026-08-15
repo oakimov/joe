@@ -110,14 +110,33 @@ Ship alone. No style changes in this commit.
       to know which direction the cursor was moving — genuinely needs direction threaded through
       the cursor-movement call chain, a larger change than this fixup. Documented in a code comment
       at the fix site.
-- [ ] **1.5b** *Blocked on the follow-up below, not attempted as originally scoped.* While trying
-      to verify the 1.5 clamp interactively, found that **live arrow-key movement doesn't route
-      through `zig_bw_view_finish` for its column computation** — it appears to use JOE's
-      lower-level `pcol_`/`pcol`-style raw-byte-width column targeting instead
-      (`src/gapbuffer/pointer.zig`), which is unaware of hide/collapse entirely. This is a
-      pre-existing gap, not something this phase introduced. Flagged as a separate follow-up
-      (background task, not yet started) rather than fixed here — the round-trip test needs that
-      investigation done first, or it would be testing the wrong mechanism.
+- [x] **1.5b** Root cause turned out to be **two separate gaps**, both fixed:
+      1. Movement commands (`u_goto_right`/`u_goto_left`/`u_goto_bol`/`uuparw`/`udnarw` in
+         `src/uedit.zig`) set `cursor.xcol` via raw `piscol`/`pcol`
+         (`src/gapbuffer/pointer.zig`), unaware of hide/collapse — as suspected. Added
+         `zig_bw_viewmode_fixup_cursor` (`src/bw_lgen.zig`), re-analyzes the cursor's line fresh
+         and re-applies `clampHiddenOffset` (factored out of `zig_bw_view_finish` so paint-time and
+         interactive fixups agree by construction) plus the collapsed `xcol`; wired into the five
+         movement commands above. `u_goto_eol` deliberately excluded — `col_map` has no entry past
+         the last byte.
+      2. **The actual on-screen cursor column never used `cursor.xcol` in the first place.**
+         `tw.zig`'s `disptw` (the real screen-cursor placement code, found while verifying (1) did
+         nothing visible) always recomputes the rendered column fresh from raw `piscol` — by
+         original-C design `xcol` is only the *sticky goal column* for up/down, not a real glyph
+         position, so `disptw` ignores it outside `-picture` mode. Added
+         `zig_bw_viewmode_cursor_col` (`src/bw_lgen.zig`, read-only sibling of the fixup above, no
+         cursor movement) and wired it into `disptw`'s `cur_col` computation as the
+         markdown-viewmode-aware first choice, falling back to raw `piscol` for EOL / non-viewmode
+         / non-markdown.
+
+      **Still not done: full direction-aware skip** (same gap as 1.5's paint-time clamp —
+      `clampHiddenOffset` only skips forward, so left-arrow into a hidden run "bounces" to the
+      visible byte *after* it rather than stopping before). **Also not done:** up/down movement
+      reinterprets the old line's *collapsed* `xcol` as a *raw* target column on the new line via
+      `pcol`, then re-corrects whatever raw-byte position that lands on — not a true "preserve
+      visual column across lines with different concealment," just no longer wrong on the new
+      line's own terms. Both documented in code comments at the fix sites; out of scope for this
+      pass.
 - [x] **1.6** Rewrote the 39 failing `tests/viewmode.py` assertions using a Python port of the exact
       conceal logic to compute expectations mechanically (a hand-traced first attempt had an
       arithmetic error, caught by cross-checking against the real binary's output before writing

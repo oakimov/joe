@@ -994,6 +994,23 @@ pub export fn zig_bw_view_inline(
 }
 
 
+/// Plan R5: given `off` is a hidden byte in `hide`, return the corrected
+/// offset — forward-skip to the next visible byte if one exists before end
+/// of line; otherwise backward-clamp to the last visible byte, or `0` if
+/// the whole prefix through `off` is also hidden (a fully concealed line).
+/// Returns `off` unchanged if it isn't hidden. Shared by the paint-time
+/// fixup (`zig_bw_view_finish`) and the interactive one
+/// (`zig_bw_viewmode_fixup_cursor`) so the two agree by construction.
+fn clampHiddenOffset(hide: []const u8, off: usize) usize {
+    if (off >= hide.len or hide[off] == 0) return off;
+    var next: usize = off + 1;
+    while (next < hide.len and hide[next] != 0) : (next += 1) {}
+    if (next < hide.len) return next;
+    var prev: i64 = @as(i64, @intCast(off)) - 1;
+    while (prev >= 0 and hide[@intCast(prev)] != 0) : (prev -= 1) {}
+    return if (prev >= 0) @intCast(prev) else 0;
+}
+
 /// Path A Feature 1.10 epilogue: ensure `col_map` for `buf_line`, then update cursor xcol.
 /// When `skip_hidden != 0` and cursor sits on a hidden byte, advance to next visible (lgen_view).
 /// Returns `0` on success, `-1` to fall back to C.
@@ -1070,43 +1087,123 @@ pub export fn zig_bw_view_finish(
     // no movement-direction context (it runs at paint time, not from the
     // arrow-key handlers), so it cannot fully implement "left lands before
     // the run, right lands after" — that needs direction threaded through
-    // the cursor-movement call chain, a larger change than this fixup.
-    // What it CAN do deterministically: prefer the forward skip (unchanged,
-    // existing behavior), and when the hidden run reaches end of line with
-    // nothing visible after it, clamp to the last visible byte before the
-    // run instead of leaving the cursor stuck on a hidden byte with a
-    // stale (pre-collapse) xcol. A fully concealed line clamps to offset 0
-    // (col_map[0] is 0 either way, since nothing on the line has width).
+    // the cursor-movement call chain. `zig_bw_viewmode_fixup_cursor` (below)
+    // covers that case for the arrow-key handlers; this paint-time fixup
+    // still runs on every repaint as a backstop. `clampHiddenOffset` covers
+    // the deterministic part both need: prefer the forward skip; when the
+    // hidden run reaches end of line with nothing visible after it, clamp
+    // to the last visible byte before the run (or offset 0 if the whole
+    // line is concealed) instead of leaving the cursor on a hidden byte
+    // with a stale (pre-collapse) xcol.
     if (skip_hidden != 0 and cursor_offset >= 0 and cursor_offset < hide_len) {
         const off: usize = @intCast(cursor_offset);
         if (off < clear_n and hide.?[off] != 0) {
-            var next: usize = off + 1;
-            while (next < clear_n and next < @as(usize, @intCast(hide_len)) and hide.?[next] != 0) : (next += 1) {}
-            if (next < clear_n and next < @as(usize, @intCast(hide_len))) {
+            const hide_slice = hide.?[0..clear_n];
+            const corrected = clampHiddenOffset(hide_slice, off);
+            if (corrected != off) {
                 const move = pdup(cursor, "zig_bw_view_finish_skip") orelse return -1;
                 zig_c_bw_p_goto_bol(move);
-                const target = zig_c_bw_pbyte(move) + @as(i64, @intCast(next));
+                const target = zig_c_bw_pbyte(move) + @as(i64, @intCast(corrected));
                 zig_c_bw_pgoto(cursor, target);
-                cursor_offset = @intCast(next);
-                prm(move);
-            } else {
-                var prev: i64 = @as(i64, @intCast(off)) - 1;
-                while (prev >= 0 and hide.?[@intCast(prev)] != 0) : (prev -= 1) {}
-                const move = pdup(cursor, "zig_bw_view_finish_skip_back") orelse return -1;
-                zig_c_bw_p_goto_bol(move);
-                const base = zig_c_bw_pbyte(move);
-                const target = if (prev >= 0) base + prev else base;
-                zig_c_bw_pgoto(cursor, target);
-                cursor_offset = if (prev >= 0) prev else 0;
+                cursor_offset = @intCast(corrected);
                 prm(move);
             }
         }
     }
 
     if (cursor_offset >= 0 and cursor_offset < col_map_len) {
-        zig_c_bw_set_xcol(cursor, col_map.?[@intCast(cursor_offset)]);
+        const new_xcol = col_map.?[@intCast(cursor_offset)];
+        zig_c_bw_set_xcol(cursor, new_xcol);
     }
     return 0;
+}
+
+/// Shared prefix for the two interactive (non-paint) viewmode column
+/// lookups below: locate the cursor's line and its byte offset into it,
+/// bailing whenever the collapsed-column model doesn't apply. `buf` is
+/// caller-owned scratch for the line text (paint code sizes similarly).
+const CursorLineCtx = struct {
+    cursor: *P,
+    bol_byte: i64,
+    off: usize,
+    line: []const u8,
+};
+
+fn cursorLineCtx(bw: ?*BW, buf: []u8) ?CursorLineCtx {
+    if (bw == null) return null;
+    if (zig_c_bw_get_viewmode(bw) == 0) return null;
+    const syn = zig_c_bw_get_syntax(bw);
+    if (!syntaxNameIsMd(syn)) return null;
+    const cursor = zig_c_bw_get_cursor(bw) orelse return null;
+
+    const bol = pdup(cursor, "cursorLineCtx") orelse return null;
+    defer prm(bol);
+    zig_c_bw_p_goto_bol(bol);
+    const bol_byte = zig_c_bw_pbyte(bol);
+    const cursor_byte_offset = zig_c_bw_pbyte(cursor) - bol_byte;
+    if (cursor_byte_offset < 0) return null;
+
+    const buf_line = zig_c_bw_pline_no(cursor);
+    const ll = bwReadLine(bol, buf_line, buf.ptr, @intCast(buf.len));
+    if (ll < 0) return null;
+    return CursorLineCtx{ .cursor = cursor, .bol_byte = bol_byte, .off = @intCast(cursor_byte_offset), .line = buf[0..@intCast(ll)] };
+}
+
+/// Interactive counterpart to `zig_bw_view_finish`'s paint-time cursor
+/// fixup (plan R5 follow-up). Arrow-key movement (`u_goto_right` etc. in
+/// `uedit.zig`) can leave the cursor sitting on a byte that's concealed in
+/// viewmode (e.g. inside `**`) — this moves it to the nearest visible byte
+/// via `clampHiddenOffset`, and sets `cursor.xcol` (the sticky goal column
+/// used by up/down movement, see `tw.zig`'s `disptw`) to the collapsed
+/// column. Does NOT affect on-screen cursor rendering — `disptw` recomputes
+/// that fresh via `zig_bw_viewmode_cursor_col` below on every paint,
+/// ignoring `cursor.xcol` entirely (by original-C design: `xcol` is a goal,
+/// not necessarily a real glyph position).
+///
+/// No-op (returns `-1`, callers ignore the result) unless viewmode is on
+/// and the cursor's line is markdown syntax, or the cursor sits at/past
+/// EOL — `col_map` has no entry past the last byte, and EOL's collapsed
+/// column depends on tail-concealed width that isn't available here; left
+/// to the existing raw `piscol` computation.
+pub export fn zig_bw_viewmode_fixup_cursor(bw: ?*BW) c_int {
+    var tmp: [16 * 1024]u8 = undefined;
+    const ctx = cursorLineCtx(bw, &tmp) orelse return -1;
+    if (ctx.off >= ctx.line.len) return -1;
+
+    const alloc = std.heap.c_allocator;
+    var tables = ViewTables.init(alloc);
+    defer tables.deinit();
+    render.analyzeLine(&tables, ctx.line, null) catch return -1;
+
+    const corrected = clampHiddenOffset(tables.hide, ctx.off);
+    if (corrected != ctx.off) {
+        zig_c_bw_pgoto(ctx.cursor, ctx.bol_byte + @as(i64, @intCast(corrected)));
+    }
+    if (corrected < tables.col_map.len) {
+        zig_c_bw_set_xcol(ctx.cursor, @intCast(tables.col_map[corrected]));
+    }
+    return 0;
+}
+
+/// Viewmode-aware display column for the cursor's CURRENT byte position,
+/// for `tw.zig`'s `disptw` to draw the terminal cursor at. Read-only:
+/// unlike `zig_bw_viewmode_fixup_cursor`, never moves the cursor — a hidden
+/// byte still has a well-defined collapsed column (concealed bytes
+/// contribute zero width, so `col_map` at that offset already equals the
+/// column of whatever visible content follows). `disptw`'s own raw
+/// `piscol` handles EOL and the non-markdown/non-viewmode cases when this
+/// returns `-1`.
+pub export fn zig_bw_viewmode_cursor_col(bw: ?*BW) i64 {
+    var tmp: [16 * 1024]u8 = undefined;
+    const ctx = cursorLineCtx(bw, &tmp) orelse return -1;
+    if (ctx.off >= ctx.line.len) return -1;
+
+    const alloc = std.heap.c_allocator;
+    var tables = ViewTables.init(alloc);
+    defer tables.deinit();
+    render.analyzeLine(&tables, ctx.line, null) catch return -1;
+    if (ctx.off >= tables.col_map.len) return -1;
+    return @intCast(tables.col_map[ctx.off]);
 }
 
 /// Thin `lgen_view` chrome dispatcher (Path A).

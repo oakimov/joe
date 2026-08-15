@@ -333,6 +333,10 @@ pub extern fn pset(d: [*c]P, s: [*c]P) void;
 pub extern fn p_goto_bol(p: [*c]P) void;
 pub extern fn pline(p: [*c]P, line: off_t) c_int;
 pub extern fn piscol(p: [*c]P) off_t;
+/// Viewmode-aware display column for the cursor's byte position (bw_lgen.zig
+/// Feature 1.10). Returns `-1` when not applicable (viewmode off, not
+/// markdown, or cursor at EOL) — callers fall back to raw `piscol`.
+pub extern fn zig_bw_viewmode_cursor_col(bw: ?*anyopaque) off_t;
 pub extern fn piseof(p: [*c]P) c_int;
 pub extern fn brch(p: [*c]P) c_int;
 pub extern fn borphan() [*c]B;
@@ -438,7 +442,14 @@ pub fn disptw(arg_w: [*c]W, arg_flg: c_int) callconv(.c) void {
         w.*.cury = @as(ptrdiff_t, @truncate(((bw_1.*.cursor.*.line - bw_1.*.top.*.line) + @as(off_t, bw_1.*.y)) - @as(off_t, w.*.y)));
         // Draw on a real column. `xcol` is the sticky goal for up/down; past
         // EOL it has no glyph, so sit at the end of the line (unless -picture).
-        const cur_col: off_t = if (bw_1.*.o.picture != 0) bw_1.*.cursor.*.xcol else piscol(bw_1.*.cursor);
+        // In markdown viewmode, `piscol` is raw/uncollapsed (counts concealed
+        // delimiter bytes as full-width) — prefer the collapsed column when
+        // available, so a pure cursor move (no content repaint) still lands
+        // the terminal cursor on the visible glyph, not the raw byte offset.
+        const cur_col: off_t = if (bw_1.*.o.picture != 0) bw_1.*.cursor.*.xcol else blk: {
+            const vm_col = zig_bw_viewmode_cursor_col(@ptrCast(bw_1));
+            break :blk if (vm_col >= 0) vm_col else piscol(bw_1.*.cursor);
+        };
         w.*.curx = @as(ptrdiff_t, @truncate((cur_col - bw_1.*.offset) + @as(off_t, bw_1.*.lincols)));
     }
     if (((((((staupd != 0) or ((keepup != 0) and !(have != 0))) or (bw_1.*.cursor.*.line != tw_2.*.prevline)) or (bw_1.*.b.*.changed != tw_2.*.changed)) or (bw_1.*.b != tw_2.*.prev_b)) and ((w.*.y != 0) or (@as(ptrdiff_t, @intFromBool(!(staen != 0))) != 0))) and (w.*.h > @as(ptrdiff_t, 1))) {

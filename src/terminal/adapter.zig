@@ -2,10 +2,7 @@
 //!
 //! Bridges JOE's packed `int` attribute bits (`joe/scrn.h`, non-MSDOS layout)
 //! and the redesign `Attribute`/`Color` types, plus an obuf-style output sink
-//! that can drain `Screen.out` without coupling to hybrid `ttputs`/`obuf`.
-//!
-//! Hybrid `src/tty.zig` wires `drainScreenOut` into live `obuf` behind the
-//! `JOE_ZIG_SCREEN_DRAIN` / `zig_screen_drain_enabled` gate (default off).
+//! that can drain `Screen.out` (unit tests / Path B only — not wired into live paint).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -271,7 +268,7 @@ pub fn drainScreenOut(scr: *Screen, sink: *OutSink) !void {
     try sink.flush();
 }
 
-/// Gated variant used by hybrid `tty.drainZigScreen`.
+/// Gated variant for Path B / unit tests.
 /// When `enabled` is false, leaves `Screen.out` untouched and returns `false`.
 /// When true, drains via `drainScreenOut` and returns `true`.
 pub fn drainScreenOutGated(scr: *Screen, sink: *OutSink, enabled: bool) !bool {
@@ -281,7 +278,7 @@ pub fn drainScreenOutGated(scr: *Screen, sink: *OutSink, enabled: bool) !bool {
 }
 
 /// Pure helper mirroring hybrid `ttputc` → `obuf` growth/flush behaviour.
-/// Used by unit tests and documents the contract `ttWrite` must match.
+/// Used by unit tests and documents the contract hybrid `ttputs`/`obuf` must match.
 pub fn writeIntoObuf(
     obuf: []u8,
     obufp: *usize,

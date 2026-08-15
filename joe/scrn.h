@@ -381,8 +381,8 @@ extern int opt_usetabs;
 extern int assume_color;
 extern int assume_256color;
 
-/* Zig-native screen swap (default on). Paint updates shadow buffers only;
- * zig_scrn_swap_flush() at end of edupd emits via redesign Screen cell-diff.
- * Opt out: JOE_ZIG_SCREEN_SWAP=0 */
-extern int zig_screen_swap_enabled;
-void zig_scrn_swap_flush(SCRN *t, ptrdiff_t x, ptrdiff_t y);
+/* Soft caret / idle blink (hybrid paint). */
+void zig_scrn_soft_cursor(SCRN *t, ptrdiff_t x, ptrdiff_t y);
+void zig_scrn_cursor_activity(void);
+void zig_scrn_cursor_maybe_blink(void);
+long zig_scrn_cursor_alarm_ms(void);

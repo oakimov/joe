@@ -148,6 +148,8 @@ extern fn binsc(p: ?*GapP, c: c_int) ?*GapP;
 extern fn modify_logic(bw: ?*anyopaque, b: ?*GapB) c_int;
 extern fn udelln(w: ?*anyopaque, k: c_int) c_int;
 extern fn updall() void;
+extern fn scrn_invalidate(t: ?*anyopaque) void;
+extern var maint: [*c]extern struct { t: ?*anyopaque };
 extern fn msgnw(w: ?*anyopaque, s: [*c]const u8) void;
 extern fn my_gettext(s: [*c]const u8) [*c]const u8;
 extern fn alitem(list: ?*anyopaque, itemsize: isize) ?*anyopaque;
@@ -710,6 +712,29 @@ pub export fn ublkmove(w: ?*anyopaque, k: c_int) c_int {
     return -1;
 }
 
+fn screenOf(bw: *BwRec) ?*anyopaque {
+    if (maint != null) {
+        if (maint.*.t) |t| return t;
+    }
+    // BW.t / W.t is `Screen*`; first field is `SCRN *t`.
+    const screen = bw.t orelse (if (bw.parent) |w| w.t else null) orelse return null;
+    const head: *extern struct { t: ?*anyopaque } = @ptrCast(@alignCast(screen));
+    return head.t;
+}
+
+/// After a mouse paste: clear highlight and force every cell to be rewritten.
+fn finishMousePaste(bw: *BwRec, w: ?*anyopaque) void {
+    _ = unmark(w, 0);
+    if (screenOf(bw)) |scrn| {
+        // Poison cells + drop pending IL/DL. Do not nredraw here: that emits
+        // DECSTBM/cl and leaves relative CUP starting from a stale physical
+        // cursor (Ghostty then shifts the whole window).
+        scrn_invalidate(scrn);
+    } else {
+        updall();
+    }
+}
+
 pub export fn ublkcpy(w: ?*anyopaque, k: c_int) c_int {
     const bw = windBw(w) orelse return -1;
     const cur = bw.cursor orelse return -1;
@@ -722,9 +747,16 @@ pub export fn ublkcpy(w: ?*anyopaque, k: c_int) c_int {
             const usetabs = ptabrect(mb, height, mk.xcol);
             const tmp = pextrect(mb, height, mk.xcol);
             if (bw.o.overtype != 0) pdelrect(cur, height, piscol(cur) + width);
+            const dest_line = cur.line + height - 1;
+            const dest_col = cur.xcol + width;
             pinsrect(cur, tmp, width, usetabs);
             brm(tmp);
-            if (lightoff != 0) {
+            if (k == -2) {
+                _ = pline(cur, dest_line);
+                _ = pcol(cur, dest_col);
+                cur.xcol = dest_col;
+                finishMousePaste(bw, w);
+            } else if (lightoff != 0) {
                 _ = unmark(@ptrCast(bw.parent), 0);
             } else {
                 _ = umarkb(@ptrCast(bw.parent), 0);
@@ -755,8 +787,20 @@ pub export fn ublkcpy(w: ?*anyopaque, k: c_int) c_int {
                 bdel(cur, q);
                 prm(q);
             }
-            _ = binsb(cur, tmp);
-            if (k != -2) {
+            if (k == -2) {
+                // End-pointer rides the insert: fixupins advances it by amnt/nlines,
+                // so the caret lands after the paste with a consistent line count
+                // (pfwrd over freshly stolen headers can desync `line` vs `byte`).
+                const end_ptr = pdup(cur, "ublkcpy") orelse return -1;
+                end_ptr.end = 1;
+                _ = binsb(cur, tmp);
+                _ = pset(cur, end_ptr);
+                cur.end = 0;
+                cur.xcol = piscol(cur);
+                prm(end_ptr);
+                finishMousePaste(bw, w);
+            } else {
+                _ = binsb(cur, tmp);
                 if (lightoff != 0) {
                     _ = unmark(@ptrCast(bw.parent), 0);
                 } else {
@@ -764,8 +808,8 @@ pub export fn ublkcpy(w: ?*anyopaque, k: c_int) c_int {
                     _ = umarkk(@ptrCast(bw.parent), 0);
                     if (markk) |nmk| _ = pfwrd(nmk, size);
                 }
+                updall();
             }
-            updall();
             return 0;
         }
     } else {

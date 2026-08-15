@@ -3,7 +3,7 @@
 //! Faithful C-ABI Path A port of JOE mouse (mouseopen/mouseclose/mousedn/mouseup/mousedrag/uxtmouse/uextmouse/utomouse/udefm*/mnow/reset_trig_time + floatmouse/rtbutton/joexterm/auto_scroll/auto_trig_time/auto_rate).
 //! GPM console mouse: see `gpm.zig` (`gpmopen`/`gpmclose`); wired when `-Dgpm=true` on Linux.
 //! Default-on xterm/SGR mouse (`-mouse`); optional `-mouseclip` OSC 52 copy-on-select;
-//! `-mousewheel N` lines per notch (+ light acceleration).
+//! `-mousewheel N` lines per notch (OpenCode default 3; caret stays put).
 
 const std = @import("std");
 const build_options = @import("build_options");
@@ -340,6 +340,12 @@ pub extern fn ttflsh() c_int;
 pub extern var obuf: [*c]u8;
 pub extern var obufp: ptrdiff_t;
 pub extern var obufsiz: ptrdiff_t;
+pub const FILE = anyopaque;
+pub extern fn joe_malloc(size: ptrdiff_t) ?*anyopaque;
+pub extern fn joe_free(ptr: ?*anyopaque) void;
+pub extern fn joe_write(fd: c_int, buf: ?*const anyopaque, siz: ptrdiff_t) ptrdiff_t;
+pub extern fn fileno(stream: ?*FILE) c_int;
+pub extern var termout: ?*FILE;
 
 /// JOE `ttputc` macro (`tty.h`) as a Zig fn — write one byte into `obuf`.
 fn ttputc(c: u8) callconv(.c) void {
@@ -353,6 +359,7 @@ pub extern fn utf8_encode(buf: [*c]u8, c: c_int) ptrdiff_t;
 pub extern fn from_uni(map: [*c]struct_charmap, c: c_int) c_int;
 pub extern fn to_uni(map: [*c]struct_charmap, c: c_int) c_int;
 pub extern fn watpos(t: [*c]Screen, x: ptrdiff_t, y: ptrdiff_t) [*c]W;
+pub extern fn uvscroll(w: [*c]W, n: ptrdiff_t) c_int;
 pub extern fn menujump(m: [*c]MENU, x: ptrdiff_t, y: ptrdiff_t) void;
 pub extern fn wgrowup(w: [*c]W) c_int;
 pub extern fn wgrowdown(w: [*c]W) c_int;
@@ -681,55 +688,117 @@ pub fn select_done(arg_map: [*c]struct_charmap) callconv(.c) void {
     var map = arg_map;
     _ = &map;
     if ((((mouseclip != 0) or (joexterm != 0)) and (markv(1) != 0))) {
-        var left: off_t = markb.*.xcol;
-        _ = &left;
-        var right: off_t = markk.*.xcol;
-        _ = &right;
-        var q: [*c]P = pdup(markb, "select_done");
-        _ = &q;
-        var c: c_int = undefined;
-        _ = &c;
-        ttputs("\x1b]52;;");
+        const left: off_t = markb.*.xcol;
+        const right: off_t = markk.*.xcol;
+        const q: [*c]P = pdup(markb, "select_done");
+        defer prm(q);
+
+        // Collect selection bytes first, then emit one atomic OSC 52 write.
+        // Chunked ttputs/ttflsh mid-sequence desyncs strict terminals (Ghostty):
+        // the display parser eats CSI from a later edupd as if it were payload.
+        var plain_cap: usize = 256;
+        var plain_len: usize = 0;
+        var plain: [*c]u8 = @ptrCast(@alignCast(joe_malloc(@intCast(plain_cap)) orelse return));
+        defer joe_free(plain);
+
         while (q.*.byte < markk.*.byte) {
-            var buf: [16]u8 = undefined;
-            _ = &buf;
-            var len: ptrdiff_t = undefined;
-            _ = &len;
             while (((q.*.byte < markk.*.byte) and (square != 0)) and ((piscol(q) < left) or (piscol(q) >= right))) {
                 _ = pgetc(q);
             }
             while ((q.*.byte < markk.*.byte) and (!(square != 0) or ((piscol(q) >= left) and (piscol(q) < right)))) {
-                c = pgetc(q);
-                if (map.*.type != 0) if (locale_map.*.type != 0) {
-                    len = utf8_encode(@ptrCast(@alignCast(&buf)), c);
-                    ttputs64(@ptrCast(@alignCast(&buf)), len);
-                } else {
-                    c = from_uni(locale_map, c);
-                    if (c == -@as(c_int, 1)) {
-                        c = '?';
+                var buf: [16]u8 = undefined;
+                var len: ptrdiff_t = 0;
+                var c = pgetc(q);
+                if (map.*.type != 0) {
+                    if (locale_map.*.type != 0) {
+                        len = utf8_encode(@ptrCast(@alignCast(&buf)), c);
+                    } else {
+                        c = from_uni(locale_map, c);
+                        if (c == -@as(c_int, 1)) c = '?';
+                        buf[0] = @truncate(@as(u8, @intCast(c)));
+                        len = 1;
                     }
-                    buf[@as(c_int, 0)] = @as(u8, @bitCast(@as(i8, @truncate(c))));
-                    ttputs64(@ptrCast(@alignCast(&buf)), 1);
                 } else if (locale_map.*.type != 0) {
                     c = to_uni(map, c);
-                    if (c == -@as(c_int, 1)) {
-                        c = '?';
-                    }
+                    if (c == -@as(c_int, 1)) c = '?';
                     len = utf8_encode(@ptrCast(@alignCast(&buf)), c);
-                    ttputs64(@ptrCast(@alignCast(&buf)), len);
                 } else {
-                    buf[@as(c_int, 0)] = @as(u8, @bitCast(@as(i8, @truncate(c))));
-                    ttputs64(@ptrCast(@alignCast(&buf)), 1);
+                    buf[0] = @truncate(@as(u8, @intCast(c)));
+                    len = 1;
                 }
+                const need = plain_len + @as(usize, @intCast(len));
+                if (need > plain_cap) {
+                    var ncap = plain_cap;
+                    while (ncap < need) ncap *= 2;
+                    const nbuf: [*c]u8 = @ptrCast(@alignCast(joe_malloc(@intCast(ncap)) orelse return));
+                    @memcpy(nbuf[0..plain_len], plain[0..plain_len]);
+                    joe_free(plain);
+                    plain = nbuf;
+                    plain_cap = ncap;
+                }
+                @memcpy(plain[plain_len .. plain_len + @as(usize, @intCast(len))], buf[0..@intCast(len)]);
+                plain_len = need;
             }
             if (((square != 0) and (q.*.byte < markk.*.byte)) and (piscol(q) >= right)) {
-                buf[@as(c_int, 0)] = 10;
-                ttputs64(@ptrCast(@alignCast(&buf)), 1);
+                if (plain_len + 1 > plain_cap) {
+                    const ncap = plain_cap * 2;
+                    const nbuf: [*c]u8 = @ptrCast(@alignCast(joe_malloc(@intCast(ncap)) orelse return));
+                    @memcpy(nbuf[0..plain_len], plain[0..plain_len]);
+                    joe_free(plain);
+                    plain = nbuf;
+                    plain_cap = ncap;
+                }
+                plain[plain_len] = 10;
+                plain_len += 1;
             }
         }
-        ttputs64_flush();
-        ttputs("\x1b\\");
-        prm(q);
+
+        // base64 expands 4/3; plus OSC prefix "\x1b]52;;" (7) and ST "\x1b\\" (2).
+        const b64_len = ((plain_len + 2) / 3) * 4;
+        const msg_len = 7 + b64_len + 2;
+        const msg: [*c]u8 = @ptrCast(@alignCast(joe_malloc(@intCast(msg_len)) orelse return));
+        defer joe_free(msg);
+        msg[0] = 0x1b;
+        msg[1] = ']';
+        msg[2] = '5';
+        msg[3] = '2';
+        msg[4] = ';';
+        msg[5] = ';';
+        const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        var o: usize = 6;
+        var i: usize = 0;
+        while (i + 3 <= plain_len) : (i += 3) {
+            const n: u32 = (@as(u32, plain[i]) << 16) | (@as(u32, plain[i + 1]) << 8) | @as(u32, plain[i + 2]);
+            msg[o] = alphabet[(n >> 18) & 63];
+            msg[o + 1] = alphabet[(n >> 12) & 63];
+            msg[o + 2] = alphabet[(n >> 6) & 63];
+            msg[o + 3] = alphabet[n & 63];
+            o += 4;
+        }
+        if (plain_len - i == 1) {
+            const n: u32 = @as(u32, plain[i]) << 16;
+            msg[o] = alphabet[(n >> 18) & 63];
+            msg[o + 1] = alphabet[(n >> 12) & 63];
+            msg[o + 2] = '=';
+            msg[o + 3] = '=';
+            o += 4;
+        } else if (plain_len - i == 2) {
+            const n: u32 = (@as(u32, plain[i]) << 16) | (@as(u32, plain[i + 1]) << 8);
+            msg[o] = alphabet[(n >> 18) & 63];
+            msg[o + 1] = alphabet[(n >> 12) & 63];
+            msg[o + 2] = alphabet[(n >> 6) & 63];
+            msg[o + 3] = '=';
+            o += 4;
+        }
+        msg[o] = 0x1b;
+        msg[o + 1] = '\\';
+        o += 2;
+
+        // Flush pending paint, then write OSC 52 as one syscall (no mid-sequence ttcheck).
+        _ = ttflsh();
+        if (termout) |to| {
+            _ = joe_write(fileno(to), msg, @intCast(o));
+        }
     }
 }
 pub fn fake_key(arg_c: c_int) callconv(.c) void {
@@ -834,36 +903,23 @@ pub fn ttputs64(arg_pp: [*c]u8, arg_length: ptrdiff_t) callconv(.c) void {
     }
 }
 pub fn ttputs64_flush() callconv(.c) void {
-    var x: u8 = undefined;
-    _ = &x;
-    while (true) {
-        switch (base64_count) {
-            @as(c_int, 0) => {
-                break;
-            },
-            @as(c_int, 2) => {
-                x = base64_code[@bitCast(@as(isize, @intCast(base64_accu << @intCast(@as(c_int, 4)))))];
-                ttputc(x);
-                break;
-            },
-            @as(c_int, 4) => {
-                x = base64_code[@bitCast(@as(isize, @intCast(base64_accu << @intCast(@as(c_int, 2)))))];
-                ttputc(x);
-                break;
-            },
-            else => {},
-        }
-        break;
+    // Emit the final incomplete sextet (if any), then pad so total length % 4 == 0.
+    // The leftover char must count toward base64_pad — otherwise we emit excess '='
+    // (Ghostty rejects that as invalid OSC 52 base64 and leaves the clipboard unchanged).
+    switch (base64_count) {
+        2 => {
+            ttputc(base64_code[@bitCast(@as(isize, @intCast(base64_accu << @intCast(@as(c_int, 4)))))]);
+            base64_pad += 1;
+        },
+        4 => {
+            ttputc(base64_code[@bitCast(@as(isize, @intCast(base64_accu << @intCast(@as(c_int, 2)))))]);
+            base64_pad += 1;
+        },
+        else => {},
     }
     if ((base64_pad & @as(ptrdiff_t, 3)) != 0) {
         var z: ptrdiff_t = @as(ptrdiff_t, 4) - (base64_pad & @as(ptrdiff_t, 3));
-        _ = &z;
-        while ((blk: {
-            const ref = &z;
-            const tmp = ref.*;
-            ref.* -= 1;
-            break :blk tmp;
-        }) != 0) {
+        while (z > 0) : (z -= 1) {
             ttputc('=');
         }
     }
@@ -879,8 +935,8 @@ pub export var floatmouse: c_int = 0;
 pub export var joexterm: c_int = 0;
 /// When set (or with `-joexterm`), mouse selection end pushes OSC 52 clipboard.
 pub export var mouseclip: c_int = 1; // default on: copy selection to clipboard (OSC 52)
-/// Lines to scroll per wheel notch (before acceleration). Default matches old 4× rc macro.
-pub export var mousewheel: c_int = 4;
+/// Lines to scroll per wheel notch (before acceleration). OpenCode default is 3.
+pub export var mousewheel: c_int = 3;
 pub var selecting: c_int = 0;
 pub var Cb: c_int = 0;
 pub var Cx: ptrdiff_t = 0;
@@ -893,35 +949,67 @@ pub fn mcoord(arg_x: ptrdiff_t) callconv(.c) ptrdiff_t {
     if ((x >= @as(ptrdiff_t, 33)) and (x <= @as(ptrdiff_t, 240))) return (x - @as(ptrdiff_t, 33)) + @as(ptrdiff_t, 1) else if (x == @as(ptrdiff_t, 32)) return -@as(c_int, 1) + @as(c_int, 1) else if (x > @as(ptrdiff_t, 240)) return (x - @as(ptrdiff_t, 257)) + @as(ptrdiff_t, 1) else return 0;
 }
 var wheel_last_ms: c_long = 0;
-var wheel_mult: c_int = 1;
 
-/// Lines for one wheel notch: `mousewheel` × streak multiplier (cap 3) when
-/// notches arrive within 150ms (OpenCode-like light accel).
-fn wheel_lines() c_int {
-    var base = mousewheel;
-    if (base < 1) base = 1;
-    if (base > 32) base = 32;
-    const now = mnow();
-    if ((wheel_last_ms != 0) and ((now - wheel_last_ms) < @as(c_long, 150))) {
-        if (wheel_mult < 3) wheel_mult += 1;
-    } else {
-        wheel_mult = 1;
+/// Window under the pointer, or `fallback`. Prompt windows scroll their text.
+fn wheel_target(fallback: [*c]W) [*c]W {
+    var w = fallback;
+    if (Cx > 0 and Cy > 0) {
+        const at = watpos(maint, Cx - 1, Cy - 1);
+        if (at != null) w = at;
     }
+    if (w != null and w.*.watom != null and w.*.watom.*.what == TYPEPW) {
+        if (w.*.main != null) w = w.*.main;
+    }
+    return w;
+}
+
+/// OpenCode default is `CustomSpeedScroll(3)`: a fixed line count per notch,
+/// no exponential flick accel (that is what made JOE jump by a page). Ghostty
+/// often emits a second tick ~4ms later (OpenTUI `minTickInterval=6`); drop it
+/// so one physical notch is one step.
+fn wheel_lines() c_int {
+    var n = mousewheel;
+    if (n < 1) n = 1;
+    if (n > 32) n = 32;
+    const now = mnow();
+    if (wheel_last_ms != 0 and (now - wheel_last_ms) < 6) return 0;
     wheel_last_ms = now;
-    return base * wheel_mult;
+    return n;
+}
+
+fn wheel_apply(w: [*c]W, down: bool) void {
+    const n = wheel_lines();
+    if (n <= 0) return;
+    const target = wheel_target(w);
+    const what: c_int = if (target != null and target.*.watom != null) target.*.watom.*.what else 0;
+    if ((what & TYPEMENU) != 0) {
+        const old = maint.*.curwin;
+        maint.*.curwin = target;
+        var i = n;
+        const key: c_int = if (down) KEY_MWDOWN else KEY_MWUP;
+        while (i > 0) : (i -= 1) fake_key(key);
+        maint.*.curwin = old;
+        return;
+    }
+    if ((what & (TYPETW | TYPEPW)) != 0) {
+        const delta: ptrdiff_t = if (down) n else -n;
+        _ = uvscroll(target, delta);
+        return;
+    }
+    var i = n;
+    const key: c_int = if (down) KEY_MWDOWN else KEY_MWUP;
+    while (i > 0) : (i -= 1) fake_key(key);
 }
 
 pub fn mouse_event(arg_w: [*c]W) callconv(.c) c_int {
     var w = arg_w;
     _ = &w;
     if ((Cb & Cb_BUTTON_MASK) == Cb_WHEEL_UP) {
-        var n = wheel_lines();
-        while (n > 0) : (n -= 1) fake_key(KEY_MWUP);
+        wheel_apply(w, false);
         return 0;
     }
     if ((Cb & Cb_BUTTON_MASK) == Cb_WHEEL_DOWN) {
-        var n = wheel_lines();
-        while (n > 0) : (n -= 1) fake_key(KEY_MWDOWN);
+        wheel_apply(w, true);
         return 0;
     }
     // Select button: left (or right if -rtbutton). Paste button: middle, and the
@@ -1283,8 +1371,8 @@ pub export fn mouseopen() void {
         _ = gpm.gpmopen();
     }
     if (usexmouse != 0) {
-        // OpenCode-like: basic + button-event + SGR (skip 1003 any-event/hover).
-        ttputs("\x1b[?1000h");
+        // Button-event + SGR only (1002 includes press/release; do not also
+        // enable 1000 — duplicate reports confuse multi-click detection).
         ttputs("\x1b[?1002h");
         ttputs("\x1b[?1006h");
         if (joexterm != 0) {
@@ -1300,7 +1388,6 @@ pub export fn mouseclose() void {
         }
         ttputs("\x1b[?1006l");
         ttputs("\x1b[?1002l");
-        ttputs("\x1b[?1000l");
         _ = ttflsh();
     }
     if (comptime build_options.gpm) {

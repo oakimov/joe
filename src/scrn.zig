@@ -6,7 +6,6 @@
 
 const std = @import("std");
 const terminal = @import("terminal");
-const tty = @import("tty.zig");
 const ptrdiff_t = c_long;
 
 pub extern fn printf(fmt: [*c]const u8, ...) c_int;
@@ -304,40 +303,10 @@ pub export fn cpos(arg_t: [*c]SCRN, arg_x: ptrdiff_t, arg_y: ptrdiff_t) c_int {
     _ = &x;
     var y = arg_y;
     _ = &y;
-    if (y == t.*.y) {
-        if (((x > t.*.x) and ((x - t.*.x) < @as(ptrdiff_t, 4))) and !(t.*.ins != 0)) {
-            var cs: [*c][4]c_int = (t.*.scrn + @as(usize, @bitCast(@as(isize, @intCast(t.*.x))))) + @as(usize, @bitCast(@as(isize, @intCast(t.*.co * t.*.y))));
-            _ = &cs;
-            var as: [*c]c_int = (t.*.attr + @as(usize, @bitCast(@as(isize, @intCast(t.*.x))))) + @as(usize, @bitCast(@as(isize, @intCast(t.*.co * t.*.y))));
-            _ = &as;
-            while (true) {
-                if ((cs[0][0] < @as(c_int, 32)) or (cs[0][0] >= @as(c_int, 127))) break;
-                if (cs[0][1] != 0) break;
-                if (as.* != t.*.attrib) {
-                    _ = set_attr(t, as.*);
-                }
-                while (true) {
-                    obuf[
-                        @bitCast(@as(isize, @intCast(blk: {
-                            const ref = &obufp;
-                            const tmp = ref.*;
-                            ref.* += 1;
-                            break :blk tmp;
-                        })))
-                    ] = @as(u8, @bitCast(@as(i8, @truncate(cs[0][0]))));
-                    if (obufp == obufsiz) {
-                        ttflsh();
-                    }
-                    if (!false) break;
-                }
-                cs += 1;
-                as += 1;
-                t.*.x += 1;
-                if (!(x != t.*.x)) break;
-            }
-        }
-        if (x == t.*.x) return 0;
-    }
+    // Never walk the shadow to the right instead of CUP. After a last-column
+    // write, Ghostty am+xn leaves a pending wrap: JOE's t.x/t.y then match the
+    // caret while the physical cursor still sits at the right margin (often
+    // the top status row). Absolute CUP is cheap and keeps one caret.
     if (!(t.*.ms != 0) and ((t.*.attrib & ((INVERSE | UNDERLINE) | (@as(c_int, 256) << @intCast(BG_SHIFT)))) != 0)) {
         _ = set_attr(t, t.*.attrib & ~((INVERSE | UNDERLINE) | (@as(c_int, 1023) << @intCast(BG_SHIFT))));
     }
@@ -395,7 +364,6 @@ pub export fn nresize(arg_t: [*c]SCRN, arg_w: ptrdiff_t, arg_h: ptrdiff_t) c_int
     t.*.ofst = @ptrCast(@alignCast(joe_malloc(t.*.co * @as(ptrdiff_t, @bitCast(@as(c_ulong, @truncate(@sizeOf(ptrdiff_t))))))));
     t.*.ary = @ptrCast(@alignCast(joe_malloc(t.*.co * @as(ptrdiff_t, @bitCast(@as(c_ulong, @truncate(@sizeOf(struct_hentry))))))));
     nredraw(t);
-    zigScrnSwapResize(t);
     return 1;
 }
 pub export fn nredraw(arg_t: [*c]SCRN) void {
@@ -417,7 +385,12 @@ pub export fn nredraw(arg_t: [*c]SCRN) void {
     _ = set_attr(t, bg_text);
     _ = clrins(t);
     setregn(t, 0, t.*.li);
-    if (!(skiptop != 0)) {}
+    if (!(skiptop != 0) and (t.*.cl != null)) {
+        texec(t.*.cap, t.*.cl, 1, 0, 0, 0, 0);
+    } else if (t.*.cd != null) {
+        _ = cpos(t, 0, @as(ptrdiff_t, skiptop));
+        texec(t.*.cap, t.*.cd, 1, 0, 0, 0, 0);
+    }
 }
 pub export var bg_text: c_int = 0;
 pub export var skiptop: c_int = 0;
@@ -973,9 +946,11 @@ pub fn mfill(arg_dest: [*c][4]c_int, arg_val: c_int, arg_count: ptrdiff_t) callc
 pub fn fixupcursor(arg_t: [*c]SCRN) callconv(.c) void {
     var t = arg_t;
     _ = &t;
-    if (t.*.x == t.*.co) {
-        texec(t.*.cap, t.*.cr, 1, 0, 0, 0, 0);
-        t.*.x = 0;
+    // Pending wrap (x==co) or unknown: do not CR. CR from the last column on
+    // am+xn leaves a visible block at the right margin. Next CUP relocates.
+    if ((t.*.x >= t.*.co) or (t.*.x < 0) or (t.*.y < 0)) {
+        t.*.x = -@as(c_int, 1);
+        t.*.y = -@as(c_int, 1);
     }
 }
 pub export fn set_attr(arg_t: [*c]SCRN, arg_c: c_int) c_int {
@@ -1118,24 +1093,6 @@ pub export fn outatr_complete(arg_t: [*c]SCRN) void {
                 }
             }
             outatr_attrf.* = outatr_a;
-            // Hybrid scrn swap: keep shadow buffers, defer emission to Zig flush.
-            if (zig_screen_swap_enabled != 0) {
-                t.*.x = outatr_xx + @as(ptrdiff_t, outatr_wid);
-                t.*.y = outatr_yy;
-                while (outatr_wid > @as(c_int, 1)) {
-                    (blk: {
-                        const ref = &outatr_scrn;
-                        ref.* += 1;
-                        break :blk ref.*;
-                    })[0][0] = -@as(c_int, 1);
-                    (blk: {
-                        const ref = &outatr_attrf;
-                        ref.* += 1;
-                        break :blk ref.*;
-                    }).* = 0;
-                    outatr_wid -= 1;
-                }
-            } else {
             if (t.*.ins != 0) {
                 _ = clrins(t);
             }
@@ -1158,6 +1115,10 @@ pub export fn outatr_complete(arg_t: [*c]SCRN) void {
                 }
             }
             t.*.x += outatr_wid;
+            if (t.*.x >= t.*.co) {
+                t.*.x = -@as(c_int, 1);
+                t.*.y = -@as(c_int, 1);
+            }
             while (outatr_wid > @as(c_int, 1)) {
                 (blk: {
                     const ref = &outatr_scrn;
@@ -1170,7 +1131,6 @@ pub export fn outatr_complete(arg_t: [*c]SCRN) void {
                     break :blk ref.*;
                 }).* = 0;
                 outatr_wid -= 1;
-            }
             }
         }
     }
@@ -1216,14 +1176,14 @@ pub export fn outatr(arg_map: [*c]struct_charmap, arg_t: [*c]SCRN, arg_scrn_1: [
                     outatr_scrn[@as(c_int, 0)][@as(c_int, 0)] = -@as(c_int, 1);
                     outatr_complete(t);
                     _ = utf8_encode(@ptrCast(@alignCast(&buf)), c);
-                    if (zig_screen_swap_enabled == 0) ttputs(@ptrCast(@alignCast(&buf)));
+                    ttputs(@ptrCast(@alignCast(&buf)));
                     outatr_state = 3;
                 }
             } else if (outatr_state == @as(c_int, 3)) {
                 var buf: [16]u8 = undefined;
                 _ = &buf;
                 _ = utf8_encode(@ptrCast(@alignCast(&buf)), c);
-                if (zig_screen_swap_enabled == 0) ttputs(@ptrCast(@alignCast(&buf)));
+                ttputs(@ptrCast(@alignCast(&buf)));
             }
         } else {
             var x: ptrdiff_t = undefined;
@@ -1307,10 +1267,6 @@ pub export fn outatr(arg_map: [*c]struct_charmap, arg_t: [*c]SCRN, arg_scrn_1: [
         if ((scrn_1[0][0] == c) and (attrf.* == a)) return;
         scrn_1[0][0] = c;
         attrf.* = a;
-        if (zig_screen_swap_enabled != 0) {
-            t.*.x = xx + 1;
-            t.*.y = yy;
-        } else {
         if (t.*.ins != 0) {
             _ = clrins(t);
         }
@@ -1335,7 +1291,6 @@ pub export fn outatr(arg_map: [*c]struct_charmap, arg_t: [*c]SCRN, arg_scrn_1: [
             if (!false) break;
         }
         t.*.x += 1;
-        }
     } else {
         var buf: [16]u8 = undefined;
         _ = &buf;
@@ -1354,23 +1309,6 @@ pub export fn outatr(arg_map: [*c]struct_charmap, arg_t: [*c]SCRN, arg_scrn_1: [
         wid = joe_wcwidth(0, c);
         scrn_1[0][0] = c;
         attrf.* = a;
-        if (zig_screen_swap_enabled != 0) {
-            t.*.x = xx + @as(ptrdiff_t, wid);
-            t.*.y = yy;
-            while (wid > @as(c_int, 1)) {
-                (blk: {
-                    const ref = &scrn_1;
-                    ref.* += 1;
-                    break :blk ref.*;
-                })[0][0] = -@as(c_int, 1);
-                (blk: {
-                    const ref = &attrf;
-                    ref.* += 1;
-                    break :blk ref.*;
-                }).* = 0;
-                wid -= 1;
-            }
-        } else {
         if (t.*.ins != 0) {
             _ = clrins(t);
         }
@@ -1394,7 +1332,6 @@ pub export fn outatr(arg_map: [*c]struct_charmap, arg_t: [*c]SCRN, arg_scrn_1: [
                 break :blk ref.*;
             }).* = 0;
             wid -= 1;
-        }
         }
     }
 }
@@ -1459,12 +1396,6 @@ pub export fn eraeol(arg_t: [*c]SCRN, arg_x: ptrdiff_t, arg_y: ptrdiff_t, arg_at
         if (!(ss != s)) break;
     }
     if (s != ss) {
-        if (zig_screen_swap_enabled != 0) {
-            mfill(s, ' ', w);
-            _ = msetI(@ptrCast(@alignCast(a)), atr, w);
-            s[0][0] = '\n';
-            return 0;
-        }
         if (t.*.ce != null) {
             _ = cpos(t, x, y);
             if (t.*.attrib != atr) {
@@ -1896,13 +1827,12 @@ pub export fn nopen(arg_cap_1: [*c]CAP) [*c]SCRN {
         _ = fputs("Sorry, your terminal can't do absolute cursor positioning.\nIt's broken\n", __stderrp);
         return null;
     }
-    if (((((t.*.sr != null) or (t.*.SR != null)) and ((t.*.sf != null) or (t.*.SF != null))) and (t.*.cs != null)) or (((t.*.al != null) or (t.*.AL != null)) and ((t.*.dl != null) or (t.*.DL != null)))) {
-        t.*.scroll = 1;
-    } else {
-        t.*.scroll = 0;
-        if (tty_baud < @as(c_long, 38400)) {
-            opt_mid = 1;
-        }
+    // Hardware IL/DL/SF/SR shifts a stale image on Ghostty/xterm am+xn (the
+    // next paint only rewrites dirty rows). Always take JOE's "can't scroll"
+    // path: dirty the region and rewrite.
+    t.*.scroll = 0;
+    if (tty_baud < @as(c_long, 38400)) {
+        opt_mid = 1;
     }
     if ((((t.*.im != null) or (t.*.ic != null)) or (t.*.IC != null)) and ((t.*.dc != null) or (t.*.DC != null))) {
         t.*.insdel = 1;
@@ -2094,6 +2024,17 @@ pub fn cposs(arg_t: [*c]SCRN, arg_x: ptrdiff_t, arg_y: ptrdiff_t) callconv(.c) v
     var hl: ptrdiff_t = undefined;
     _ = &hl;
     fixupcursor(t);
+    // Absolute CUP only. Relative lf/DO/UP/tabs desync from the physical
+    // cursor on am+xn terminals (Ghostty): last-column wrap or a single extra
+    // LF on the bottom row shifts the whole window. Screen-swap used CUP-only
+    // for the same reason; keep that after dropping the swap path.
+    if ((t.*.x == x) and (t.*.y == y) and (t.*.x >= 0) and (t.*.y >= 0)) return;
+    if (t.*.cm != null) {
+        texec(t.*.cap, t.*.cm, 1, y, x, 0, 0);
+        t.*.x = x;
+        t.*.y = y;
+        return;
+    }
     if (t.*.rr != 0) {
         hy = t.*.top;
         hl = t.*.bot - @as(ptrdiff_t, 1);
@@ -2416,19 +2357,6 @@ pub fn doupscrl(arg_t: [*c]SCRN, arg_top: ptrdiff_t, arg_bot: ptrdiff_t, arg_amn
     var did: c_int = 0;
     _ = &did;
     if (!(amnt != 0)) return;
-    if (zig_screen_swap_enabled != 0) {
-        _ = mmove(@ptrCast(@alignCast(t.*.scrn + @as(usize, @bitCast(@as(isize, @intCast(top * t.*.co)))))), @ptrCast(@alignCast(t.*.scrn + @as(usize, @bitCast(@as(isize, @intCast((top + amnt) * t.*.co)))))), (((bot - top) - amnt) * t.*.co) * @as(ptrdiff_t, @bitCast(@as(c_ulong, @truncate(@sizeOf([4]c_int))))));
-        _ = mmove(@ptrCast(@alignCast(t.*.attr + @as(usize, @bitCast(@as(isize, @intCast(top * t.*.co)))))), @ptrCast(@alignCast(t.*.attr + @as(usize, @bitCast(@as(isize, @intCast((top + amnt) * t.*.co)))))), (((bot - top) - amnt) * t.*.co) * @as(ptrdiff_t, @bitCast(@as(c_ulong, @truncate(@sizeOf(c_int))))));
-        if ((bot == t.*.li) and (t.*.db != 0)) {
-            mfill(t.*.scrn + @as(usize, @bitCast(@as(isize, @intCast((t.*.li - amnt) * t.*.co)))), -@as(c_int, 1), amnt * t.*.co);
-            _ = msetI(@ptrCast(@alignCast(t.*.attr + @as(usize, @bitCast(@as(isize, @intCast((t.*.li - amnt) * t.*.co)))))), 0, amnt * t.*.co);
-            _ = msetI(@ptrCast(@alignCast((t.*.updtab + @as(usize, @bitCast(@as(isize, @intCast(t.*.li))))) - @as(usize, @bitCast(@as(isize, @intCast(amnt)))))), 1, amnt);
-        } else {
-            mfill(t.*.scrn + @as(usize, @bitCast(@as(isize, @intCast((bot - amnt) * t.*.co)))), ' ', amnt * t.*.co);
-            _ = msetI(@ptrCast(@alignCast(t.*.attr + @as(usize, @bitCast(@as(isize, @intCast((bot - amnt) * t.*.co)))))), 0, amnt * t.*.co);
-        }
-        return;
-    }
     _ = set_attr(t, atr);
     if (((top == @as(ptrdiff_t, 0)) and (bot == t.*.li)) and ((t.*.sf != null) or (t.*.SF != null))) {
         setregn(t, 0, t.*.li);
@@ -2539,19 +2467,6 @@ pub fn dodnscrl(arg_t: [*c]SCRN, arg_top: ptrdiff_t, arg_bot: ptrdiff_t, arg_amn
     var did: c_int = 0;
     _ = &did;
     if (!(amnt != 0)) return;
-    if (zig_screen_swap_enabled != 0) {
-        _ = mmove(@ptrCast(@alignCast(t.*.scrn + @as(usize, @bitCast(@as(isize, @intCast((top + amnt) * t.*.co)))))), @ptrCast(@alignCast(t.*.scrn + @as(usize, @bitCast(@as(isize, @intCast(top * t.*.co)))))), (((bot - top) - amnt) * t.*.co) * @as(ptrdiff_t, @bitCast(@as(c_ulong, @truncate(@sizeOf([4]c_int))))));
-        _ = mmove(@ptrCast(@alignCast(t.*.attr + @as(usize, @bitCast(@as(isize, @intCast((top + amnt) * t.*.co)))))), @ptrCast(@alignCast(t.*.attr + @as(usize, @bitCast(@as(isize, @intCast(top * t.*.co)))))), (((bot - top) - amnt) * t.*.co) * @as(ptrdiff_t, @bitCast(@as(c_ulong, @truncate(@sizeOf(c_int))))));
-        if (!(top != 0) and (t.*.da != 0)) {
-            mfill(t.*.scrn, -@as(c_int, 1), amnt * t.*.co);
-            _ = msetI(@ptrCast(@alignCast(t.*.attr)), 0, amnt * t.*.co);
-            _ = msetI(@ptrCast(@alignCast(t.*.updtab)), 1, amnt);
-        } else {
-            mfill(t.*.scrn + @as(usize, @bitCast(@as(isize, @intCast(t.*.co * top)))), ' ', amnt * t.*.co);
-            _ = msetI(@ptrCast(@alignCast(t.*.attr + @as(usize, @bitCast(@as(isize, @intCast(t.*.co * top)))))), 0, amnt * t.*.co);
-        }
-        return;
-    }
     _ = set_attr(t, atr);
     if (((top == @as(ptrdiff_t, 0)) and (bot == t.*.li)) and ((t.*.sr != null) or (t.*.SR != null))) {
         setregn(t, 0, t.*.li);
@@ -2651,6 +2566,10 @@ pub export fn nscroll(arg_t: [*c]SCRN, arg_atr: c_int) void {
     _ = &t;
     var atr = arg_atr;
     _ = &atr;
+    if (!(t.*.scroll != 0)) {
+        _ = msetD(@ptrCast(@alignCast(t.*.sary)), 0, t.*.li);
+        return;
+    }
     var y: ptrdiff_t = undefined;
     _ = &y;
     var z: ptrdiff_t = undefined;
@@ -2764,7 +2683,6 @@ pub export fn nclose(arg_t: [*c]SCRN) void {
     }
     ttclose();
     rmcap(t.*.cap);
-    zigScrnSwapDestroy();
     joe_free(@ptrCast(@alignCast(t.*.scrn)));
     joe_free(@ptrCast(@alignCast(t.*.attr)));
     joe_free(@ptrCast(@alignCast(t.*.sary)));
@@ -2772,6 +2690,17 @@ pub export fn nclose(arg_t: [*c]SCRN) void {
     joe_free(@ptrCast(@alignCast(t.*.htab)));
     joe_free(@ptrCast(@alignCast(t.*.ary)));
     joe_free(@ptrCast(@alignCast(t)));
+}
+/// When hardware scroll is off, nscrldn/nscrlup only mark rows dirty. Poison
+/// the shadow so the next paint cannot skip-if-same against stale cells.
+fn poison_scrn_rows(t: [*c]SCRN, top: ptrdiff_t, amnt: ptrdiff_t) void {
+    if (amnt <= 0 or t.*.scrn == null) return;
+    mfill(t.*.scrn + @as(usize, @bitCast(@as(isize, @intCast(top * t.*.co)))), -@as(c_int, 1), amnt * t.*.co);
+    if (t.*.attr != null) {
+        _ = msetI(@ptrCast(@alignCast(t.*.attr + @as(usize, @bitCast(@as(isize, @intCast(top * t.*.co)))))), 0, amnt * t.*.co);
+    }
+    t.*.x = -@as(c_int, 1);
+    t.*.y = -@as(c_int, 1);
 }
 pub export fn nscrldn(arg_t: [*c]SCRN, arg_top: ptrdiff_t, arg_bot: ptrdiff_t, arg_amnt: ptrdiff_t) void {
     var t = arg_t;
@@ -2785,6 +2714,7 @@ pub export fn nscrldn(arg_t: [*c]SCRN, arg_top: ptrdiff_t, arg_bot: ptrdiff_t, a
     var x: ptrdiff_t = undefined;
     _ = &x;
     if ((!(amnt != 0) or (top >= bot)) or (bot > t.*.li)) return;
+    const requested = amnt;
     if (((amnt < (bot - top)) and (((bot - top) - amnt) < @divTrunc(amnt, @as(ptrdiff_t, 2)))) or !(t.*.scroll != 0)) {
         amnt = bot - top;
     }
@@ -2809,6 +2739,11 @@ pub export fn nscrldn(arg_t: [*c]SCRN, arg_top: ptrdiff_t, arg_bot: ptrdiff_t, a
     _ = msetD(@ptrCast(@alignCast(t.*.sary + @as(usize, @bitCast(@as(isize, @intCast(top)))))), t.*.li, amnt);
     if (amnt == (bot - top)) {
         _ = msetI(@ptrCast(@alignCast(t.*.updtab + @as(usize, @bitCast(@as(isize, @intCast(top)))))), 1, amnt);
+        // Page-sized jumps need a poisoned shadow so skip-if-same cannot keep
+        // stale cells. Small wheel steps must keep the shadow for a cheap diff.
+        if (requested * @as(ptrdiff_t, 2) >= (bot - top)) {
+            poison_scrn_rows(t, top, amnt);
+        }
     }
 }
 pub export fn nscrlup(arg_t: [*c]SCRN, arg_top: ptrdiff_t, arg_bot: ptrdiff_t, arg_amnt: ptrdiff_t) void {
@@ -2823,6 +2758,7 @@ pub export fn nscrlup(arg_t: [*c]SCRN, arg_top: ptrdiff_t, arg_bot: ptrdiff_t, a
     var x: ptrdiff_t = undefined;
     _ = &x;
     if ((!(amnt != 0) or (top >= bot)) or (bot > t.*.li)) return;
+    const requested = amnt;
     if (((amnt < (bot - top)) and (((bot - top) - amnt) < @divTrunc(amnt, @as(ptrdiff_t, 2)))) or !(t.*.scroll != 0)) {
         amnt = bot - top;
     }
@@ -2847,6 +2783,9 @@ pub export fn nscrlup(arg_t: [*c]SCRN, arg_top: ptrdiff_t, arg_bot: ptrdiff_t, a
     _ = msetD(@ptrCast(@alignCast((t.*.sary + @as(usize, @bitCast(@as(isize, @intCast(bot))))) - @as(usize, @bitCast(@as(isize, @intCast(amnt)))))), t.*.li, amnt);
     if (amnt == (bot - top)) {
         _ = msetI(@ptrCast(@alignCast((t.*.updtab + @as(usize, @bitCast(@as(isize, @intCast(bot))))) - @as(usize, @bitCast(@as(isize, @intCast(amnt)))))), 1, amnt);
+        if (requested * @as(ptrdiff_t, 2) >= (bot - top)) {
+            poison_scrn_rows(t, bot - amnt, amnt);
+        }
     }
 }
 pub export fn scrn_invalidate(arg_t: [*c]SCRN) void {
@@ -2855,6 +2794,9 @@ pub export fn scrn_invalidate(arg_t: [*c]SCRN) void {
     mfill(t.*.scrn, -@as(c_int, 1), t.*.li * t.*.co);
     _ = msetI(@ptrCast(@alignCast(t.*.attr)), 0, t.*.li * t.*.co);
     _ = msetI(@ptrCast(@alignCast(t.*.updtab)), 1, t.*.li);
+    _ = msetD(@ptrCast(@alignCast(t.*.sary)), 0, t.*.li);
+    t.*.x = -@as(c_int, 1);
+    t.*.y = -@as(c_int, 1);
 }
 pub fn meta_color_single(arg_s: [*c]const u8) callconv(.c) c_int {
     var s = arg_s;
@@ -3394,72 +3336,15 @@ pub export fn setextpal(arg_t: [*c]SCRN, arg_palette: [*c]c_int) void {
 }
 
 
-// ── Zig-native screen swap (Phase 3 redesign deepen) ─────────────────
-// When `JOE_ZIG_SCREEN_SWAP` / `zig_screen_swap_enabled` is on, hybrid paint
-// paths update the `scrn`/`attr` shadow only; `zig_scrn_swap_flush` syncs into
-// the redesign `Screen`, runs cell-diff (+ ICH/DCH magic) flush, and drains
-// into hybrid `obuf`. Default on after soak; set JOE_ZIG_SCREEN_SWAP=0 to opt out.
-
-/// C-visible gate (also set from `JOE_ZIG_SCREEN_SWAP` in `ttopnn`). Default 1.
-pub export var zig_screen_swap_enabled: c_int = 1;
+// ── Soft caret / idle blink (hybrid paint path) ───────────────────────
 
 /// From `colors.zig` — scheme `-cursor` (default INVERSE).
 pub extern var bg_cursor: c_int;
-
-var zig_scr_storage: ?terminal.Screen = null;
-
-fn zigScrnSwapEnsure(t: [*c]SCRN) ?*terminal.Screen {
-    if (t == null) return null;
-    if (t.*.co <= 0 or t.*.li <= 0) return null;
-    const w: u16 = @intCast(t.*.co);
-    const h: u16 = @intCast(t.*.li);
-    if (zig_scr_storage) |*s| {
-        if (s.width != w or s.height != h) {
-            s.resize(w, h) catch return null;
-            s.clear();
-        }
-        return s;
-    }
-    zig_scr_storage = terminal.Screen.init(std.heap.c_allocator, w, h) catch return null;
-    // Absolute CUP during flush: hybrid swap paints under TERM am/xn where
-    // last-column wrap desyncs logical vs physical cursor for relative moves.
-    zig_scr_storage.?.flush_cup_only = true;
-    return &zig_scr_storage.?;
-}
-
-fn zigScrnSwapResize(t: [*c]SCRN) void {
-    if (zig_screen_swap_enabled == 0) return;
-    _ = zigScrnSwapEnsure(t);
-}
-
-fn zigScrnSwapDestroy() void {
-    if (zig_scr_storage) |*s| {
-        s.deinit();
-        zig_scr_storage = null;
-    }
-}
 
 fn zigPaletteSlice(t: [*c]SCRN) ?[]const i32 {
     if (t == null or t.*.palette == null) return null;
     // JOE truecolor palette is 256 ints (index 0 unused).
     return @as([*]const i32, @ptrCast(t.*.palette))[0..256];
-}
-
-/// Soft-paint caret inside a selection. Returns true when the caret is in soft
-/// mode (caller hides the hardware cursor). While moving the soft caret stays
-/// lit; when idle it blinks by skipping the paint on alternate half-periods.
-/// Blanks and letters clear inverse + underline (blank caret is underline-only).
-fn zigScrnApplySoftCursor(scr: *terminal.Screen, x: u16, y: u16, palette: ?[]const i32) bool {
-    if (x >= scr.width or y >= scr.height) return false;
-    const idx = @as(usize, y) * @as(usize, scr.width) + @as(usize, x);
-    const before = scr.cells[idx];
-    const cell = terminal.applySoftCursorCell(before, @intCast(bg_cursor), palette);
-    if (!terminal.softCursorApplied(before, cell)) return false;
-    if (zigScrnSoftCursorLit()) {
-        scr.writeCell(x, y, cell);
-    }
-    // Blink-off: leave the selection cell as-is (caret disappears into the mark).
-    return true;
 }
 
 extern fn mnow() c_long;
@@ -3541,76 +3426,38 @@ fn zigScrnSetHardwareCursorForSoft(soft_active: bool) void {
     if (soft_active) {
         // Soft paint is the caret inside a mark; HW cursor would cancel it on text.
         zigScrnHardwareCursorHide();
-    } else if (cursor_hw_hidden) {
+    }
+    // Show happens in zig_scrn_place_cursor after CUP, so the HW caret is
+    // never left at the last painted cell (top-right wrap / EL position).
+}
+
+/// Hide the HW caret for the duration of a redraw.
+pub export fn zig_scrn_before_paint() void {
+    zigScrnHardwareCursorHide();
+}
+
+/// Forget t.x/t.y, paint a soft caret if needed, CUP to (x,y), then show HW.
+pub export fn zig_scrn_place_cursor(arg_t: [*c]SCRN, arg_x: ptrdiff_t, arg_y: ptrdiff_t) void {
+    const t = arg_t;
+    if (t != null) {
+        t.*.x = -@as(c_int, 1);
+        t.*.y = -@as(c_int, 1);
+    }
+    zig_scrn_soft_cursor(t, arg_x, arg_y);
+    _ = cpos(t, arg_x, arg_y);
+    if (!cursor_soft_mode) {
         zigScrnHardwareCursorShow();
-        // Restore blink policy for the visible HW caret.
         if (cursor_blink_held) zigScrnHardwareCursorBlinkOff() else zigScrnHardwareCursorBlinkOn();
     }
-}
-
-/// End-of-frame swap emit: sync hybrid shadow → Zig Screen → flush → drain.
-/// Places the cursor at `(x, y)`. No-op when the swap gate is off.
-pub export fn zig_scrn_swap_flush(arg_t: [*c]SCRN, arg_x: ptrdiff_t, arg_y: ptrdiff_t) void {
-    const t = arg_t;
-    var x = arg_x;
-    var y = arg_y;
-    if (zig_screen_swap_enabled == 0 or t == null) return;
-    if (t.*.scrn == null or t.*.attr == null) return;
-
-    const scr = zigScrnSwapEnsure(t) orelse return;
-    if (x < 0) x = 0;
-    if (y < 0) y = 0;
-    if (x >= t.*.co) x = t.*.co - 1;
-    if (y >= t.*.li) y = t.*.li - 1;
-
-    const cells: [*]const [4]i32 = @ptrCast(@alignCast(t.*.scrn));
-    const attrs: [*]const i32 = @ptrCast(@alignCast(t.*.attr));
-    const pal = zigPaletteSlice(t);
-    terminal.syncHybridGridToScreen(
-        scr,
-        cells,
-        attrs,
-        @intCast(t.*.co),
-        @intCast(t.*.li),
-        pal,
-    );
-
-    // Soft-cursor before flush so the caret contrasts with mark inverse.
-    const soft_active = zigScrnApplySoftCursor(scr, @intCast(x), @intCast(y), pal);
-    zigScrnSetHardwareCursorForSoft(soft_active);
-
-    // Final cursor want. Invalidate first: previous frame may have left the
-    // physical cursor elsewhere (prompt/message). Presetting cursor_* without
-    // CUP made flush skip positioning and paint at the stale place (e.g. Δύο
-    // landed on the message line while buffer kept xlat D}o).
-    scr.cursor_x = @intCast(x);
-    scr.cursor_y = @intCast(y);
-    scr.cursor_valid = false;
-    scr.flush() catch {};
-
-    // Drain requires the drain gate; force on for this call then restore.
-    const old_drain = tty.zig_screen_drain_enabled;
-    tty.zig_screen_drain_enabled = 1;
-    defer tty.zig_screen_drain_enabled = old_drain;
-    _ = tty.drainZigScreen(scr) catch {};
-
-    // After paint/drain so idle blink is not cleared by cup/attr traffic.
-    // Engages from the first frame, before any keypress. Flush so ?12h leaves
-    // the obuf before we block in ttgetch.
     zig_scrn_cursor_maybe_blink();
-    _ = ttflsh();
-
-    t.*.x = x;
-    t.*.y = y;
 }
 
-/// Soft-paint caret in the hybrid shadow and emit it (non-swap / `cpos` path).
-/// No-op when screen swap is on (`zig_scrn_swap_flush` already soft-paints).
+/// Soft-paint caret in the hybrid shadow and emit it before `cpos`.
 pub export fn zig_scrn_soft_cursor(arg_t: [*c]SCRN, arg_x: ptrdiff_t, arg_y: ptrdiff_t) void {
     const t = arg_t;
     var x = arg_x;
     var y = arg_y;
-    if (zig_screen_swap_enabled != 0 or t == null) return;
+    if (t == null) return;
     if (t.*.scrn == null or t.*.attr == null) return;
     if (x < 0) x = 0;
     if (y < 0) y = 0;
@@ -3622,7 +3469,7 @@ pub export fn zig_scrn_soft_cursor(arg_t: [*c]SCRN, arg_x: ptrdiff_t, arg_y: ptr
     const cells: [*][4]c_int = @ptrCast(@alignCast(t.*.scrn));
     const attrs: [*]c_int = @ptrCast(@alignCast(t.*.attr));
     const raw = cells[idx][0];
-    // Unknown cells become spaces (same as swap sync); still soft-paint them.
+    // Unknown cells become spaces; still soft-paint them.
     const cp: u21 = if (raw < 0 or raw == '\n') ' ' else @intCast(raw);
 
     const pal = zigPaletteSlice(t);

@@ -422,7 +422,7 @@ void nclose(SCRN *t);
 int nresize(SCRN *t, ptrdiff_t w, ptrdiff_t h);
 void nscroll(SCRN *t, int atr);
 int cpos(SCRN *t, ptrdiff_t x, ptrdiff_t y);
-void zig_scrn_swap_flush(SCRN *t, ptrdiff_t x, ptrdiff_t y);
+void zig_scrn_soft_cursor(SCRN *t, ptrdiff_t x, ptrdiff_t y);
 
 Screen *screate(SCRN *scrn);
 void sresize(Screen *t);
@@ -510,7 +510,6 @@ extern char *joeterm;
 extern int env_lines;
 extern int env_columns;
 extern int bg_text;
-extern int zig_screen_swap_enabled;
 extern int orphan;
 extern int opt_mid;
 extern int berror;

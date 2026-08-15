@@ -28,26 +28,30 @@ pub const AELEM = ?*anyopaque;
 pub const aterm: AELEM = null;
 pub const ablank: AELEM = null;
 
+/// Nullable VA pointer. C passes NULL freely; plain `[*]AELEM` is UB on null
+/// and ReleaseFast deletes `@intFromPtr(p)!=0` checks, causing segfaults.
+pub const AVary = [*]allowzero AELEM;
+
 /// Array header layout: [size: isize][len: isize][AELEM...]
 /// The returned pointer points to the first element (AELEM).
 /// vary[-2] = size, vary[-1] = len
 
-fn aSize(vary: [*]AELEM) isize {
+fn aSize(vary: AVary) isize {
     const header = @as([*]isize, @ptrCast(vary)) - 2;
     return header[0];
 }
 
-fn aSetSize(vary: [*]AELEM, sz: isize) void {
+fn aSetSize(vary: AVary, sz: isize) void {
     const header = @as([*]isize, @ptrCast(vary)) - 2;
     header[0] = sz;
 }
 
-fn aLen(vary: [*]AELEM) isize {
+fn aLen(vary: AVary) isize {
     const header = @as([*]isize, @ptrCast(vary)) - 2;
     return header[1];
 }
 
-fn aSetLen(vary: [*]AELEM, l: isize) void {
+fn aSetLen(vary: AVary, l: isize) void {
     const header = @as([*]isize, @ptrCast(vary)) - 2;
     header[1] = l;
 }
@@ -56,17 +60,17 @@ fn aSetLen(vary: [*]AELEM, l: isize) void {
 // Exported API
 // ═══════════════════════════════════════════════════════════════════════
 
-export fn vamk(len: isize) [*]AELEM {
+export fn vamk(len: isize) AVary {
     const alloc_size = (1 + len) * @sizeOf(AELEM) + 2 * @sizeOf(isize);
     const newa = @as([*]isize, @alignCast(@ptrCast(joe_malloc(alloc_size) orelse unreachable)));
     newa[0] = len; // size
     newa[1] = 0;   // length
-    const elems = @as([*]AELEM, @ptrCast(newa + 2));
+    const elems = @as(AVary, @ptrCast(newa + 2));
     elems[0] = aterm;
     return elems;
 }
 
-export fn varm(vary: [*]AELEM) void {
+export fn varm(vary: AVary) void {
     if (@intFromPtr(vary) != 0) {
         _ = vazap(vary, 0, aLen(vary));
         const header = @as([*]isize, @ptrCast(vary)) - 2;
@@ -74,27 +78,27 @@ export fn varm(vary: [*]AELEM) void {
     }
 }
 
-export fn alen(ary: [*]AELEM) isize {
+export fn alen(ary: AVary) isize {
     if (@intFromPtr(ary) == 0) return 0;
     var n: isize = 0;
     while (ary[@as(usize, @intCast(n))] != aterm) n += 1;
     return n;
 }
 
-export fn vaensure(vary: [*]AELEM, len: isize) [*]AELEM {
+export fn vaensure(vary: AVary, len: isize) AVary {
     if (@intFromPtr(vary) == 0) return vamk(len);
     if (len > aSize(vary)) {
         const new_len = len + (len >> 2); // 25% extra
         const old_header = @as([*]isize, @ptrCast(vary)) - 2;
         const new_header = @as([*]isize, @alignCast(@ptrCast(joe_realloc(@ptrCast(old_header), (new_len + 1) * @sizeOf(AELEM) + 2 * @sizeOf(isize)) orelse return vary)));
-        const new_vary = @as([*]AELEM, @ptrCast(new_header + 2));
+        const new_vary = @as(AVary, @ptrCast(new_header + 2));
         aSetSize(new_vary, new_len);
         return new_vary;
     }
     return vary;
 }
 
-export fn vazap(vary: [*]AELEM, pos: isize, n: isize) [*]AELEM {
+export fn vazap(vary: AVary, pos: isize, n: isize) AVary {
     if (@intFromPtr(vary) != 0) {
         const l = aLen(vary);
         const end = if (pos + n <= l) pos + n else l;
@@ -104,7 +108,7 @@ export fn vazap(vary: [*]AELEM, pos: isize, n: isize) [*]AELEM {
     return vary;
 }
 
-export fn vatrunc(vary: [*]AELEM, len: isize) [*]AELEM {
+export fn vatrunc(vary: AVary, len: isize) AVary {
     var v = if (@intFromPtr(vary) == 0 or len > aSize(vary)) vaensure(vary, len) else vary;
     const l = aLen(v);
     if (len < l) {
@@ -117,7 +121,7 @@ export fn vatrunc(vary: [*]AELEM, len: isize) [*]AELEM {
     return v;
 }
 
-export fn vafill(vary: [*]AELEM, pos: isize, el: AELEM, len: isize) [*]AELEM {
+export fn vafill(vary: AVary, pos: isize, el: AELEM, len: isize) AVary {
     var v = vary;
     const olen = aLen(v);
     if (@intFromPtr(v) == 0 or pos + len > aSize(v)) v = vaensure(v, pos + len);
@@ -135,7 +139,7 @@ export fn vafill(vary: [*]AELEM, pos: isize, el: AELEM, len: isize) [*]AELEM {
     return v;
 }
 
-export fn vandup(vary: [*]AELEM, pos: isize, array: [*]AELEM, len: isize) [*]AELEM {
+export fn vandup(vary: AVary, pos: isize, array: AVary, len: isize) AVary {
     var v = vary;
     const olen = aLen(v);
     if (@intFromPtr(v) == 0 or pos + len > aSize(v)) v = vaensure(v, pos + len);
@@ -152,11 +156,11 @@ export fn vandup(vary: [*]AELEM, pos: isize, array: [*]AELEM, len: isize) [*]AEL
     return v;
 }
 
-export fn vadup(vary: [*]AELEM) [*]AELEM {
+export fn vadup(vary: AVary) AVary {
     if (@intFromPtr(vary) == 0) return vamk(0); return vandup(vamk(0), 0, vary, aLen(vary));
 }
 
-export fn _vaset(vary: [*]AELEM, pos: isize, el: AELEM) [*]AELEM {
+export fn _vaset(vary: AVary, pos: isize, el: AELEM) AVary {
     var v = vary;
     if (@intFromPtr(v) == 0 or pos + 1 > aSize(v)) v = vaensure(v, pos + 1);
     const l = aLen(v);
@@ -180,13 +184,13 @@ fn _acmp(a: *AELEM, b: *AELEM) c_int {
     return vscmp(a.*, b.*);
 }
 
-export fn vasort(ary: [*]AELEM, len: isize) [*]AELEM {
+export fn vasort(ary: AVary, len: isize) AVary {
     if (@intFromPtr(ary) == 0 or len == 0) return ary;
     jsort(@ptrCast(ary), len, @sizeOf(AELEM), @ptrCast(&_acmp));
     return ary;
 }
 
-export fn vadel(ary: [*]AELEM, ofst: isize, len: isize) void {
+export fn vadel(ary: AVary, ofst: isize, len: isize) void {
     if (@intFromPtr(ary) != 0 and ofst < aLen(ary)) {
         var l = len;
         const al = aLen(ary);
@@ -205,7 +209,7 @@ export fn vadel(ary: [*]AELEM, ofst: isize, len: isize) void {
     }
 }
 
-export fn vauniq(ary: [*]AELEM) void {
+export fn vauniq(ary: AVary) void {
     if (@intFromPtr(ary) != 0) {
         var len = aLen(ary);
         var x: isize = 0;
@@ -218,7 +222,7 @@ export fn vauniq(ary: [*]AELEM) void {
     }
 }
 
-export fn vawords(a: [*]AELEM, s: ?*const anyopaque, len: isize, sep: ?*const anyopaque, seplen: isize) [*]AELEM {
+export fn vawords(a: AVary, s: ?*const anyopaque, len: isize, sep: ?*const anyopaque, seplen: isize) AVary {
     var av = if (@intFromPtr(a) != 0) vatrunc(a, 0) else vamk(10);
     var remaining = len;
     var ptr = s;
@@ -250,7 +254,7 @@ export fn vawords(a: [*]AELEM, s: ?*const anyopaque, len: isize, sep: ?*const an
 /// pointers so it can be called from other Zig modules (and C) without
 /// fighting the `[*]AELEM` non-null pointer type.  Implements the macro.
 pub export fn vaadd(vary: ?*anyopaque, el: ?*anyopaque) ?*anyopaque {
-    const v = @as([*]AELEM, @alignCast(@ptrCast(vary orelse @as(?*anyopaque, @ptrFromInt(0)))));
+    const v = @as(AVary, @alignCast(@ptrCast(vary orelse @as(?*anyopaque, @ptrFromInt(0)))));
     const r = _vaadd(v, el);
     return @ptrCast(r);
 }
@@ -260,7 +264,7 @@ pub export fn vaadd(vary: ?*anyopaque, el: ?*anyopaque) ?*anyopaque {
 // ═══════════════════════════════════════════════════════════════════════
 
 /// Implements the vaadd() macro for use from Zig code.
-fn _vaadd(vary: [*]AELEM, el: AELEM) [*]AELEM {
+fn _vaadd(vary: AVary, el: AELEM) AVary {
     if (@intFromPtr(vary) == 0 or aLen(vary) == aSize(vary))
         return _vaset(vary, aLen(vary), el);
     const l = aLen(vary);

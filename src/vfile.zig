@@ -90,7 +90,7 @@ const VFILE = extern struct {
 // ═══════════════════════════════════════════════════════════════════════
 
 /// Sentinel node for the VFILE doubly-linked list (circular).
-var vfile_sentinel: VFILE = undefined;
+var vfile_sentinel: VFILE linksection("__DATA,__joe_vfsent") = undefined;
 var vfile_sentinel_ready: bool = false;
 
 /// Free page list.

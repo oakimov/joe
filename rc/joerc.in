@@ -162,8 +162,9 @@
 		OSC 52 (default on). Selection highlight stays. Right-click (or
 		middle-click) pastes. Use -nomouseclip to disable.
 
- -mousewheel 4	Lines to scroll per mouse-wheel notch (1-32; light acceleration
-		applies when notches arrive quickly).
+ -mousewheel 3	Lines to scroll per mouse-wheel notch (1-32; default 3, matching
+		OpenCode). The caret stays on the same screen row and snaps to
+		EOL when that cell has no character.
 
  -joexterm	If you are using XTerm version 212 or higher, and if it was
 		configured with --enable-paste64, set this flag: it allows

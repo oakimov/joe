@@ -3,6 +3,7 @@
 //! Faithful C-ABI Path A port of JOE main (maint/edupd/edloop/nungetc/timer_play/ushowlog + entry + startup globals).
 
 const std = @import("std");
+const build_options = @import("build_options");
 const ptrdiff_t = c_long;
 
 const TYPETW: c_int = 0x0100;
@@ -386,8 +387,9 @@ pub extern fn nclose(t: [*c]SCRN) void;
 pub extern fn nresize(t: [*c]SCRN, w: ptrdiff_t, h: ptrdiff_t) c_int;
 pub extern fn nscroll(t: [*c]SCRN, atr: c_int) void;
 pub extern fn cpos(t: [*c]SCRN, x: ptrdiff_t, y: ptrdiff_t) c_int;
-pub extern fn zig_scrn_swap_flush(t: [*c]SCRN, x: ptrdiff_t, y: ptrdiff_t) void;
 pub extern fn zig_scrn_soft_cursor(t: [*c]SCRN, x: ptrdiff_t, y: ptrdiff_t) void;
+pub extern fn zig_scrn_before_paint() void;
+pub extern fn zig_scrn_place_cursor(t: [*c]SCRN, x: ptrdiff_t, y: ptrdiff_t) void;
 pub extern fn zig_scrn_cursor_activity() void;
 pub extern fn zig_scrn_cursor_maybe_blink() void;
 pub extern fn screate(scrn: [*c]SCRN) [*c]Screen;
@@ -462,7 +464,6 @@ pub extern var joeterm: [*c]u8;
 pub extern var env_lines: c_int;
 pub extern var env_columns: c_int;
 pub extern var bg_text: c_int;
-pub extern var zig_screen_swap_enabled: c_int;
 pub extern var orphan: c_int;
 pub extern var opt_mid: c_int;
 pub extern var berror: c_int;
@@ -503,6 +504,7 @@ pub export fn edupd(arg_flg: c_int) void {
         staupd = 1;
         dostaupd = 0;
     }
+    zig_scrn_before_paint();
     ttgtsz(&wid, &hei);
     if (nresize(maint.*.t, wid, hei) != 0) {
         sresize(maint);
@@ -522,15 +524,8 @@ pub export fn edupd(arg_flg: c_int) void {
         w = w.*.link.next;
         if (!(w != maint.*.curwin)) break;
     }
-    if (zig_screen_swap_enabled != 0) {
-        zig_scrn_swap_flush(maint.*.t, maint.*.curwin.*.x + maint.*.curwin.*.curx, maint.*.curwin.*.y + maint.*.curwin.*.cury);
-    } else {
-        zig_scrn_soft_cursor(maint.*.t, maint.*.curwin.*.x + maint.*.curwin.*.curx, maint.*.curwin.*.y + maint.*.curwin.*.cury);
-        _ = cpos(maint.*.t, maint.*.curwin.*.x + maint.*.curwin.*.curx, maint.*.curwin.*.y + maint.*.curwin.*.cury);
-        // cpos/attr traffic can clear blink; re-assert idle blink from first paint.
-        zig_scrn_cursor_maybe_blink();
-        _ = ttflsh();
-    }
+    zig_scrn_place_cursor(maint.*.t, maint.*.curwin.*.x + maint.*.curwin.*.curx, maint.*.curwin.*.y + maint.*.curwin.*.cury);
+    _ = ttflsh();
     staupd = 0;
 }
 pub var ahead: c_int = 0;
@@ -602,7 +597,9 @@ pub export fn edloop(arg_flg: c_int) c_int {
             } else {
                 bw_1 = null;
             }
-            if ((c == @as(c_int, 10)) and (!(ahead != 0) or ((bw_1 != null) and (bw_1.*.pasting != 0)))) {
+            // LF is bound to deleol (^J). Map it to CR (rtn) during bracketed paste,
+            // startup typeahead, or when more keys are already pending (typical paste).
+            if ((c == @as(c_int, 10)) and (!(ahead != 0) or ((bw_1 != null) and (bw_1.*.pasting != 0)) or (ttcheck() != 0))) {
                 c = 13;
             }
             if ((((((shell_kbd != null) and ((maint.*.curwin.*.watom.*.what & TYPETW) != 0)) and (bw_1.*.b.*.pid != 0)) and !(bw_1.*.b.*.vt != null)) and !(bw_1.*.b.*.raw != 0)) and (piseof(bw_1.*.cursor) != 0)) {
@@ -853,7 +850,7 @@ pub export fn main(arg_argc: c_int, arg_real_argv: [*c][*c]u8, arg_envv: [*c]con
     while (true) {
         t = null;
         s = null;
-        t = vsncpy(null, 0, "", @as(ptrdiff_t, @bitCast(@as(c_ulong, @truncate(@sizeOf(@TypeOf("".*)) -% @as(c_ulong, 1))))));
+        t = vsncpy(null, 0, build_options.joerc.ptr, @as(ptrdiff_t, @intCast(build_options.joerc.len)));
         t = vsncpy(t, if (t != null) (@as([*c]ptrdiff_t, @ptrCast(@alignCast(t))) - @as(usize, @bitCast(@as(isize, @intCast(@as(c_int, 1)))))).* else @as(ptrdiff_t, 0), run, if (run != null) (@as([*c]ptrdiff_t, @ptrCast(@alignCast(run))) - @as(usize, @bitCast(@as(isize, @intCast(@as(c_int, 1)))))).* else @as(ptrdiff_t, 0));
         t = vsncpy(t, if (t != null) (@as([*c]ptrdiff_t, @ptrCast(@alignCast(t))) - @as(usize, @bitCast(@as(isize, @intCast(@as(c_int, 1)))))).* else @as(ptrdiff_t, 0), "rc.", @as(ptrdiff_t, @bitCast(@as(c_ulong, @truncate(@sizeOf(@TypeOf("rc.".*)) -% @as(c_ulong, 1))))));
         t = vsncpy(t, if (t != null) (@as([*c]ptrdiff_t, @ptrCast(@alignCast(t))) - @as(usize, @bitCast(@as(isize, @intCast(@as(c_int, 1)))))).* else @as(ptrdiff_t, 0), locale_msgs, slen(locale_msgs));
@@ -864,7 +861,7 @@ pub export fn main(arg_argc: c_int, arg_real_argv: [*c][*c]u8, arg_envv: [*c]con
             _ = &need_nope;
             if (((@as(c_int, locale_msgs[@as(c_int, 0)]) != 0) and (@as(c_int, locale_msgs[@as(c_int, 1)]) != 0)) and (@as(c_int, locale_msgs[@as(c_int, 2)]) == @as(c_int, '_'))) {
                 vsrm(t);
-                t = vsncpy(null, 0, "", @as(ptrdiff_t, @bitCast(@as(c_ulong, @truncate(@sizeOf(@TypeOf("".*)) -% @as(c_ulong, 1))))));
+                t = vsncpy(null, 0, build_options.joerc.ptr, @as(ptrdiff_t, @intCast(build_options.joerc.len)));
                 t = vsncpy(t, if (t != null) (@as([*c]ptrdiff_t, @ptrCast(@alignCast(t))) - @as(usize, @bitCast(@as(isize, @intCast(@as(c_int, 1)))))).* else @as(ptrdiff_t, 0), run, if (run != null) (@as([*c]ptrdiff_t, @ptrCast(@alignCast(run))) - @as(usize, @bitCast(@as(isize, @intCast(@as(c_int, 1)))))).* else @as(ptrdiff_t, 0));
                 t = vsncpy(t, if (t != null) (@as([*c]ptrdiff_t, @ptrCast(@alignCast(t))) - @as(usize, @bitCast(@as(isize, @intCast(@as(c_int, 1)))))).* else @as(ptrdiff_t, 0), "rc.", @as(ptrdiff_t, @bitCast(@as(c_ulong, @truncate(@sizeOf(@TypeOf("rc.".*)) -% @as(c_ulong, 1))))));
                 t = vsncpy(t, if (t != null) (@as([*c]ptrdiff_t, @ptrCast(@alignCast(t))) - @as(usize, @bitCast(@as(isize, @intCast(@as(c_int, 1)))))).* else @as(ptrdiff_t, 0), locale_msgs, 2);
@@ -878,7 +875,7 @@ pub export fn main(arg_argc: c_int, arg_real_argv: [*c][*c]u8, arg_envv: [*c]con
             }
             if (need_nope != 0) {
                 vsrm(t);
-                t = vsncpy(null, 0, "", @as(ptrdiff_t, @bitCast(@as(c_ulong, @truncate(@sizeOf(@TypeOf("".*)) -% @as(c_ulong, 1))))));
+                t = vsncpy(null, 0, build_options.joerc.ptr, @as(ptrdiff_t, @intCast(build_options.joerc.len)));
                 t = vsncpy(t, if (t != null) (@as([*c]ptrdiff_t, @ptrCast(@alignCast(t))) - @as(usize, @bitCast(@as(isize, @intCast(@as(c_int, 1)))))).* else @as(ptrdiff_t, 0), run, if (run != null) (@as([*c]ptrdiff_t, @ptrCast(@alignCast(run))) - @as(usize, @bitCast(@as(isize, @intCast(@as(c_int, 1)))))).* else @as(ptrdiff_t, 0));
                 t = vsncpy(t, if (t != null) (@as([*c]ptrdiff_t, @ptrCast(@alignCast(t))) - @as(usize, @bitCast(@as(isize, @intCast(@as(c_int, 1)))))).* else @as(ptrdiff_t, 0), "rc", @as(ptrdiff_t, @bitCast(@as(c_ulong, @truncate(@sizeOf(@TypeOf("rc".*)) -% @as(c_ulong, 1))))));
                 if (!(stat(t, &sbuf) != 0)) {

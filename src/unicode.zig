@@ -166,37 +166,39 @@ pub const REPLLEN: c_int = 3;
 pub const FOLDMAGIC: c_int = 0x4000000;
 
 // ══════════════════════════════════════════════════════════════════════
-// Global character class instances (moved from unicode.c)
+// ══════════════════════════════════════════════════════════════════════
+// Global character class instances — defined in unicode_globals.c
 // ══════════════════════════════════════════════════════════════════════
 
-export var cclass_upper: Cclass = std.mem.zeroes(Cclass);
-export var cclass_lower: Cclass = std.mem.zeroes(Cclass);
-export var cclass_alpha: Cclass = std.mem.zeroes(Cclass);
-export var cclass_alpha_: Cclass = std.mem.zeroes(Cclass);
-export var cclass_notalpha_: Cclass = std.mem.zeroes(Cclass);
-export var cclass_alnum: Cclass = std.mem.zeroes(Cclass);
-export var cclass_alnum_: Cclass = std.mem.zeroes(Cclass);
-export var cclass_notalnum_: Cclass = std.mem.zeroes(Cclass);
-export var cclass_digit: Cclass = std.mem.zeroes(Cclass);
-export var cclass_notdigit: Cclass = std.mem.zeroes(Cclass);
-export var cclass_xdigit: Cclass = std.mem.zeroes(Cclass);
-export var cclass_punct: Cclass = std.mem.zeroes(Cclass);
-export var cclass_space: Cclass = std.mem.zeroes(Cclass);
-export var cclass_notspace: Cclass = std.mem.zeroes(Cclass);
-export var cclass_blank: Cclass = std.mem.zeroes(Cclass);
-export var cclass_ctrl: Cclass = std.mem.zeroes(Cclass);
-export var cclass_graph: Cclass = std.mem.zeroes(Cclass);
-export var cclass_print: Cclass = std.mem.zeroes(Cclass);
-export var cclass_word: Cclass = std.mem.zeroes(Cclass);
-export var cclass_notword: Cclass = std.mem.zeroes(Cclass);
-export var cclass_combining: Cclass = std.mem.zeroes(Cclass);
-export var cclass_double: Cclass = std.mem.zeroes(Cclass);
+// Storage lives in src/unicode_globals.c (correct BSS sizes on Darwin).
+extern var cclass_upper: Cclass;
+extern var cclass_lower: Cclass;
+extern var cclass_alpha: Cclass;
+extern var cclass_alpha_: Cclass;
+extern var cclass_notalpha_: Cclass;
+extern var cclass_alnum: Cclass;
+extern var cclass_alnum_: Cclass;
+extern var cclass_notalnum_: Cclass;
+extern var cclass_digit: Cclass;
+extern var cclass_notdigit: Cclass;
+extern var cclass_xdigit: Cclass;
+extern var cclass_punct: Cclass;
+extern var cclass_space: Cclass;
+extern var cclass_notspace: Cclass;
+extern var cclass_blank: Cclass;
+extern var cclass_ctrl: Cclass;
+extern var cclass_graph: Cclass;
+extern var cclass_print: Cclass;
+extern var cclass_word: Cclass;
+extern var cclass_notword: Cclass;
+extern var cclass_combining: Cclass;
+extern var cclass_double: Cclass;
 
-export var rtree_tolower: Rtree = std.mem.zeroes(Rtree);
-export var rtree_toupper: Rtree = std.mem.zeroes(Rtree);
-export var rtree_fold: Rtree = std.mem.zeroes(Rtree);
+extern var rtree_tolower: Rtree;
+extern var rtree_toupper: Rtree;
+extern var rtree_fold: Rtree;
 
-export var unicat_hash: ?*Hash = null;
+extern var unicat_hash: ?*Hash;
 
 extern var locale_map: *Charmap;
 

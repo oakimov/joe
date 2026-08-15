@@ -47,24 +47,22 @@ Copy into the path the soak suite expects:
 cp -f zig-out/bin/joe joe/joe
 ```
 
-Release-ish install:
+Release-ish install (bin + etc/joe + share/joe + man/doc/desktop; no symlinks):
 
 ```sh
-zig build -Doptimize=ReleaseFast --prefix /usr/local \
-  -Djoerc=/usr/local/etc/joe/ \
-  -Djoedata=/usr/local/share/joe/
+zig build -Doptimize=ReleaseFast --prefix /opt/local
 ```
 
-Useful options: `-Djoerc=`, `-Djoedata=`, `-Dselinux=true`, `-Dgpm=true` (Linux).  
-Steps: `zig build run`, `terminal-test`, `render-test`, `window-test`, `phase8-verify`, `uninstall`.
-
-Empty `JOERC`/`JOEDATA` (default) → embedded builtins + `~/.joe` / XDG still work.
+`JOERC`/`JOEDATA` default to `PREFIX/etc/joe/` and `PREFIX/share/joe/`. Override with
+`-Djoerc=` / `-Djoedata=` (empty forces builtins + `~/.joe` / XDG). Also: `-Dspell=`,
+`-Dselinux=true`, `-Dgpm=true` (Linux). Steps: `zig build run`, `terminal-test`,
+`render-test`, `window-test`, `phase8-verify`, `uninstall`.
 
 ### Soak gate (mandatory before claiming done)
 
 ```sh
 cp -f zig-out/bin/joe joe/joe
-JOE_ZIG_SCREEN_SWAP=0 ./runtests
+./runtests
 # Expect: Ran 196 tests ... OK
 ```
 
@@ -72,7 +70,7 @@ Do **not** use `pytest`. Root `./runtests` (or `cd tests && python3 -m unittest 
 
 Notes:
 
-- `JOE_ZIG_SCREEN_SWAP` defaults **on** in the binary; soak historically uses `=0` for stability. Fix regressions under both when touching `scrn` / help / paint.
+- Paint is hybrid-only (incremental `scrn`/`ttputs`). The experimental Zig screen-swap gate was removed.
 - One flake has been seen on a viewmode table exit; re-run once before chasing ghosts.
 - Help coverage was historically missing (`# TODO: help` in `tests/commands.py`); a translate-c `continue` bug garbled `^K H` until fixed — prefer adding a screen assertion if you touch help again.
 
@@ -101,12 +99,12 @@ zig build
   → exe (link libc + ncurses)
   → object from src/ported.zig
        → all Path A modules export JOE ABI
-  → install bin/joe + share/joe/{syntax,colors,charmaps,lang} + etc/joe
+  → install bin/{joe,jmacs,jstar,rjoe,jpico} + etc/joe + share/joe/{syntax,colors,charmaps,lang} + man/doc/desktop
 ```
 
 **Paint / viewmode (live):** `src/bw_lgen.zig` owns buffer-window paint, Markdown
-viewmode, tables, OSC 8, etc., using `src/render/` pieces. Hybrid screen swap is
-gated via `JOE_ZIG_SCREEN_SWAP` in `src/scrn.zig` / `src/tty.zig`.
+viewmode, tables, OSC 8, etc., using `src/render/` pieces. Screen emission is
+hybrid Path A (`src/scrn.zig` / `src/tty.zig`).
 
 **Entry / loop:** `src/main.zig` (`main`, `edloop`, `edupd`, …).
 
@@ -130,7 +128,7 @@ for-loop `switch` in `while (true)` such that Zig `continue` restarts the while
    (undersized fakes smash stacks — see Path A `ufile` history).
 5. **translate-c footguns:** `sc("...")` lengths, `while(true)+continue`, fake libc
    types, `return undefined`. Prefer hand-fixing control flow after translate-c.
-6. **Always soak** (`JOE_ZIG_SCREEN_SWAP=0 ./runtests` → 196/196) before “done.”
+6. **Always soak** (`./runtests` → 196/196) before “done.”
 7. **Commits:** focused messages; update `plans/zig-rewrite-architecture.md` when
    finishing a phase-sized chunk.
 8. **Parallelism:** independent modules/tests can use subagents; keep one soak gate

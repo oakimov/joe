@@ -7,9 +7,16 @@ pub fn build(b: *std.Build) void {
     // Phase 8: optional Linux-only deps (never required on Darwin).
     const want_selinux = b.option(bool, "selinux", "Link libselinux and enable SELinux helpers") orelse false;
     const want_gpm = b.option(bool, "gpm", "Link libgpm and enable Linux console mouse") orelse false;
-    // System config/data dirs (empty → builtins + ~/.joe / XDG; production installs should set these).
-    const joerc = b.option([]const u8, "joerc", "JOERC system rc directory (trailing slash)") orelse "";
-    const joedata = b.option([]const u8, "joedata", "JOEDATA system data directory (trailing slash)") orelse "";
+    // System dirs: default from --prefix (like classic make install). Pass -Djoerc= / -Djoedata=
+    // explicitly empty to force builtins-only + ~/.joe / XDG.
+    const joerc_opt = b.option([]const u8, "joerc", "JOERC system rc directory (trailing slash; default: PREFIX/etc/joe/)");
+    const joedata_opt = b.option([]const u8, "joedata", "JOEDATA system data directory (trailing slash; default: PREFIX/share/joe/)");
+    const spell = b.option([]const u8, "spell", "Spell checker command embedded in installed rc files") orelse "ispell";
+
+    const joerc = ensureTrailingSlash(b, joerc_opt orelse b.fmt("{s}/etc/joe/", .{b.install_prefix}));
+    const joedata = ensureTrailingSlash(b, joedata_opt orelse b.fmt("{s}/share/joe/", .{b.install_prefix}));
+    const joedoc = b.fmt("{s}/share/doc/joe", .{b.install_prefix});
+    const bindir = b.exe_dir;
 
     const is_linux = target.result.os.tag == .linux;
     const enable_selinux = want_selinux and is_linux;
@@ -79,10 +86,17 @@ pub fn build(b: *std.Build) void {
     window_mod.addImport("render", render_mod);
 
     // ── Live editor (Path A Zig) ───────────────────────────────────
+    // Darwin + ReleaseFast: Zig/LLVM GlobalMerge emits size-0 Mach-O BSS aliases;
+    // the linker then truncates merge blobs and globals alias (segfault at startup).
+    // Use Debug codegen for the ported object on macOS until GlobalMerge/BSS is fixed upstream.
+    const ported_optimize: std.builtin.OptimizeMode = if (target.result.os.tag == .macos and optimize == .ReleaseFast)
+        .Debug
+    else
+        optimize;
     const ported_mod = b.createModule(.{
         .root_source_file = b.path("src/ported.zig"),
         .target = target,
-        .optimize = optimize,
+        .optimize = ported_optimize,
         .link_libc = true,
     });
     ported_mod.addOptions("build_options", build_opts);
@@ -102,21 +116,29 @@ pub fn build(b: *std.Build) void {
     });
     mod.addObject(ported_obj);
 
-    // ── Install binary + data (Phase 8) ───────────────────────────
-    b.installArtifact(exe);
+    // Unicode BSS globals (C): avoid Zig/LLVM GlobalMerge size-0 alias bugs on Darwin.
+    mod.addCSourceFile(.{ .file = b.path("src/unicode_globals.c"), .flags = &.{ "-std=c99", "-fno-common" } });
 
-    // System data layout mirrors historical $(data_joedir) / $(sysconf_joedir).
+    // ── Install binary + data (classic make install layout) ───────
+    // Real installed files only — no symlinks. Personality names are full
+    // copies of the joe binary (argv[0] selects jmacsrc/jstarrc/…).
+    b.installArtifact(exe);
+    for ([_][]const u8{ "jmacs", "jstar", "rjoe", "jpico" }) |name| {
+        const inst = b.addInstallArtifact(exe, .{ .dest_sub_path = name });
+        b.getInstallStep().dependOn(&inst.step);
+    }
+
     b.installDirectory(.{
         .source_dir = b.path("syntax"),
         .install_dir = .{ .custom = "share/joe/syntax" },
         .install_subdir = "",
-        .exclude_extensions = &.{ ".am", ".in" },
+        .include_extensions = &.{".jsf"},
     });
     b.installDirectory(.{
         .source_dir = b.path("colors"),
         .install_dir = .{ .custom = "share/joe/colors" },
         .install_subdir = "",
-        .exclude_extensions = &.{ ".am", ".in" },
+        .include_extensions = &.{".jcf"},
     });
     b.installDirectory(.{
         .source_dir = b.path("charmaps"),
@@ -131,16 +153,65 @@ pub fn build(b: *std.Build) void {
         .install_subdir = "",
         .include_extensions = &.{".po"},
     });
-    b.installDirectory(.{
-        .source_dir = b.path("rc"),
-        .install_dir = .{ .custom = "etc/joe" },
-        .install_subdir = "",
-        .exclude_extensions = &.{ ".am", ".in" },
+
+    // Substituted rc files (from *.in) + helpers — same as Automake rc/.
+    const joerc_sub = stripTrailingSlash(joerc);
+    const joedata_sub = stripTrailingSlash(joedata);
+    const generated_rc = b.addWriteFiles();
+    const rc_ins = [_]struct { in_path: []const u8, out_name: []const u8 }{
+        .{ .in_path = "rc/joerc.in", .out_name = "joerc" },
+        .{ .in_path = "rc/jmacsrc.in", .out_name = "jmacsrc" },
+        .{ .in_path = "rc/jstarrc.in", .out_name = "jstarrc" },
+        .{ .in_path = "rc/rjoerc.in", .out_name = "rjoerc" },
+        .{ .in_path = "rc/jpicorc.in", .out_name = "jpicorc" },
+        .{ .in_path = "rc/joerc.zh_TW.in", .out_name = "joerc.zh_TW" },
+        .{ .in_path = "rc/jicerc.ru.in", .out_name = "jicerc.ru" },
+    };
+    for (rc_ins) |rc| {
+        const body = substituteInstallPaths(b, readSrc(b, rc.in_path), .{
+            .joerc = joerc_sub,
+            .joedata = joedata_sub,
+            .joedoc = joedoc,
+            .spell = spell,
+            .bindir = null,
+        });
+        const generated = generated_rc.add(rc.out_name, body);
+        b.getInstallStep().dependOn(&b.addInstallFile(generated, b.fmt("etc/joe/{s}", .{rc.out_name})).step);
+    }
+    b.installFile("rc/ftyperc", "etc/joe/ftyperc");
+    b.installFile("rc/shell.sh", "etc/joe/shell.sh");
+    b.installFile("rc/shell.csh", "etc/joe/shell.csh");
+
+    // Man pages (paths substituted like man/Makefile.am).
+    const man_body = substituteInstallPaths(b, readSrc(b, "man/joe.1.in"), .{
+        .joerc = joerc_sub,
+        .joedata = joedata_sub,
+        .joedoc = joedoc,
+        .spell = spell,
+        .bindir = bindir,
     });
+    const generated_man = b.addWriteFiles();
+    const man1 = generated_man.add("joe.1", man_body);
+    b.getInstallStep().dependOn(&b.addInstallFile(man1, "share/man/man1/joe.1").step);
+    // Russian translation is prebuilt (no @JOERC@ placeholders).
+    b.installFile("man/ru/joe.1", "share/man/ru/man1/joe.1");
 
-    // Personality aliases (jmacs/jstar/rjoe/jpico → joe) are created by
-    // packagers / `tools/verify_rc.py` as needed; JOE selects rc via argv[0].
+    // Docs + desktop entries (classic data_doc_DATA / desktopdir).
+    b.installFile("README.md", "share/doc/joe/README.md");
+    b.installFile("docs/README.old", "share/doc/joe/README.old");
+    b.installFile("docs/man.md", "share/doc/joe/man.md");
+    b.installFile("ChangeLog", "share/doc/joe/ChangeLog");
+    b.installFile("docs/hacking.md", "share/doc/joe/hacking.md");
+    b.installFile("NEWS.md", "share/doc/joe/NEWS.md");
 
+    const desktop_files = [_][]const u8{ "joe.desktop", "jmacs.desktop", "jstar.desktop", "jpico.desktop" };
+    const generated_desktop = b.addWriteFiles();
+    for (desktop_files) |name| {
+        const src = readSrc(b, b.fmt("desktop/{s}", .{name}));
+        const body = replaceAll(b, src, "/usr/bin/joe", b.fmt("{s}/joe", .{bindir}));
+        const generated = generated_desktop.add(name, body);
+        b.getInstallStep().dependOn(&b.addInstallFile(generated, b.fmt("share/applications/{s}", .{name})).step);
+    }
 
     // ── Unit-test steps (native redesign trees) ───────────────────
     const terminal_tests = b.addTest(.{
@@ -169,7 +240,7 @@ pub fn build(b: *std.Build) void {
 
     // Phase 8 verification suite (rc/jsf/jcf/unicat/bench).
     const phase8 = b.addSystemCommand(&.{ "sh", "tools/phase8_verify.sh" });
-        phase8.step.dependOn(b.getInstallStep());
+    phase8.step.dependOn(b.getInstallStep());
     const phase8_step = b.step("phase8-verify", "Run Phase 8 compatibility verification tools");
     phase8_step.dependOn(&phase8.step);
 
@@ -181,4 +252,44 @@ pub fn build(b: *std.Build) void {
     }
     const run_step = b.step("run", "Run the JOE editor");
     run_step.dependOn(&run_cmd.step);
+}
+
+fn ensureTrailingSlash(b: *std.Build, path: []const u8) []const u8 {
+    if (path.len == 0) return path;
+    if (path[path.len - 1] == '/') return path;
+    return b.fmt("{s}/", .{path});
+}
+
+fn stripTrailingSlash(path: []const u8) []const u8 {
+    if (path.len > 1 and path[path.len - 1] == '/') return path[0 .. path.len - 1];
+    return path;
+}
+
+fn readSrc(b: *std.Build, rel: []const u8) []const u8 {
+    return b.build_root.handle.readFileAlloc(b.graph.io, rel, b.allocator, .limited(16 * 1024 * 1024)) catch |err| {
+        std.debug.panic("failed to read {s}: {s}", .{ rel, @errorName(err) });
+    };
+}
+
+fn replaceAll(b: *std.Build, haystack: []const u8, needle: []const u8, replacement: []const u8) []const u8 {
+    return std.mem.replaceOwned(u8, b.allocator, haystack, needle, replacement) catch @panic("OOM");
+}
+
+const InstallSubst = struct {
+    joerc: []const u8,
+    joedata: []const u8,
+    joedoc: []const u8,
+    spell: []const u8,
+    bindir: ?[]const u8,
+};
+
+fn substituteInstallPaths(b: *std.Build, src: []const u8, paths: InstallSubst) []const u8 {
+    var out = replaceAll(b, src, "@JOERC@", paths.joerc);
+    out = replaceAll(b, out, "@JOEDATA@", paths.joedata);
+    out = replaceAll(b, out, "@JOEDOC@", paths.joedoc);
+    out = replaceAll(b, out, "@SPELL@", paths.spell);
+    if (paths.bindir) |bindir| {
+        out = replaceAll(b, out, "@BINDIR@", bindir);
+    }
+    return out;
 }

@@ -82,10 +82,14 @@ fn hnext(accu: isize, c: u8) isize {
 // ═══════════════════════════════════════════════════════════════════════
 // Module‑level free lists
 // ═══════════════════════════════════════════════════════════════════════
-
-var freentry: ?*HENTRY = null;
-var cfreentry: ?*CHENTRY = null;
-var zfreentry: ?*ZHENTRY = null;
+//
+// Keep freelist heads out of Zig/LLVM's anonymous BSS merge with the large
+// exported `cclass_*` globals. ReleaseFast previously placed `freentry` on
+// top of `cclass_lower.len`; the first `htadd` then corrupted that class and
+// segfaulted in `cclass_union` during `joe_iswinit`.
+export var freentry: ?*HENTRY linksection("__DATA,__joe_hash") = null;
+export var cfreentry: ?*CHENTRY linksection("__DATA,__joe_hash") = null;
+export var zfreentry: ?*ZHENTRY linksection("__DATA,__joe_hash") = null;
 
 // ═══════════════════════════════════════════════════════════════════════
 // HASH (string → void*)

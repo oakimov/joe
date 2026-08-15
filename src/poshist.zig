@@ -93,8 +93,8 @@ const Pos = extern struct {
     w: ?*WinRec,
 };
 
-var pos: Pos = undefined;
-var frpos: Pos = undefined;
+var pos: Pos linksection("__DATA,__joe_pos") = undefined;
+var frpos: Pos linksection("__DATA,__joe_frpos") = undefined;
 var curpos: *Pos = undefined;
 var npos: c_int = 0;
 var pos_ready: bool = false;

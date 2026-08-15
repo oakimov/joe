@@ -318,7 +318,7 @@ pub const struct_error = extern struct {
     src: off_t = 0,
     msg: [*c]u8 = null,
 };
-pub export var errors: struct_error = struct_error{
+pub export var errors: struct_error linksection("__DATA,__joe_errors") = struct_error{
     .link = struct_unnamed_4{
         .next = &errors,
         .prev = &errors,
@@ -329,7 +329,7 @@ pub export var errors: struct_error = struct_error{
     .src = 0,
     .msg = null,
 };
-pub export var errptr: [*c]ERROR = &errors;
+pub export var errptr: [*c]ERROR linksection("__DATA,__joe_errptr") = &errors;
 pub export var errbuf: [*c]B = null;
 pub export var parserr_homeonly: c_int = 1;
 pub export fn beafter(arg_b_1: [*c]B) [*c]B {
@@ -440,7 +440,7 @@ pub export fn saverr(arg_name: [*c]const u8) void {
         };
     }
 }
-pub export var errnodes: ERROR = ERROR{
+pub export var errnodes: ERROR linksection("__DATA,__joe_errnodes") = ERROR{
     .link = struct_unnamed_4{
         .next = &errnodes,
         .prev = &errnodes,

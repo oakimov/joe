@@ -6,7 +6,6 @@
 //! hybrid Zig+C build.
 
 const std = @import("std");
-const terminal = @import("terminal");
 const ptrdiff_t = c_long;
 
 pub extern fn printf(fmt: [*c]const u8, ...) c_int;
@@ -237,21 +236,6 @@ pub export fn ttopnn() void {
         obufsiz = 1;
     }
     obuf = @ptrCast(@alignCast(joe_malloc(obufsiz)));
-    // Optional redesign drain gate (default off). Env wins when set.
-    if (getenv("JOE_ZIG_SCREEN_DRAIN")) |v| {
-        if (v[0] == '1' or v[0] == 'y' or v[0] == 'Y') {
-            zig_screen_drain_enabled = 1;
-        } else {
-            zig_screen_drain_enabled = 0;
-        }
-    }
-    // Hybrid→Zig screen swap (default on). Env wins when set. Implies drain.
-    // Declared in scrn.zig; set here so env is applied at tty open.
-    if (getenv("JOE_ZIG_SCREEN_SWAP")) |v| {
-        const on: c_int = if (v[0] == '1' or v[0] == 'y' or v[0] == 'Y') 1 else 0;
-        zig_screen_swap_enabled = on;
-    }
-    if (zig_screen_swap_enabled != 0) zig_screen_drain_enabled = 1;
 }
 pub export fn ttclose() void {
     ttclsn();
@@ -441,42 +425,6 @@ pub export fn ttputs(arg_s: [*c]const u8) void {
         }
     }
 }
-
-/// Byte-slice writer into hybrid `obuf` (like the `ttputc` macro / `ttputs` loop).
-/// Used by the gated native `Screen.out` drain; safe with embedded NULs.
-pub fn ttWrite(bytes: []const u8) void {
-    if (obuf == null or obufsiz <= 0) return;
-    for (bytes) |c| {
-        obuf[@intCast(obufp)] = c;
-        obufp += 1;
-        if (obufp == obufsiz) {
-            _ = ttflsh();
-        }
-    }
-}
-
-/// OutSink `write_all` callback: enqueue into hybrid `obuf` via `ttWrite`.
-fn ttOutSinkWrite(_: *anyopaque, bytes: []const u8) anyerror!void {
-    ttWrite(bytes);
-}
-
-/// Drain redesign `Screen.out` into hybrid `obuf` via `OutSink`/`drainScreenOut`.
-/// No-op when `zig_screen_drain_enabled` is 0 (live path unchanged).
-/// Returns true if a drain ran. Does not call `ttflsh` — caller flushes as usual.
-pub fn drainZigScreen(scr: *terminal.Screen) !bool {
-    if (zig_screen_drain_enabled == 0) return false;
-    var storage: [4096]u8 = undefined;
-    var sink = terminal.OutSink.init(&storage, @ptrFromInt(1), ttOutSinkWrite);
-    return try terminal.drainScreenOutGated(scr, &sink, true);
-}
-
-/// C-visible gate (also set from `JOE_ZIG_SCREEN_DRAIN` in `ttopnn`). Default 0.
-pub export var zig_screen_drain_enabled: c_int = 0;
-
-/// Set from scrn.zig; tty reads env `JOE_ZIG_SCREEN_SWAP` in `ttopnn`.
-pub extern var zig_screen_swap_enabled: c_int;
-
-/// Path A gate apply — defined in `bw_lgen.zig`, called from `ttopnn`.
 
 pub export fn ttshell(arg_cmd: [*c]u8) c_int {
     var cmd = arg_cmd;

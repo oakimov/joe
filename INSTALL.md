@@ -22,47 +22,50 @@ Dev build (artifacts under `./zig-out/`):
 	zig build
 	./zig-out/bin/joe -help
 
-Release install into a prefix (Zig’s analogue of `make install`):
+Release install into a prefix (Zig’s analogue of `make install`). Paths for
+system `joerc` / data are derived from `--prefix` automatically — no manual
+path flags or symlinks:
 
-	zig build -Doptimize=ReleaseFast --prefix /usr/local \
-	  -Djoerc=/usr/local/etc/joe/ \
-	  -Djoedata=/usr/local/share/joe/
+	zig build -Doptimize=ReleaseFast --prefix /opt/local
 
-	# or: sudo zig build -Doptimize=ReleaseFast --prefix /usr/local ...
+	# or: sudo zig build -Doptimize=ReleaseFast --prefix /usr/local
 
-Layout under the prefix:
+Layout under the prefix (real files; personality names are full binary copies):
 
-	bin/joe
-	etc/joe/                 # rc files, shell helpers
+	bin/joe jmacs jstar rjoe jpico
+	etc/joe/                 # joerc, jmacsrc, …, ftyperc, shell helpers
 	share/joe/syntax/
 	share/joe/colors/
 	share/joe/charmaps/
 	share/joe/lang/          # .po catalogs (JOE does not use .mo)
+	share/man/man1/joe.1
+	share/man/ru/man1/joe.1
+	share/doc/joe/
+	share/applications/*.desktop
 
 Useful options:
 
 	-Doptimize=ReleaseFast   # or ReleaseSafe / ReleaseSmall / Debug
-	-Djoerc=DIR/             # system rc dir (trailing slash); empty → builtins/XDG
-	-Djoedata=DIR/           # system data dir (trailing slash); empty → builtins/XDG
+	-Djoerc=DIR/             # override system rc dir (default: PREFIX/etc/joe/)
+	-Djoedata=DIR/           # override system data dir (default: PREFIX/share/joe/)
+	-Dspell=aspell           # spell command baked into installed rc (default: ispell)
 	-Dselinux=true           # Linux only: link libselinux
 	-Dgpm=true               # Linux only: console GPM mouse
-	--prefix DIR             # install root (default involves zig-out/)
+	--prefix DIR             # install root (default: ./zig-out)
+
+Pass empty `-Djoerc=` / `-Djoedata=` to force builtins-only + `~/.joe` / XDG
+(skipping the installed system dirs).
 
 Other steps: `zig build uninstall`, `zig build run -- file.txt`,
 `zig build terminal-test`, `zig build phase8-verify`.
 
-Optional personality aliases (classic `make install` created these as symlinks):
-
-	ln -s joe /usr/local/bin/jmacs
-	ln -s joe /usr/local/bin/jstar
-	ln -s joe /usr/local/bin/rjoe
-	ln -s joe /usr/local/bin/jpico
-
 Notes:
 
-- With empty `-Djoerc=` / `-Djoedata=` (the default), JOE still runs using
-  **embedded builtins** plus `~/.joe` / XDG config.
-- Man pages are not installed by `zig build` yet; see `docs/man.md`.
+- **macOS:** `-Doptimize=ReleaseFast` compiles the editor core with Debug
+  codegen on Darwin. Zig/LLVM GlobalMerge currently emits size-0 Mach-O BSS
+  aliases that the linker truncates, which segfaults a fully-optimized build
+  at startup. Linux ReleaseFast is unaffected. Use `-Doptimize=Debug` if you
+  want matching optimize mode everywhere.
 - On Linux, if the linker cannot find ncurses, pass library/include search
   paths via Zig/clang flags or install the distro `-dev` package. The current
   `build.zig` also looks under `/opt/local` (MacPorts).
@@ -70,7 +73,7 @@ Notes:
 Soak tests (from a built tree):
 
 	cp -f zig-out/bin/joe joe/joe
-	JOE_ZIG_SCREEN_SWAP=0 ./runtests
+	./runtests
 
 ---
 

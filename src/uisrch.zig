@@ -174,7 +174,7 @@ comptime {
 var lastisrch: ?*Isrch = null;
 var lastpat: [*c]u8 = null;
 
-var fri: Irec = undefined;
+var fri: Irec linksection("__DATA,__joe_fri") = undefined;
 var fri_ready: bool = false;
 
 extern var globalsrch: ?*Srch;

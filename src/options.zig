@@ -323,7 +323,7 @@ pub extern fn meta_color(s: [*c]const u8) c_int;
 pub extern fn calc(bw: [*c]BW, s: [*c]u8, secure: c_int) f64;
 pub export var aborthint: [*c]const u8 = "^C";
 pub export var helphint: [*c]const u8 = "^K H";
-pub export var options_list: [*c]OPTIONS = null;
+pub export var options_list: [*c]OPTIONS linksection("__DATA,__joe_opts") = null;
 pub export var pdefault: OPTIONS = OPTIONS{
     .next = null,
     .ftype = "prompt",

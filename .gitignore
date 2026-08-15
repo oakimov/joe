@@ -28,7 +28,11 @@ charmaps/klingon
 .claude/worktrees/
 .pytest_cache/
 .zig-cache/
+.zig-cache-user/
+.zig-cache-user-global/
 zig-out/
 .DS_Store
 .obsidian/
 tools/bench_results.txt
+.tmp-prefix/
+.#*

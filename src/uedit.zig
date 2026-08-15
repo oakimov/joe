@@ -191,6 +191,7 @@ extern fn utf8_encode(buf: [*]u8, c: c_int) isize;
 extern fn joe_write(fd: c_int, buf: ?*const anyopaque, size: isize) isize;
 extern fn wrapword(bw: ?*anyopaque, p: ?*GapP, indent: i64, french: c_int, no_over: c_int, indents: [*c]u8) void;
 extern var locale_map: ?*FullCharmap;
+extern var dostaupd: c_int;
 
 extern fn mkqwna(
     w: ?*anyopaque,
@@ -700,13 +701,15 @@ pub export fn scrup(bw_in: ?*anyopaque, n: isize, flg: c_int) void {
             if (scrnOf(bw)) |t| nscrldn(t, bw.y, bw.y + bw.h, scrollamnt);
         }
     } else {
-        var x: isize = 0;
-        while (x != scrollamnt) : (x += 1) _ = pprevl(top);
-        _ = p_goto_bol(top);
-        x = 0;
-        while (x != cursoramnt) : (x += 1) _ = pprevl(cur);
-        _ = p_goto_bol(cur);
-        _ = pcol(cur, cur.xcol);
+        const dest_top: i64 = top.line - scrollamnt;
+        const dest_cur: i64 = cur.line - cursoramnt;
+        const xcol = cur.xcol;
+        _ = p_goto_bof(top);
+        _ = pline(top, dest_top);
+        _ = p_goto_bof(cur);
+        _ = pline(cur, dest_cur);
+        _ = pcol(cur, xcol);
+        cur.xcol = xcol;
         const parent = bw.parent orelse return;
         if (parent.y != -1) {
             if (scrnOf(bw)) |t| nscrldn(t, bw.y, bw.y + bw.h, scrollamnt);
@@ -756,16 +759,105 @@ pub export fn scrdn(bw_in: ?*anyopaque, n: isize, flg: c_int) void {
             if (scrnOf(bw)) |t| nscrlup(t, bw.y, bw.y + bw.h, scrollamnt);
         }
     } else {
-        var x: isize = 0;
-        while (x != scrollamnt) : (x += 1) _ = pnextl(top);
-        x = 0;
-        while (x != cursoramnt) : (x += 1) _ = pnextl(cur);
-        _ = pcol(cur, cur.xcol);
+        const eof_line = eof.line;
+        var dest_top: i64 = top.line + scrollamnt;
+        var dest_cur: i64 = cur.line + cursoramnt;
+        if (dest_top > eof_line) dest_top = eof_line;
+        if (dest_cur > eof_line) dest_cur = eof_line;
+        const xcol = cur.xcol;
+        _ = p_goto_bof(top);
+        _ = pline(top, dest_top);
+        _ = p_goto_bof(cur);
+        _ = pline(cur, dest_cur);
+        _ = pcol(cur, xcol);
+        cur.xcol = xcol;
         const parent = bw.parent orelse return;
         if (parent.y != -1) {
             if (scrnOf(bw)) |t| nscrlup(t, bw.y, bw.y + bw.h, scrollamnt);
         }
     }
+}
+
+/// Walk `p` to bol of `dest` by pnextl/pprevl. Buffer is not mutating, so
+/// that is O(|delta|) and stays on the right bytes. Fall back to `pline`
+/// only if the walk misses (bof/eof).
+fn walk_to_line(p: *GapP, dest: i64) void {
+    if (p.line == dest) {
+        _ = p_goto_bol(p);
+        return;
+    }
+    if (dest > p.line) {
+        while (p.line < dest) {
+            if (pnextl(p) == null) break;
+        }
+    } else {
+        while (p.line > dest) {
+            if (pprevl(p) == null) break;
+            _ = p_goto_bol(p);
+        }
+    }
+    if (p.line != dest) {
+        _ = p_goto_bof(p);
+        _ = pline(p, dest);
+    }
+    _ = p_goto_bol(p);
+}
+
+/// Viewport scroll for the mouse wheel: move `top` by `n` lines (`n>0` down,
+/// `n<0` up). The caret stays on the same screen row (it follows the view).
+/// If that cell is past EOL or in the empty region after EOF, snap to the
+/// last character of the line — do not sit in a column with no text.
+pub export fn uvscroll(w: ?*anyopaque, n: isize) c_int {
+    const bw = windBw(w) orelse return -1;
+    if (n == 0) return -1;
+
+    if (bw.o.hex != 0) {
+        if (n < 0) scrup(bw, -n, 0) else scrdn(bw, n, 0);
+        return 0;
+    }
+
+    const top = bw.top orelse return -1;
+    const cur = bw.cursor orelse return -1;
+    const b = top.b orelse return -1;
+    const eof = b.eof orelse return -1;
+
+    const old_top: i64 = top.line;
+    const old_cur: i64 = cur.line;
+    const eof_line: i64 = eof.line;
+    const h: i64 = bw.h;
+
+    var dest_top = old_top + @as(i64, n);
+    if (dest_top < 0) dest_top = 0;
+    const max_top: i64 = if (eof_line + 1 > h) eof_line - h + 1 else 0;
+    if (dest_top > max_top) dest_top = max_top;
+
+    var dest_cur = old_cur + @as(i64, n);
+    const bot_line = dest_top + h - 1;
+    if (dest_cur < dest_top) dest_cur = dest_top;
+    if (dest_cur > bot_line) dest_cur = bot_line;
+    if (dest_cur > eof_line) dest_cur = eof_line;
+    if (dest_cur < 0) dest_cur = 0;
+
+    const goal = cur.xcol;
+    walk_to_line(top, dest_top);
+    if (dest_cur != old_cur) walk_to_line(cur, dest_cur);
+    _ = pcol(cur, goal);
+    if (bw.o.picture == 0) {
+        // pcol stops at EOL on a short line; drop the sticky goal column so
+        // the caret sits on a real character (or at EOL), not in the void.
+        cur.xcol = piscol(cur);
+    } else {
+        cur.xcol = goal;
+    }
+
+    if (dest_top == old_top and dest_cur == old_cur and cur.xcol == goal) return -1;
+
+    dostaupd = 1;
+    const parent = bw.parent orelse return 0;
+    if (parent.y != -1) {
+        if (scrnOf(bw)) |t| nscrldn(t, bw.y, bw.y + bw.h, bw.h);
+    }
+    return 0;
 }
 
 fn menuPageTarget(w_in: ?*anyopaque) ?*anyopaque {
@@ -1612,12 +1704,30 @@ pub export fn upaste(w: ?*anyopaque, k: c_int) c_int {
 
     var count: c_int = 0;
     var accu: c_int = 0;
+    // Clipboard text often uses LF (or CRLF). Only CR used to become a newline;
+    // LF must too, and a bare LF after CR should not insert a blank line.
+    var last_was_cr: bool = false;
 
     while (true) {
         const c = ttgetch();
         if (c == -1) return 0;
         if (c == ';') break;
     }
+
+    const insert_decoded = struct {
+        fn go(bw_inner: *BwRec, byte: c_int, last_cr: *bool) void {
+            if (byte == 13) {
+                _ = rtntw(@ptrCast(bw_inner.parent));
+                last_cr.* = true;
+            } else if (byte == 10) {
+                if (!last_cr.*) _ = rtntw(@ptrCast(bw_inner.parent));
+                last_cr.* = false;
+            } else {
+                last_cr.* = false;
+                _ = utypebw(bw_inner, byte);
+            }
+        }
+    }.go;
 
     while (true) {
         var c = ttgetch();
@@ -1640,18 +1750,18 @@ pub export fn upaste(w: ?*anyopaque, k: c_int) c_int {
             },
             2 => {
                 accu = (accu << 6) + c;
-                if (accu == 13) _ = rtntw(@ptrCast(bw.parent)) else _ = utypebw(bw, accu);
+                insert_decoded(bw, accu, &last_was_cr);
                 count = 0;
             },
             4 => {
                 accu = (accu << 4) + (c >> 2);
-                if (accu == 13) _ = rtntw(@ptrCast(bw.parent)) else _ = utypebw(bw, accu);
+                insert_decoded(bw, accu, &last_was_cr);
                 accu = c & 0x3;
                 count = 2;
             },
             6 => {
                 accu = (accu << 2) + (c >> 4);
-                if (accu == 13) _ = rtntw(@ptrCast(bw.parent)) else _ = utypebw(bw, accu);
+                insert_decoded(bw, accu, &last_was_cr);
                 accu = c & 0xF;
                 count = 4;
             },

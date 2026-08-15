@@ -158,43 +158,47 @@ fn bwReadLine(anchor: ?*P, line: i64, buf: ?[*]u8, buf_cap: c_int) c_int {
     }
     return ll;
 }
-extern fn pprevl(p: ?*P) ?*P;
 export var opt_mid: c_int = 0;
 export var opt_left: c_int = 8;
 export var opt_right: c_int = 8;
 
-/// JOE `getto`: move/allocate a `P` to bol of `line`.
-/// When `p_in` is null, pdup the closer of `cur`/`top` (by line distance).
+/// Seek a `P` to bol of `line`.
+///
+/// Paint walks top→bottom, so the cheap path is `pdup(top)` then `pnextl`.
+/// `pline` from `bof` is only the fallback (wrong `top.line`, or a backward
+/// gap). Do not `pprevl` from cursor after an insert: that can match `p.line`
+/// at the wrong byte and paint the same text on many rows.
 fn bwGetto(p_in: ?*P, cur: ?*P, top: ?*P, line: i64) ?*P {
-    var p = p_in;
-    if (p == null) {
-        const cur_p = cur orelse return null;
+    _ = cur;
+    if (p_in == null) {
         const top_p = top orelse return null;
-        var best = cur_p;
-        var dist: i64 = std.math.maxInt(i64);
-        const cur_line = zig_c_bw_pline_no(cur_p);
-        const d_cur = if (line >= cur_line) line - cur_line else cur_line - line;
-        if (d_cur < dist) {
-            dist = d_cur;
-            best = cur_p;
+        const p = pdup(top_p, "getto") orelse return null;
+        if (zig_c_bw_pline_no(p) == line) {
+            zig_c_bw_p_goto_bol(p);
+            return p;
         }
-        const top_line = zig_c_bw_pline_no(top_p);
-        const d_top = if (line >= top_line) line - top_line else top_line - line;
-        if (d_top < dist) {
-            best = top_p;
+        if (line > zig_c_bw_pline_no(p)) {
+            while (line > zig_c_bw_pline_no(p)) {
+                if (pnextl(p) == null) break;
+            }
+            if (zig_c_bw_pline_no(p) == line) return p;
         }
-        p = pdup(best, "getto") orelse return null;
-        zig_c_bw_p_goto_bol(p);
+        prm(p);
+        const origin = zig_c_bw_bof(top) orelse top_p;
+        const fresh = pdup(origin, "getto") orelse return null;
+        zig_c_bw_pline(fresh, line);
+        return fresh;
     }
-    const pp = p orelse return null;
+    const pp = p_in orelse return null;
     while (line > zig_c_bw_pline_no(pp)) {
         if (pnextl(pp) == null) break;
     }
-    if (line < zig_c_bw_pline_no(pp)) {
-        while (line < zig_c_bw_pline_no(pp)) {
-            _ = pprevl(pp);
-        }
-        zig_c_bw_p_goto_bol(pp);
+    if (zig_c_bw_pline_no(pp) != line) {
+        prm(pp);
+        const origin = zig_c_bw_bof(top) orelse (top orelse return null);
+        const fresh = pdup(origin, "getto") orelse return null;
+        zig_c_bw_pline(fresh, line);
+        return fresh;
     }
     return pp;
 }
@@ -397,28 +401,14 @@ pub export fn zig_bw_bwfllwt(
     if (cur_line < 0 or top_line < 0) return -1;
 
     if (cur_line < top_line) {
-        const newtop = pdup(cursor, "zig_bw_bwfllwt") orelse return -1;
-        zig_c_bw_p_goto_bol(newtop);
-        if (opt_mid != 0) {
-            const nl = zig_c_bw_pline_no(newtop);
-            if (nl >= @divTrunc(win_h, 2)) {
-                zig_c_bw_pline(newtop, nl - @divTrunc(win_h, 2));
-            } else {
-                const bof = zig_c_bw_bof(newtop);
-                if (bof == null) {
-                    prm(newtop);
-                    return -1;
-                }
-                zig_c_bw_pset(newtop, bof);
-            }
-        }
-        const new_line = zig_c_bw_pline_no(newtop);
-        const delta = top_line - new_line;
-        if (delta < win_h) {
-            zig_c_bw_nscrldn(t, win_y, win_y + win_h, @intCast(delta));
-        } else {
-            zig_c_bw_msetI(updtab.? + @as(usize, @intCast(win_y)), 1, win_h);
-        }
+        const target: i64 = if (opt_mid != 0)
+            if (cur_line >= @divTrunc(win_h, 2)) cur_line - @divTrunc(win_h, 2) else 0
+        else
+            cur_line;
+        const origin = zig_c_bw_bof(top) orelse return -1;
+        const newtop = pdup(origin, "zig_bw_bwfllwt") orelse return -1;
+        zig_c_bw_pline(newtop, target);
+        zig_c_bw_nscrldn(t, win_y, win_y + win_h, win_h);
         zig_c_bw_pset(top, newtop);
         prm(newtop);
     } else if (cur_line >= top_line + win_h) {
@@ -426,14 +416,10 @@ pub export fn zig_bw_bwfllwt(
             cur_line - @divTrunc(win_h, 2)
         else
             cur_line - (win_h - 1);
-        const newtop = bwGetto(null, cursor, top, target) orelse return -1;
-        const new_line = zig_c_bw_pline_no(newtop);
-        const delta = new_line - top_line;
-        if (delta < win_h) {
-            zig_c_bw_nscrlup(t, win_y, win_y + win_h, @intCast(delta));
-        } else {
-            zig_c_bw_msetI(updtab.? + @as(usize, @intCast(win_y)), 1, win_h);
-        }
+        const origin = zig_c_bw_bof(top) orelse return -1;
+        const newtop = pdup(origin, "zig_bw_bwfllwt") orelse return -1;
+        zig_c_bw_pline(newtop, target);
+        zig_c_bw_nscrldn(t, win_y, win_y + win_h, win_h);
         zig_c_bw_pset(top, newtop);
         prm(newtop);
     }
@@ -584,20 +570,18 @@ pub export fn zig_bw_bwins(
         }
     }
 
-    if (l + flg + n < top_line + win_h and l + flg >= top_line and l + flg <= eof_line) {
-        if (flg != 0) {
-            if (sary == null) return -1;
-            sary.?[@intCast(win_y + l - top_line)] = li;
-        }
-        zig_c_bw_nscrldn(t, @intCast(win_y + l + flg - top_line), win_y + win_h, @intCast(n));
-    }
-
-    if (l < top_line + win_h and l >= top_line) {
-        if (n >= win_h - (l - top_line)) {
-            zig_c_bw_msetI(updtab.? + @as(usize, @intCast(win_y + l - top_line)), 1, win_h - @as(isize, @intCast(l - top_line)));
-        } else {
-            zig_c_bw_msetI(updtab.? + @as(usize, @intCast(win_y + l - top_line)), 1, @intCast(n + 1));
-        }
+    // Do not call nscrldn/IL here. Scheduling hardware scroll before the next
+    // paint leaves the physical screen showing pre-insert lines; follow/nscroll
+    // then shifts that stale image (Ghostty: whole window out of place after
+    // multi-line mouse paste). Just rewrite from the insert row downward.
+    _ = sary;
+    _ = li;
+    _ = flg;
+    _ = eof_line;
+    if (l + n >= top_line and l < top_line + win_h) {
+        const start_line = if (l < top_line) top_line else l;
+        const start: isize = @intCast(start_line - top_line);
+        zig_c_bw_msetI(updtab.? + @as(usize, @intCast(win_y + start)), 1, win_h - start);
     }
     return 0;
 }
@@ -1787,8 +1771,6 @@ pub export fn zig_bw_table_simple(
 }
 
 
-extern var have: c_int;
-
 /// C `struct high_syntax` prefix — only `name` is needed for viewmode dispatch.
 const HighSyntaxRec = extern struct {
     next: ?*HighSyntaxRec,
@@ -1952,11 +1934,11 @@ fn zig_c_bw_gennum(
     }
     pathAAbort("Path A: zig_bw_gennum -1\n");
 }
-/// JOE `bwgen` paint loops → Zig `bwGetto` / C `gennum` / `lgen`.
+/// JOE `bwgen` paint loops → Zig `bwGetto` / `lgen` / `gennum`.
 ///
-/// Prefer `zig_bw_bwgen_entry` for full setup+loops+cursor. This owns the two
-/// screen-row loops (cursor→bottom, then top→cursor) plus `prm` of the walk
-/// pointer. Returns `0` on success, `-1` to fall back to C loops.
+/// Prefer `zig_bw_bwgen_entry` for full setup+loops+cursor. Paints top→bottom
+/// from `top` (no cursor-first/`pprevl` pass) and `prm`s the walk pointer.
+/// Returns `0` on success, `-1` to fall back to C loops.
 pub export fn zig_bw_bwgen(
     w: ?*BW,
     t: ?*SCRN,
@@ -2038,17 +2020,13 @@ pub export fn zig_bw_bwgen(
         .toline = toline,
     };
 
-    // Cursor line → bottom.
-    var y = mid_y;
+    // Top → bottom, one buffer line per screen row. Do not abort on `have`:
+    // a post-paste invalidate poisons every shadow cell, and a mid-window
+    // typeahead abort would leave the physical screen showing a mix of new
+    // rows and stale ones (repeated blocks / leftover status).
+    _ = mid_y;
+    var y = win_y;
     while (y != bot) : (y += 1) {
-        if (have != 0) break;
-        p = paintOneRow(&ctx, y, p);
-    }
-
-    // Top → cursor line.
-    y = win_y;
-    while (y != mid_y) : (y += 1) {
-        if (have != 0) break;
         p = paintOneRow(&ctx, y, p);
     }
 
@@ -2063,10 +2041,12 @@ fn paintOneRow(ctx: anytype, y: isize, p_in: ?*P) ?*P {
     if (ctx.linums != 0) {
         zig_c_bw_gennum(ctx.w, screen, attr_row, ctx.t, y, ctx.compose);
     }
-    if (ctx.linchg == 0 and ctx.updtab[@intCast(y)] == 0) return p_in;
-
     const buf_line = ctx.top_line + y - ctx.win_y;
+    // Always seek, even when the row is clean. Skipping getto leaves `p` on
+    // an old line so the next dirty row paints the wrong buffer text.
     const p = bwGetto(p_in, ctx.cursor, ctx.top, buf_line);
+    if (ctx.linchg == 0 and ctx.updtab[@intCast(y)] == 0) return p;
+
     const st = zig_c_bw_get_highlight_state(ctx.w, p, buf_line);
     var use_from = ctx.from;
     var use_to = ctx.to;
@@ -3699,9 +3679,9 @@ fn zig_c_bw_get_scrn(bw: ?*BW) ?*SCRN {
     return asScreen(@ptrCast(t)).t;
 }
 fn zig_c_bw_scr_w(bw: ?*BW) isize {
-    if (bw == null) return 0;
-    const t = asBw(bw).t orelse return 0;
-    return asScreen(@ptrCast(t)).w;
+    // Pitch of `SCRN.scrn` / `attr` is terminal columns (`co`), not Screen.w.
+    const t = zig_c_bw_get_scrn(bw) orelse return 0;
+    return asScrn(t).co;
 }
 fn zig_c_bw_get_err(bw: ?*BW) ?*P {
     if (bw == null or errbuf == null) return null;

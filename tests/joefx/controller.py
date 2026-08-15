@@ -319,8 +319,7 @@ def startJoe(joeexe, args=None):
     env['MallocNanoZone'] = '0'
     env['SHELL'] = os.getenv('SHELL', '/bin/sh')
 
-    # Forward redesign gates (JOE_ZIG_SCREEN_SWAP / JOE_ZIG_SCREEN_DRAIN, etc.)
-    # so soak / opt-out from the parent environment reaches the joe child.
+    # Forward any JOE_ZIG_* overrides from the parent environment to the joe child.
     for k, v in os.environ.items():
         if k.startswith('JOE_ZIG_'):
             env[k] = v

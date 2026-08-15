@@ -436,7 +436,10 @@ pub fn disptw(arg_w: [*c]W, arg_flg: c_int) callconv(.c) void {
         w.*.curx = @as(ptrdiff_t, @truncate((@rem(bw_1.*.cursor.*.byte - bw_1.*.top.*.byte, @as(off_t, 16)) + @as(off_t, 60)) - bw_1.*.offset));
     } else {
         w.*.cury = @as(ptrdiff_t, @truncate(((bw_1.*.cursor.*.line - bw_1.*.top.*.line) + @as(off_t, bw_1.*.y)) - @as(off_t, w.*.y)));
-        w.*.curx = @as(ptrdiff_t, @truncate((bw_1.*.cursor.*.xcol - bw_1.*.offset) + @as(off_t, bw_1.*.lincols)));
+        // Draw on a real column. `xcol` is the sticky goal for up/down; past
+        // EOL it has no glyph, so sit at the end of the line (unless -picture).
+        const cur_col: off_t = if (bw_1.*.o.picture != 0) bw_1.*.cursor.*.xcol else piscol(bw_1.*.cursor);
+        w.*.curx = @as(ptrdiff_t, @truncate((cur_col - bw_1.*.offset) + @as(off_t, bw_1.*.lincols)));
     }
     if (((((((staupd != 0) or ((keepup != 0) and !(have != 0))) or (bw_1.*.cursor.*.line != tw_2.*.prevline)) or (bw_1.*.b.*.changed != tw_2.*.changed)) or (bw_1.*.b != tw_2.*.prev_b)) and ((w.*.y != 0) or (@as(ptrdiff_t, @intFromBool(!(staen != 0))) != 0))) and (w.*.h > @as(ptrdiff_t, 1))) {
         var fill: u8 = undefined;

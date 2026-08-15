@@ -103,23 +103,23 @@ const BuiltinCharmap = extern struct {
 // Globals (C ABI)
 // ═══════════════════════════════════════════════════════════════════════
 
-var charmaps: ?*Charmap = null;
+var charmaps: ?*Charmap linksection("__DATA,__joe_charmap") = null;
 
-export var utf8_map: ?*Charmap = null;
-export var utf16_map: ?*Charmap = null;
-export var utf16r_map: ?*Charmap = null;
-export var ascii_map: ?*Charmap = null;
-export var locale_map: ?*Charmap = null;
-export var locale_map_non_utf8: ?*Charmap = null;
+export var utf8_map: ?*Charmap linksection("__DATA,__joe_cmap") = null;
+export var utf16_map: ?*Charmap linksection("__DATA,__joe_cmap") = null;
+export var utf16r_map: ?*Charmap linksection("__DATA,__joe_cmap") = null;
+export var ascii_map: ?*Charmap linksection("__DATA,__joe_cmap") = null;
+export var locale_map: ?*Charmap linksection("__DATA,__joe_cmap") = null;
+export var locale_map_non_utf8: ?*Charmap linksection("__DATA,__joe_cmap") = null;
 
-export var locale_lang: ?[*:0]const u8 = null;
-export var locale_msgs: ?[*:0]const u8 = null;
+export var locale_lang: ?[*:0]const u8 linksection("__DATA,__joe_cmap") = null;
+export var locale_msgs: ?[*:0]const u8 linksection("__DATA,__joe_cmap") = null;
 
-export var codeset: ?[*:0]const u8 = null;
-export var non_utf8_codeset: ?[*:0]const u8 = null;
+export var codeset: ?[*:0]const u8 linksection("__DATA,__joe_cmap") = null;
+export var non_utf8_codeset: ?[*:0]const u8 linksection("__DATA,__joe_cmap") = null;
 
-export var guess_non_utf8: c_int = 0;
-export var guess_utf8: c_int = 0;
+export var guess_non_utf8: c_int linksection("__DATA,__joe_cmap") = 0;
+export var guess_utf8: c_int linksection("__DATA,__joe_cmap") = 0;
 
 // ═══════════════════════════════════════════════════════════════════════
 // Conversion helpers

@@ -3089,7 +3089,7 @@ pub export fn zig_bw_lgen(
         };
         if (mutable.len != paint_content.len) return -1;
         const tab_u16: u16 = if (tab <= 0) 1 else @intCast(tab);
-        applySquareMarkInverse(mutable, paint_content, tab_u16, from, to, byte_mode);
+        applySquareMarkInverse(mutable, paint_content, tab_u16, from, to, byte_mode, view_ptr);
         native_attrs = mutable;
     }
 
@@ -3465,7 +3465,15 @@ fn squareUnitWidth(cp: u21) u8 {
 /// Force inverse for square marks: `from`/`to` are display columns (`xcol`).
 /// JOE `SELECT_IF`: tab uses end-col `tcol > from && tcol <= to` (whole run);
 /// other units use start-col `col >= from && col < to`.
-fn applySquareMarkInverse(attrs: []Attribute, line: []const u8, tab: u16, from: i64, to: i64, byte_mode: bool) void {
+///
+/// `view`, when set, must agree with the same collapsed column model
+/// `lgenUnits` (plan §4) paints with: a hidden byte with no substitute
+/// contributes zero columns and is never marked inverse (nothing paints
+/// there to invert). Without this, square-mark columns would be computed
+/// against the pre-collapse byte-per-column model while the paint loop
+/// uses the post-collapse one, and a selection inside a concealed line
+/// would land on the wrong glyphs.
+fn applySquareMarkInverse(attrs: []Attribute, line: []const u8, tab: u16, from: i64, to: i64, byte_mode: bool, view: ?*const ViewTables) void {
     if (from == to) return;
     const t: i64 = if (tab == 0) 1 else tab;
     var col: i64 = 0;
@@ -3473,6 +3481,12 @@ fn applySquareMarkInverse(attrs: []Attribute, line: []const u8, tab: u16, from: 
     while (i < line.len and i < attrs.len) {
         const b = line[i];
         if (b == '\n' or b == '\r') break;
+        if (view) |vt| {
+            if (vt.subAt(i) == 0 and vt.isHidden(i)) {
+                i += 1;
+                continue;
+            }
+        }
         if (b == '\t') {
             const tcol = col + t - @rem(col, t);
             if (tcol > from and tcol <= to) attrs[i].inverse = true;
@@ -3590,7 +3604,7 @@ test "applyLinearMarkInverse no-op when from==to" {
 test "applySquareMarkInverse tab uses end-col inclusive" {
     var attrs = [_]Attribute{.{}} ** 4;
     // "ab\tc" tab=4 → a@0 b@1 tab→4 c@4; from=1 to=4 selects b + tab
-    applySquareMarkInverse(&attrs, "ab\tc", 4, 1, 4, false);
+    applySquareMarkInverse(&attrs, "ab\tc", 4, 1, 4, false, null);
     try std.testing.expect(!attrs[0].inverse);
     try std.testing.expect(attrs[1].inverse);
     try std.testing.expect(attrs[2].inverse);
@@ -3600,7 +3614,7 @@ test "applySquareMarkInverse tab uses end-col inclusive" {
 test "applySquareMarkInverse tab excluded when end past to" {
     var attrs = [_]Attribute{.{}} ** 3;
     // "\tX" tab=8, from=2 to=5: tcol=8 not in (2,5] → unselected
-    applySquareMarkInverse(&attrs, "\tX", 8, 2, 5, false);
+    applySquareMarkInverse(&attrs, "\tX", 8, 2, 5, false, null);
     try std.testing.expect(!attrs[0].inverse);
     try std.testing.expect(!attrs[1].inverse);
 }
@@ -3608,11 +3622,36 @@ test "applySquareMarkInverse tab excluded when end past to" {
 test "applySquareMarkInverse covers UTF-8 start column" {
     const line = "a\u{00e9}b";
     var attrs = [_]Attribute{.{}} ** 4;
-    applySquareMarkInverse(&attrs, line, 8, 1, 2, false);
+    applySquareMarkInverse(&attrs, line, 8, 1, 2, false, null);
     try std.testing.expect(!attrs[0].inverse);
     try std.testing.expect(attrs[1].inverse);
     try std.testing.expect(attrs[2].inverse);
     try std.testing.expect(!attrs[3].inverse);
+}
+
+test "applySquareMarkInverse uses collapsed columns when view is set (plan §4 / R1.3)" {
+    // "# Hi": '#' and ' ' hidden at zero width, so 'H' is at collapsed
+    // column 0 and 'i' at column 1 — not their raw byte indices (2, 3).
+    const line = "# Hi";
+    var tables = ViewTables.init(std.testing.allocator);
+    defer tables.deinit();
+    try render.analyzeLine(&tables, line, null);
+
+    var attrs = [_]Attribute{.{}} ** 4;
+    // Select display columns [0, 1): should mark only 'H' (byte 2).
+    applySquareMarkInverse(&attrs, line, 8, 0, 1, false, &tables);
+    try std.testing.expect(!attrs[0].inverse); // '#' — hidden, never marked
+    try std.testing.expect(!attrs[1].inverse); // ' ' — hidden, never marked
+    try std.testing.expect(attrs[2].inverse); // 'H' — collapsed col 0, in range
+    try std.testing.expect(!attrs[3].inverse); // 'i' — collapsed col 1, out of range
+
+    // Selecting [1, 2) should mark only 'i', not 'H'.
+    var attrs2 = [_]Attribute{.{}} ** 4;
+    applySquareMarkInverse(&attrs2, line, 8, 1, 2, false, &tables);
+    try std.testing.expect(!attrs2[0].inverse);
+    try std.testing.expect(!attrs2[1].inverse);
+    try std.testing.expect(!attrs2[2].inverse); // 'H' now out of range
+    try std.testing.expect(attrs2[3].inverse); // 'i' now in range
 }
 
 test "stripAnsiEscapes removes CSI color sequences" {

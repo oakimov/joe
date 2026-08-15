@@ -9,7 +9,8 @@
 >
 > **Task list:** `plans/TODO.md`
 > **Deferred (images, nested fence HL):** `plans/future-roadmap.md`
-> **Reference checkout:** `~/Projects/opencode-research` (see §2 for exact paths)
+> **References:** conceal + layout from OpenCode (`~/Projects/opencode-research`, §2);
+> **all colours from Cursor Dark** (`cursor-official-themes-0.0.5.vsix`, §6.2)
 
 This document **replaces** the old C-era feasibility essay as the active plan. A Phase 1–2
 viewmode already ships on the Zig paint path; the work below brings **OpenCode-like** rich
@@ -36,7 +37,7 @@ these paths when OpenCode is updated; **cite them in code comments** rather than
 | What | Path (under `~/Projects/opencode-research`) |
 |---|---|
 | Theme token names + `getSyntaxRules()` attrs | `packages/tui/src/theme/index.ts` (tokens ~L66-79, markdown rules ~L793-905) |
-| Default theme colors | `packages/ui/src/theme/themes/opencode.json` (`dark.overrides`) |
+| ~~Default theme colors~~ | ~~`packages/ui/src/theme/themes/opencode.json`~~ — **superseded by Cursor Dark, §6.2** |
 | Markdown renderer | `node_modules/.bun/@opentui+core@0.4.3+*/node_modules/@opentui/core/index.js` (`MarkdownRenderable`, ~L7945-9020) |
 | Renderer public contract | `.../@opentui/core/renderables/Markdown.d.ts` |
 | **Conceal rules (authoritative)** | `.../@opentui/core/assets/markdown/highlights.scm`, `.../assets/markdown_inline/highlights.scm` |
@@ -315,38 +316,22 @@ documented choice rather than a bug.
 
 ---
 
-## 6. Visual target — exact tokens
+## 6. Visual target — colour source
 
-Colors are `opencode.json` → `dark.overrides`; attributes are `getSyntaxRules()` in
-`packages/tui/src/theme/index.ts`.
+> **Superseded.** Colours previously came from OpenCode's theme. They now come from
+> **Cursor Dark** — see §6.2 for the palette, mappings, and derivation.
+>
+> OpenCode remains the reference for **conceal semantics, block layout, and attributes**
+> (§3, §3.3). Only the colour values changed source; §3–§5 are unaffected.
 
-| Construct | Scope | Color | Attrs |
-|---|---|---|---|
-| Body text | `markup` default | `markdownText` `#eeeeee` | — |
-| H1 | `markup.heading.1` | `markdownHeading` `#9d7cd8` | **bold + underline** |
-| H2–H6 | `markup.heading.2..6` | `markdownHeading` `#9d7cd8` | bold |
-| Bold | `markup.bold` / `markup.strong` | `markdownStrong` `#f5a742` | bold |
-| Italic | `markup.italic` | `markdownEmph` `#e5c07b` | italic |
-| Strikethrough | `markup.strikethrough` | (no explicit rule; use muted `#808080`) | strike if available |
-| Inline code | `markup.raw.inline` | `markdownCode` `#7fd88f` | bg = theme background |
-| Fenced code body | `markup.raw.block` | `markdownCodeBlock` `#eeeeee` | — (no bg tint) |
-| Fence info string | `label` | `markdownLinkText` `#56b6c2` | — |
-| Link label | `markup.link.label` | `markdownLinkText` `#56b6c2` | **underline** |
-| Autolink / bare URL | `markup.link.url` | `markdownLink` `#fab283` | **underline** |
-| Link URL (bracketed) | `markup.link.url` | — | **concealed in view** (§3.2); `markdownLink` `#fab283` in *edit* mode |
-| Link brackets | `markup.link` | — | concealed in view; `MdDelim` in edit mode |
-| Bullet list marker | `markup.list` | `markdownListItem` `#fab283` | — |
-| Ordered list number | `markup.list` | `markdownListEnumeration` `#56b6c2` | — |
-| Blockquote | `markup.quote` | `markdownBlockQuote` `#e5c07b` | **italic** |
-| Blockquote bar / HR / table border | `conceal` | muted `#808080` | — |
-| Thematic break | `punctuation.special` | `markdownHorizontalRule` `#808080` | — |
-| Table header cell | `markup.heading` | `markdownHeading` `#9d7cd8` | bold |
-| Table pipes / delimiter row | `punctuation.special` | muted `#808080` | — |
-| Image alt | `markup.link.label` | `markdownImageText` `#56b6c2` | — |
-| Image URL | `markup.link.url` | `markdownImage` `#fab283` | — (concealed anyway) |
+What OpenCode still supplies:
 
-Note `markdownLink` (`#fab283`) and `markdownListEnumeration` (`#56b6c2`) were **absent** from
-the previous revision of this table.
+| Aspect | Source |
+|---|---|
+| Which bytes are concealed, and to what | OpenCode tree-sitter queries (§3.1) |
+| Attribute hierarchy (H1 bold+underline, H2–H6 bold, emph italic, quote italic, link underline) | OpenCode `getSyntaxRules()` (§6.2.4 note 1) |
+| Block layout constants | OpenCode `MarkdownRenderable` (§3.3) |
+| **All colour values** | **Cursor Dark (§6.2)** |
 
 ### 6.1 Current JOE token inventory (Phase 0.2, done)
 
@@ -360,106 +345,146 @@ Gaps against §6:
 - **No `MdText`** (explicit body color), **no `MdListEnum`** (ordered-list numbering),
   **no `MdImageUrl`**. These three are the only genuinely new classes — see R4.
 - `MdDelim` exists and is the natural home for *edit-mode* delimiter styling.
-- **Only 2 of 9 color schemes define any `Md*` token.** `colors/default.jcf` (16-color) and
-  `colors/gruvbox.jcf` have them; `ir_black`, `molokai`, `solarized`, `wombat`, `xoria`,
-  `zenburn`, `zenburn-hc` have **none** and fall through to `Idle`. Resolved in §6.2 with a
-  template plus per-scheme values for all nine.
+- **Only 2 of 9 color schemes define any `Md*` token** (`default.jcf`, `gruvbox.jcf`); the other
+  seven fall through to `Idle`. **Moot** — §6.2 replaces all nine with one Cursor-derived scheme.
 
 ---
 
-## 6.2 Resolved (R3) — palettes for all 9 schemes
+## 6.2 Resolved (R3) — one native scheme, derived from Cursor Dark
 
-OpenCode uses only **eight** distinct markdown colors and reuses them across constructs
-(`markdownLink` = `markdownListItem` = `markdownImage`; `markdownLinkText` =
-`markdownListEnumeration` = `markdownImageText`). JOE adopts the same eight-slot structure, so
-each scheme fills eight values instead of twenty-two.
+**Decision:** JOE ships **a single native colour scheme translated from Cursor Dark**, and the
+nine existing schemes are **removed**. Colours come from Cursor; conceal semantics and layout
+(§3) still come from OpenCode. Only §6 changed source — the rest of this plan is unaffected.
 
-### 6.2.1 The block, written once
+Source: `cursor-official-themes-0.0.5.vsix` → `themes/cursor-dark-color-theme.json`
+(label "Cursor Dark", `uiTheme: vs-dark`, 225 token rules). Keep a copy of that JSON alongside
+the scheme so the derivation stays reproducible.
 
-Substitute the slot names from the table in §6.2.2. Attributes are fixed across all schemes —
-only the colors vary.
+### 6.2.1 Alpha flattening
 
-```
-=MdText			TEXT
-=MdH1			HEAD bold underline
-=MdH2			HEAD bold
-=MdH3			HEAD bold
-=MdH4			HEAD bold
-=MdH5			HEAD bold
-=MdH6			HEAD bold
-=MdBold			STRONG bold
-=MdItalic		EMPH italic
-=MdBoldItalic		STRONG bold italic
-=MdStrike		MUTED dim
-=MdCode			CODE
-=MdCodeBlock		CODE
-=MdCodeFence		MUTED dim
-=MdBlockquote		EMPH italic
-=MdList			LINK
-=MdListEnum		LINKTEXT
-=MdRule			MUTED
-=MdLinkText		LINKTEXT underline
-=MdLinkUrl		LINK underline
-=MdImageAlt		LINKTEXT bold
-=MdImageUrl		LINK
-=MdTableHeader		HEAD bold
-=MdTableSeparator	MUTED dim
-=MdTableBody
-=MdTableAlign		MUTED dim
-=MdDelim		MUTED dim
-=MdEscape		MUTED
-```
+Cursor uses 8-digit hex with alpha; JOE has no alpha channel. Per the resolved approach:
+**truecolor uses the flattened composite; 256/16 use the base colour plus `dim`.**
 
-`MdTableBody` stays empty on purpose — table cell text inherits body text.
+| Cursor | Role | Flattened over `#181818` | 256 |
+|---|---|---|---|
+| `#F0F0F099` | muted text, comments, quote | `#9A9A9A` | `247` |
+| `#F0F0F05C` | line numbers | `#666666` | `241` |
+| `#40404099` | selection background | `#303030` | `236` |
 
-Every scheme with two sections (`.colors 256` and `.colors *`) needs this block **in both**,
-with that section's values. Exceptions: `default.jcf` is 16-colour only, `xoria.jcf` is 256 only,
-and **`solarized.jcf` needs the block only once per section but with identical text**, because it
-defines the same `.set` names in both — write `[violet]`, `[orange]`, … and it resolves correctly
-in each.
+### 6.2.2 Palette
 
-### 6.2.2 Slot values per scheme
+| Name | Cursor hex | 256 | Used for |
+|---|---|---|---|
+| `bg` | `#181818` | `234` | background |
+| `fg` | `#F0F0F0` | `255` | body text |
+| `near-white` | `#D6D6DD` | `188` | variables, list markers, punctuation |
+| `muted` | `#9A9A9A`¹ | `247` | comments, quote text, rules, delimiters |
+| `teal` | `#82D2CE` | `116` | keywords, italic, link URL |
+| `lavender` | `#AAA0FA` | `147` | link label, image alt, tags |
+| `amber` | `#F8C762` | `221` | bold |
+| `pink` | `#E394DC` | `176` | strings, inline code, quote bar |
+| `orange` | `#EFB080` | `216` | functions, types, escapes |
+| `sand` | `#EBC88D` | `186` | numbers |
+| `green` | `#A8CC7C` | `150` | preprocessor / directives |
+| `nord-blue` | `#88C0D0` | `110` | headings, table header |
+| `linenum` | `#666666`¹ | `241` | gutter |
+| `sel` | `#303030`¹ | `236` | selection background |
 
-Derived from each scheme's existing class colors so markdown stays internally consistent with the
-rest of the theme rather than importing OpenCode's hues wholesale.
+¹ flattened from an alpha colour — see §6.2.1.
 
-| Scheme | Section | TEXT | HEAD | STRONG | EMPH | CODE | LINK | LINKTEXT | MUTED |
-|---|---|---|---|---|---|---|---|---|---|
-| `default` | 16 | *(empty)* | `magenta` | `yellow` | `yellow` | `cyan` | `magenta` | `cyan` | `dim` |
-| `gruvbox` | 256 | `[fg]` | `[light_purple]` | `[light_orange]` | `[light_yellow]` | `[light_green]` | `[light_orange]` | `[light_blue]` | `[light_gray]` |
-| `gruvbox` | `*` | `[fg]` | `[light_purple]` | `[light_orange]` | `[light_yellow]` | `[light_green]` | `[light_orange]` | `[light_blue]` | `[light_gray]` |
-| `ir_black` | 256 | `255` | `207` | `223` | `229` | `155` | `223` | `146` | `244` |
-| `ir_black` | `*` | `$f6f3e8` | `$FF73FD` | `$FFD2A7` | `$FFFFB6` | `$A8FF60` | `$FFD2A7` | `$96CBFE` | `$7C7C7C` |
-| `molokai` | 256 | `231` | `141` | `208` | `186` | `148` | `208` | `81` | `239` |
-| `molokai` | `*` | `$F8F8F2` | `$AE81FF` | `$ef5939` | `$E6DB74` | `$A6E22E` | `$ef5939` | `$66D9EF` | `$465457` |
-| `solarized` | both | `[base0]` | `[violet]` | `[orange]` | `[yellow]` | `[green]` | `[orange]` | `[cyan]` | `[base01]` |
-| `wombat` | 256 | `255` | `149` | `203` | `194` | `113` | `203` | `153` | `246` |
-| `wombat` | `*` | `$f6f3e8` | `$cae682` | `$e5786d` | `$e7f6da` | `$95e454` | `$e5786d` | `$8ac6f2` | `$99968b` |
-| `xoria` | 256 | `252` | `182` | `180` | `229` | `150` | `180` | `110` | `244` |
-| `zenburn` | 256 | `253` | `223` | `180` | `187` | `186` | `180` | `116` | `145` |
-| `zenburn` | `*` | `$dcdccc` | `$f0dfaf` | `$ffcfaf` | `$dfdfbf` | `$efef8f` | `$ffcfaf` | `$8cd0d3` | `$9f9f9f` |
-| `zenburn-hc` | 256 | `253` | `223` | `180` | `187` | `186` | `180` | `116` | `145` |
-| `zenburn-hc` | `*` | `$dcdccc` | `$f0dfaf` | `$ffcfaf` | `$dfdfbf` | `$efef8f` | `$ffcfaf` | `$8cd0d3` | `$9f9f9f` |
+### 6.2.3 Markdown mapping
 
-Notes on the derivations:
+Every value traces to a specific Cursor scope.
 
-- `zenburn` and `zenburn-hc` share slot values; they differ only in background.
-- `wombat` and `zenburn` have no purple, so HEAD borrows the scheme's own most prominent accent
-  rather than forcing a hue that clashes.
-- `gruvbox`'s current per-level rainbow headings (H1 yellow, H2 blue, H3 green, …) are
-  **replaced** by a single HEAD colour, matching OpenCode's one-heading-colour model.
-- This supersedes the existing `Md*` blocks in `default.jcf` and `gruvbox.jcf`; rewrite them from
-  the template rather than patching around them.
+| JOE class | Cursor scope | Colour |
+|---|---|---|
+| `MdText` | `editor.foreground` | `fg` |
+| `MdH1` | `entity.name.section.markdown` | `nord-blue` **bold underline** |
+| `MdH2`–`MdH6` | same | `nord-blue` **bold** |
+| `MdBold` | `markup.bold` | `amber` bold |
+| `MdItalic` | `markup.italic` + `markup.italic.markdown` | `teal` italic |
+| `MdBoldItalic` | both | `amber` bold italic |
+| `MdStrike` | *(absent in Cursor)* | `muted` dim |
+| `MdCode`, `MdCodeBlock` | `markup.inline.raw.markdown` | `pink` |
+| `MdCodeFence` | `punctuation.definition.metadata.markdown` | `muted` dim |
+| `MdBlockquote` | `markup.quote.markdown` | `muted` italic |
+| *(quote bar `│`)* | `beginning.punctuation.definition.quote.markdown.xi` | `pink` |
+| `MdList` | `punctuation.definition.list.begin.markdown` | `near-white` |
+| `MdListEnum` | same (Cursor does not distinguish) | `near-white` |
+| `MdRule` | `punctuation.definition.metadata.markdown` | `muted` |
+| `MdLinkText` | `string.other.link.title.markdown` | `lavender` underline |
+| `MdLinkUrl` | `markup.underline.link.markdown` | `teal` underline |
+| `MdImageAlt` | `string.other.link.description.markdown` | `lavender` |
+| `MdImageUrl` | `markup.underline.link.image.markdown` | `teal` |
+| `MdTableHeader` | `markup.heading` | `nord-blue` bold |
+| `MdTableSeparator`, `MdTableAlign` | `punctuation` | `muted` dim |
+| `MdTableBody` | — | *(empty — inherits body text)* |
+| `MdDelim` | `punctuation.definition.heading.markdown` | `muted` dim |
+| `MdEscape` | `constant.character.escape` | `orange` |
 
-### 6.2.3 Optional simplification — verify before relying on it
+Note the link colours are **inverted relative to OpenCode**: Cursor puts the *label* in lavender
+and the *URL* in teal. Since JOE conceals bracketed URLs (§3.2), `MdLinkUrl` is visible only for
+autolinks and bare URLs, and in edit mode.
 
-Reading `parse_color_def` (`src/colors.zig:333`), a definition appears to accept a chain of
-`+Ref` references followed by a colour spec — i.e. `=MdCode +String bold` should work, which
-would let the whole block be expressed as inheritance from each scheme's existing classes.
+### 6.2.4 Two deliberate departures from Cursor
 
-**Nothing in the tree exercises that form** (`grep` finds only bare `=X +Y`). Treat it as
-unverified: try one line, and if it parses, collapse the block; if not, use the explicit values
-above, which are guaranteed to work because they are the form every scheme already uses.
+1. **Heading hierarchy.** Cursor colours every heading level identically — it varies *font size*,
+   which a terminal cannot. JOE keeps H1 bold+underline and H2–H6 bold so the hierarchy survives
+   on a character grid. The colour is Cursor's; the weight is ours.
+2. **Ordered vs unordered list colour.** Cursor uses one list colour; JOE has separate `MdList`
+   and `MdListEnum`. Both take `near-white` — the split exists structurally but is not used to
+   differentiate, matching Cursor.
+
+### 6.2.5 General syntax mapping
+
+The scheme must cover JOE's whole class surface (76 classes), not only markdown:
+
+| JOE class | Cursor scope | Colour |
+|---|---|---|
+| `Idle` | — | *(empty)* |
+| `Comment` | `comment` | `muted` italic |
+| `Keyword`, `Statement`, `Conditional`, `Loop`, `Control`, `Label` | `keyword` | `teal` |
+| `String`, `Character`, `StringVariable` | `string` | `pink` |
+| `Number`, `Float` | `constant.numeric` | `sand` |
+| `DefinedFunction`, `Builtin` | `entity.name.function` | `orange` |
+| `Type`, `Structure`, `StorageClass` | `entity.name.type` | `orange` |
+| `Ident`, `Variable`, `DefinedIdent`, `Key`, `Value` | `variable` | `near-white` |
+| `Constant`, `Boolean` | `constant.language` | `teal` |
+| `Preproc`, `Define`, `Precond`, `Macro`, `IncSystem`, `IncLocal` | `keyword.control.directive` | `green` |
+| `Escape`, `StringEscape`, `CharacterEscape` | `constant.character.escape` | `orange` |
+| `Operator`, `Brace` | `punctuation` | `near-white` |
+| `Bad`, `Garbage` | `invalid.illegal` | `fg` on red bg |
+| `TODO` | `keyword` | `amber` bold |
+| `Title` | `entity.name.section` | `nord-blue` bold |
+| `Tag`, `TagName`, `TagEnd`, `TagEdge`, `html.*`, `xml.*` | `entity.name.tag` | `lavender` |
+| `Ignore` | — | `muted` dim |
+| `diff.AddLine` | `markup.inserted.diff` | `pink` |
+| `diff.DelLine` | `markup.deleted.diff` | `near-white` |
+| `diff.ChgLine` | `markup.changed.diff` | `orange` |
+| `diff.Hunk`, `diff.FileNew`, `diff.FileOld`, `diff.Garbage` | — | `muted` |
+
+UI keys: `-text fg/bg`, `-status bg/near-white`, `-selection /sel`, `-linum linenum`,
+`-curlin /#1F1F1F`, `-cursor bg/fg`, `-visiblews linenum`, plus the 16 `-term` entries.
+
+### 6.2.6 Consequences of removing the nine schemes
+
+Verified — the blast radius is small, but not zero:
+
+- **No code or test depends on scheme names.** `grep` across `*.zig`, `*.py`, `*.in` finds
+  nothing outside `colors/` and these plan files.
+- **No default scheme is set.** `rc/joerc.in:186` has `-colors scheme` commented out, so removal
+  does not change out-of-box behaviour.
+- `build.zig:138` installs the whole `colors/` directory — deletions propagate automatically.
+- **`colors/Makefile.am` names all nine** in `data_color_DATA` and must be updated, or the
+  autoconf path breaks. `Makefile.in` / `Makefile` are generated and gitignored.
+- **`NEWS.md:231-243` credits the original scheme authors** (Pertsev, Werth, Restrepo,
+  Schoonover, Nielsen, Zotikov, Nurminen). Removing the schemes without touching that section
+  leaves dangling credits — rewrite it to record the removal rather than silently dropping the
+  attributions.
+- Any user with `-colors gruvbox` in a personal `joerc` will hit a missing-scheme error. Worth a
+  `NEWS.md` line.
+- Cursor's licence terms for the theme package should be checked before vendoring its colours;
+  record the outcome next to the scheme.
 
 ---
 
@@ -589,7 +614,8 @@ large enough to hide a regression.
 ### Phase 3 — OpenCode style mapping (§6)
 
 - Retarget six `md.jsf` states per R4; add `MdText`, `MdListEnum`, `MdImageUrl` (no `MdConceal`).
-- Expand the §6.2.1 template with the §6.2.2 values into **all 9** `colors/*.jcf`, both sections.
+- Create `colors/cursor-dark.jcf` from §6.2 (both `.colors 256` and `.colors *` sections);
+  **delete the nine existing schemes** and update `colors/Makefile.am` + `NEWS.md` (§6.2.6).
 - View attrs: H1 bold+underline; H2–H6 bold; strong bold; emph italic; quote italic; link label
   and URL underlined.
 - Degrade truecolor → 256 → 16 → attributes; verify each `Md*` stays legible at 16 colors.
@@ -644,7 +670,7 @@ determined."
 |---|---|---|---|
 | R1 | Fence / indented-code block state | Mirror the table-region cache; skip all analyzers in a fence body. DFA-state alternative rejected with reasons | §4.2.1 |
 | R2 | Reference-link definition lookup | Two tiers — no cache. See R2 below | here |
-| R3 | Palettes for the 7 unstyled schemes | Eight-slot template + per-scheme value table for all 9 | §6.2 |
+| R3 | Colour scheme | One native `cursor-dark.jcf` translated from Cursor Dark; the nine existing schemes are removed | §6.2 |
 | R4 | `md.jsf` rules for the new classes | Six state retargets, three new classes; `MdConceal` dropped | R4 below |
 | R5 | Cursor on a concealed byte | Cursor never rests on a concealed byte; rules below | R5 below |
 | R6 | Ordered-list right-alignment | **Dropped.** Left-align as authored | R6 below |
@@ -736,7 +762,9 @@ is a single-line decision needing no region at all. Recorded as deviation 6 in t
 | `src/bw_lgen.zig` | View entry, mark-inverse vs collapsed columns, OSC 8 glue |
 | `src/mouse.zig` | `udefmup` → click-to-open URL |
 | `syntax/md.jsf` | Six state retargets (R4): `MdText`, `MdListEnum`, `MdImageUrl` |
-| `colors/*.jcf` (**all 9**) | OpenCode-like tokens |
+| `colors/cursor-dark.jcf` | **New** — the single native scheme (§6.2) |
+| `colors/*.jcf` (the 9 existing) | **Deleted** (§6.2.6) |
+| `colors/Makefile.am`, `NEWS.md` | Scheme list + author credits (§6.2.6) |
 | `tests/viewmode.py` | 62 rewritten assertions + conceal/style/click fixtures |
 | `AGENTS.md` | Soak count; "hides delimiters" → conceal wording; phase-numbering note |
 | `rc/joerc.in` / help | Optional click hint |
@@ -774,7 +802,8 @@ is a single-line decision needing no region at all. Recorded as deviation 6 in t
 | Full CommonMark in pure Zig is large | Paint subset + grow against soak; not 671 GFM tests day one |
 | Mouse-open vs selection | Click without drag only (`selecting == 0`); skip if mark/drag active |
 | **URL → shell injection** | `execlp` with argv, scheme allowlist (Phase 5) |
-| Weak italic/truecolor terminals | Existing attr degradation; verify all 9 schemes at 16 colors |
+| Weak italic/truecolor terminals | Existing attr degradation; verify the scheme at truecolor / 256 / 16 |
+| **Removing 9 schemes is user-visible** | No default is set and nothing in code references them (§6.2.6); note it in `NEWS.md` and keep the author credits honest |
 | Event migration regresses soak | Phase 4 behind the same `ViewTables` contract |
 | OpenCode reference drifts | §2 pins exact paths; re-verify rather than trusting this doc |
 
@@ -788,7 +817,8 @@ is a single-line decision needing no region at all. Recorded as deviation 6 in t
    a labelled link. Autolinks and bare URLs stay visible.
 4. Edit mode shows plain source with highlight, byte-faithful — URLs included.
 5. Links work via **OSC 8** and **JOE left-click open**, with no shell injection path.
-6. All 9 color schemes carry markdown tokens and degrade legibly.
+6. `colors/cursor-dark.jcf` covers every JOE class and degrades legibly (truecolor / 256 / 16);
+   the nine old schemes are gone and `Makefile.am` + `NEWS.md` reflect that.
 7. No images; no external markdown library in the link.
 8. Soak green at the updated count; buffer never mutated by viewmode.
 9. Deviations from OpenCode (§3.2 link conceal, §5 line grid) are documented, not accidental.
@@ -830,6 +860,7 @@ one place where "match OpenCode" loses to "serve the editor use case."
 | 4 | No wrapped table cells | Same | §5 |
 | 5 | Task markers → `☐`/`☑`; quote → `│`; HR → `─` | Already shipped; equivalent at 1-column width | §3.1 |
 | 6 | Ordered list markers left-aligned, not padded | Needs a third multi-line region for a cosmetic gain | R6 |
+| 7 | **All colours come from Cursor Dark, not OpenCode** | Chosen look; OpenCode still governs conceal, layout, and attributes | §6.2 |
 
 Anything not on this list should match OpenCode. If an implementer finds a sixth divergence,
 that is a bug or a missing row here — not licence to improvise.

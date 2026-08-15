@@ -1,10 +1,11 @@
 # Markdown rich viewmode — Task List
 
 > **Branch:** work on **`markdown`** (synced from `zig-rewrite`).
-> **Source:** `plans/markdown-wysiwyg-feasibility.md` (OpenCode-style plan; Zig Path A)
+> **Source:** `plans/markdown-wysiwyg-feasibility.md` (Zig Path A)
 > **Status:** Phase 1–2 baseline **shipped**. Active work = Phases 1–7 below (Phase 0 done).
 > **Constraint:** Self-contained Zig — borrow ideas from koino/MD4C/OpenCode; **no** vendored markdown libs.
-> **Reference checkout:** `~/Projects/opencode-research` — see plan §2 for exact file paths.
+> **References:** conceal + layout from OpenCode (`~/Projects/opencode-research`, plan §2);
+> **all colours from Cursor Dark** (`cursor-official-themes-0.0.5.vsix`, plan §6.2).
 > **Deferred:** nested fence HL + images → `plans/future-roadmap.md` (2.5 / 2.6)
 
 ---
@@ -126,25 +127,34 @@ Target = plan §3.1 "JOE result" column, with the §3.2 deviation.
 
 ---
 
-## Phase 3 — OpenCode style mapping
+## Phase 3 — Native colour scheme (Cursor Dark) + style mapping
 
 - [ ] **3.1** `syntax/md.jsf` — six state retargets per plan R4: `:ordered_list` and
       `:ordered_mark` → `MdListEnum`; `:image_url` → `MdImageUrl`; `:idle`, `:line_start`,
       `:list_content` → `MdText`. `MdConceal` is **not** needed (table grid uses the existing
       `MdTableSeparator`)
-- [ ] **3.2** Expand the plan §6.2.1 template with §6.2.2 values into **all 9** `colors/*.jcf`,
-      **both** `.colors` sections each (`default` 16-only, `xoria` 256-only, `solarized` uses
-      `.set` names so one text works for both). Rewrite the existing `default`/`gruvbox` blocks
-      from the template rather than patching them
-- [ ] **3.2b** Optional: try `=MdCode +String bold` on one line — if the parser accepts a `+Ref`
-      chain plus a spec (plan §6.2.3, unverified), collapse the block to inheritance
+- [ ] **3.2** Create `colors/cursor-dark.jcf` from plan §6.2 — markdown mapping (§6.2.3), general
+      syntax (§6.2.5), UI keys. **Both** `.colors 256` and `.colors *` sections
+- [ ] **3.2a** Alpha handling per §6.2.1: flattened hex in the truecolor section
+      (`#F0F0F099`→`#9A9A9A`, `#F0F0F05C`→`#666666`, `#40404099`→`#303030`); base colour + `dim`
+      in the 256 section
+- [ ] **3.2b** Delete the nine existing schemes (`default`, `gruvbox`, `ir_black`, `molokai`,
+      `solarized`, `wombat`, `xoria`, `zenburn`, `zenburn-hc`)
+- [ ] **3.2c** Update `colors/Makefile.am` `data_color_DATA` (autoconf path breaks otherwise);
+      `build.zig:138` installs the directory wholesale and needs no change
+- [ ] **3.2d** Rewrite `NEWS.md:231-243` — it credits the seven upstream scheme authors by name.
+      Record the removal; do not silently drop the attributions
+- [ ] **3.2e** Check Cursor's licence terms for the theme package before vendoring its colours;
+      record the outcome next to the scheme
 - [ ] **3.3** View attrs: H1 bold+underline; H2–H6 bold; strong bold; emph italic; quote italic;
       link label and URL underlined
-- [ ] **3.4** Exact colors per plan §6 (note `markdownLink` `#fab283` and
-      `markdownListEnumeration` `#56b6c2`, both missing from the old matrix)
+- [ ] **3.4** Exact colours per plan §6.2.3 / §6.2.5. Note Cursor inverts OpenCode's link
+      colours: label = lavender `#AAA0FA`, URL = teal `#82D2CE`
 - [ ] **3.5** Edit mode: all source visible; soft-align highlight to the same palette
-- [ ] **3.6** Degradation check: truecolor → 256 → 16 → attributes, every `Md*` legible at 16
-- [ ] **3.7** Visual check against OpenCode default dark side by side
+- [ ] **3.6** Degradation check: truecolor → 256 → 16 → attributes; every `Md*` legible at 16.
+      Cursor Dark is a dark-background theme — verify on a light terminal too
+- [ ] **3.7** Visual check against Cursor Dark side by side (colours), and against OpenCode for
+      conceal/layout (§3)
 
 ---
 
@@ -223,7 +233,7 @@ block margins, dropped fence lines, wrapped table cells (plan §5).
    paint path.
 4. When `viewmode` is off, rendering must stay source-faithful (edit highlight only).
 5. **Key files:** `src/render/lgen.zig`, `src/render/view.zig`, `src/render/table.zig`,
-   `src/bw_lgen.zig`, `src/mouse.zig`, `syntax/md.jsf`, `colors/*.jcf` (all 9),
+   `src/bw_lgen.zig`, `src/mouse.zig`, `syntax/md.jsf`, `colors/cursor-dark.jcf`,
    `tests/viewmode.py`, `rc/joerc.in`.
 6. No new dependency in `build.zig` for markdown parsing.
 7. Verify OpenCode claims against `~/Projects/opencode-research` rather than trusting this doc —

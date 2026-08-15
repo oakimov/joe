@@ -24,8 +24,7 @@ charmaps/klingon
 /install-sh
 /missing
 
-.claude/*
-!.claude/CLAUDE.md
+.claude/settings.local.json
 .pytest_cache/
 .zig-cache/
 zig-out/

@@ -23,70 +23,71 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("Hello", x=2)
+        self.assertTextAt("Hello", x=0)
         self.exitJoe()
         self.assertExited()
 
     # --- Feature 1.3: Heading delimiter hiding ---
+    # Plan §4: hidden bytes paint at zero width, so heading text starts
+    # immediately at column 0 rather than after N space-padded columns.
 
     def test_viewmode_h1_heading(self):
-        """H1: '# ' hidden as spaces"""
+        """H1: '# ' hidden at zero width"""
         self.workdir.fixtureData("test.md", "# Heading One\n")
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("  ", x=0)
-        self.assertTextAt("Heading One", x=2)
+        self.assertTextAt("Heading One", x=0)
         self.exitJoe()
         self.assertExited()
 
     def test_viewmode_h2_heading(self):
-        """H2: '## ' hidden as spaces"""
+        """H2: '## ' hidden at zero width"""
         self.workdir.fixtureData("test.md", "## Heading Two\n")
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("Heading Two", x=3)
+        self.assertTextAt("Heading Two", x=0)
         self.exitJoe()
         self.assertExited()
 
     def test_viewmode_h3_heading(self):
-        """H3: '### ' hidden as spaces"""
+        """H3: '### ' hidden at zero width"""
         self.workdir.fixtureData("test.md", "### Heading Three\n")
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("Heading Three", x=4)
+        self.assertTextAt("Heading Three", x=0)
         self.exitJoe()
         self.assertExited()
 
     def test_viewmode_h4_heading(self):
-        """H4: '#### ' hidden as spaces"""
+        """H4: '#### ' hidden at zero width"""
         self.workdir.fixtureData("test.md", "#### Heading Four\n")
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("Heading Four", x=5)
+        self.assertTextAt("Heading Four", x=0)
         self.exitJoe()
         self.assertExited()
 
     def test_viewmode_h5_heading(self):
-        """H5: '##### ' hidden as spaces"""
+        """H5: '##### ' hidden at zero width"""
         self.workdir.fixtureData("test.md", "##### Heading Five\n")
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("Heading Five", x=6)
+        self.assertTextAt("Heading Five", x=0)
         self.exitJoe()
         self.assertExited()
 
     def test_viewmode_h6_heading(self):
-        """H6: '###### ' hidden as spaces"""
+        """H6: '###### ' hidden at zero width"""
         self.workdir.fixtureData("test.md", "###### Heading Six\n")
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("Heading Six", x=7)
+        self.assertTextAt("Heading Six", x=0)
         self.exitJoe()
         self.assertExited()
 
@@ -125,73 +126,72 @@ class ViewModeTests(joefx.JoeTestBase):
     # --- Feature 1.4: Bold/italic/strikethrough delimiter hiding ---
 
     def test_viewmode_bold(self):
-        """Bold **text** delimiters hidden"""
+        """Bold **text** delimiters hidden at zero width"""
         self.workdir.fixtureData("test.md", "Some **bold** text\n")
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("Some   bold  ", x=0)
+        self.assertTextAt("Some bold text", x=0)
         self.exitJoe()
         self.assertExited()
 
     def test_viewmode_italic(self):
-        """Italic *text* delimiters hidden"""
+        """Italic *text* delimiters hidden at zero width"""
         self.workdir.fixtureData("test.md", "Some *italic* text\n")
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("Some  italic  text", x=0)
+        self.assertTextAt("Some italic text", x=0)
         self.exitJoe()
         self.assertExited()
 
     def test_viewmode_bold_underscore(self):
-        """Bold __text__ delimiters hidden"""
+        """Bold __text__ delimiters hidden at zero width"""
         self.workdir.fixtureData("test.md", "Some __bold__ text\n")
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("Some   bold  ", x=0)
+        self.assertTextAt("Some bold text", x=0)
         self.exitJoe()
         self.assertExited()
 
     def test_viewmode_italic_underscore(self):
-        """Italic _text_ delimiters hidden"""
+        """Italic _text_ delimiters hidden at zero width"""
         self.workdir.fixtureData("test.md", "Some _italic_ text\n")
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("Some  italic  text", x=0)
+        self.assertTextAt("Some italic text", x=0)
         self.exitJoe()
         self.assertExited()
 
     def test_viewmode_strikethrough(self):
-        """Strikethrough ~~text~~ delimiters hidden"""
+        """Strikethrough ~~text~~ delimiters hidden at zero width"""
         self.workdir.fixtureData("test.md", "Some ~~deleted~~ text\n")
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("Some   deleted", x=0)
+        self.assertTextAt("Some deleted text", x=0)
         self.exitJoe()
         self.assertExited()
 
     def test_viewmode_bold_italic_asterisks(self):
-        """Bold+italic ***text*** delimiters hidden (all 3 chars)"""
+        """Bold+italic ***text*** delimiters hidden (all 3 chars, zero width)"""
         self.workdir.fixtureData("test.md", "***bold italic***\n")
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        # 3 opening + 3 closing = 6 hidden chars, rendered as spaces at original positions
-        self.assertTextAt("   bold italic   ", x=0)
+        self.assertTextAt("bold italic", x=0)
         self.exitJoe()
         self.assertExited()
 
     def test_viewmode_bold_italic_underscores(self):
-        """Bold+italic ___text___ delimiters hidden (all 3 chars)"""
+        """Bold+italic ___text___ delimiters hidden (all 3 chars, zero width)"""
         self.workdir.fixtureData("test.md", "___bold italic___\n")
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("   bold italic   ", x=0)
+        self.assertTextAt("bold italic", x=0)
         self.exitJoe()
         self.assertExited()
 
@@ -202,8 +202,9 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        # Outer ** hidden, but inner *italic* delimiters remain visible (known limitation)
-        self.assertTextAt("  bold *italic* mo", x=0)
+        # Outer ** hidden at zero width, but inner *italic* delimiters remain
+        # visible (known limitation)
+        self.assertTextAt("bold *italic* more", x=0)
         self.exitJoe()
         self.assertExited()
 
@@ -213,8 +214,8 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        # Backticks hidden, but ** inside code should remain visible
-        self.assertTextAt("Use  **not bold** ", x=0)
+        # Backticks hidden at zero width, but ** inside code stays visible
+        self.assertTextAt("Use **not bold** here", x=0)
         self.exitJoe()
         self.assertExited()
 
@@ -224,7 +225,7 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("  one   and   two ", x=0)
+        self.assertTextAt("one and two", x=0)
         self.exitJoe()
         self.assertExited()
 
@@ -234,7 +235,7 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("  bold   and  ital", x=0)
+        self.assertTextAt("bold and italic", x=0)
         self.exitJoe()
         self.assertExited()
 
@@ -274,7 +275,7 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("  bold   at star", x=0)
+        self.assertTextAt("bold at start", x=0)
         self.exitJoe()
         self.assertExited()
 
@@ -284,7 +285,7 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt(" italic  at start", x=0)
+        self.assertTextAt("italic at start", x=0)
         self.exitJoe()
         self.assertExited()
 
@@ -294,19 +295,19 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("  strike   at sta", x=0)
+        self.assertTextAt("strike at start", x=0)
         self.exitJoe()
         self.assertExited()
 
     # --- Feature 1.5: Inline code backtick hiding ---
 
     def test_viewmode_inline_code(self):
-        """Inline code `code` backticks hidden"""
+        """Inline code `code` backticks hidden at zero width"""
         self.workdir.fixtureData("test.md", "Some `code` here\n")
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("Some  code  here", x=0)
+        self.assertTextAt("Some code here", x=0)
         self.exitJoe()
         self.assertExited()
 
@@ -316,7 +317,7 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt(" code  at start", x=0)
+        self.assertTextAt("code at start", x=0)
         self.exitJoe()
         self.assertExited()
 
@@ -326,20 +327,23 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("Use  foo  and  bar ", x=0)
+        self.assertTextAt("Use foo and bar here", x=0)
         self.exitJoe()
         self.assertExited()
 
     # --- Feature 1.6: Link delimiter hiding ---
 
     def test_viewmode_inline_link(self):
-        """Inline link [text](url) delimiters hidden"""
+        """Inline link [text](url) delimiters hidden at zero width"""
         self.workdir.fixtureData("test.md", "Click [here](http://example.com)\n")
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        # [ ] ( ) = 4 hidden chars at their original positions
-        self.assertTextAt("Click  here  http:/", x=0)
+        # [ ] ( ) hidden at zero width; label and URL abut with no separator
+        # since nothing in the source sits between "here" and "(". Phase 2
+        # (plan §3.2) conceals the URL entirely, which removes this seam —
+        # not fixed here, this is the correct Phase-1-only rendering.
+        self.assertTextAt("Click herehttp://example.com", x=0)
         self.exitJoe()
         self.assertExited()
 
@@ -349,7 +353,7 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt(" link  http://x.co", x=0)
+        self.assertTextAt("linkhttp://x.com", x=0)
         self.exitJoe()
         self.assertExited()
 
@@ -359,30 +363,29 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        # Both links should have delimiters hidden
-        self.assertTextAt(" one  http://a.com ", x=0)
+        # Both links have delimiters hidden at zero width
+        self.assertTextAt("onehttp://a.com and twohttp://b.com", x=0)
         self.exitJoe()
         self.assertExited()
 
     def test_viewmode_reference_link(self):
-        """Reference-style link [text][ref] delimiters hidden"""
+        """Reference-style link [text][ref] delimiters hidden at zero width"""
         self.workdir.fixtureData("test.md", "See [docs][reference] here\n")
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        # [ ] [ ] = 4 hidden chars at their original positions
-        self.assertTextAt("See  docs  reference", x=0)
+        self.assertTextAt("See docsreference here", x=0)
         self.exitJoe()
         self.assertExited()
 
     def test_viewmode_link_with_title(self):
-        """Link with title [text](url "title") delimiters hidden"""
+        """Link with title [text](url "title") delimiters hidden at zero width"""
         self.workdir.fixtureData("test.md", "[click](http://x.com \"Title\") here\n")
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        # Delimiters hidden, URL + title visible
-        self.assertTextAt(" click  http://x.co", x=0)
+        # Delimiters hidden at zero width; URL + title visible (Phase 1)
+        self.assertTextAt('clickhttp://x.com "Title" here', x=0)
         self.exitJoe()
         self.assertExited()
 
@@ -430,7 +433,7 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("- \u2610   Unchecked ta", x=0)
+        self.assertTextAt("- \u2610Unchecked task", x=0)
         self.exitJoe()
         self.assertExited()
 
@@ -440,7 +443,7 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("- \u2611   Checked task", x=0)
+        self.assertTextAt("- \u2611Checked task", x=0)
         self.exitJoe()
         self.assertExited()
 
@@ -450,7 +453,7 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("- \u2611   Checked task", x=0)
+        self.assertTextAt("- \u2611Checked task", x=0)
         self.exitJoe()
         self.assertExited()
 
@@ -605,7 +608,7 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startJoe()
         self.mode("viewmode")
         # Opening fence markers hidden, language identifier visible
-        self.assertTextAt("   python", x=0)
+        self.assertTextAt("python", x=0)
         self.assertTextAt("class Foo: pass", x=0, y=2)
         # Closing fence markers hidden, nothing else → spaces
         self.assertTextAt("   ", x=0, y=3)
@@ -620,7 +623,7 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startJoe()
         self.mode("viewmode")
         # Fence markers hidden, language + trailing spaces visible
-        self.assertTextAt("   python  ", x=0)
+        self.assertTextAt("python  ", x=0)
         self.assertTextAt("code", x=0, y=2)
         self.assertTextAt("   ", x=0, y=3)
         self.exitJoe()
@@ -634,9 +637,59 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startJoe()
         self.mode("viewmode")
         # Opening fence markers hidden, language visible
-        self.assertTextAt("   javascript", x=0)
+        self.assertTextAt("javascript", x=0)
         self.assertTextAt("let x = 1;", x=0, y=2)
         self.assertTextAt("   ", x=0, y=3)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_fenced_body_not_reparsed_as_markdown(self):
+        """Plan §4.2.1 (R1): a fence body must stay byte-exact even when its
+        content looks like markdown. Before the fence-body region cache, a
+        `#` comment inside a code block was hidden as a heading, `**` was
+        eaten as bold, and `---` became a horizontal rule — cosmetic before
+        conceal collapsed to zero width, destructive after. Every other
+        fenced-code soak fixture uses a body with no markdown-shaped
+        characters, so this case was previously untested."""
+        content = "```python\n# a comment\nx = a ** b\n---\nplain\n```\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("python", x=0, y=1)
+        self.assertTextAt("# a comment", x=0, y=2)
+        self.assertTextAt("x = a ** b", x=0, y=3)
+        self.assertTextAt("---", x=0, y=4)
+        self.assertTextAt("plain", x=0, y=5)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_fenced_body_mismatched_fence_char(self):
+        """A ~~~ line inside a ``` fence body is body text, not a close —
+        CommonMark fences only close on a matching character. Regression
+        for plan §4.2.1's forward-simulation fence detector."""
+        content = "```\nline one\n~~~\nline two\n```\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("line one", x=0, y=2)
+        self.assertTextAt("~~~", x=0, y=3)
+        self.assertTextAt("line two", x=0, y=4)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_indented_code_not_reparsed_as_markdown(self):
+        """Plan §4.2.1(d): a 4+ space indented code block also stays
+        byte-exact, not just fenced blocks."""
+        content = "Para text.\n\n    # not heading\n    x = a ** b\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("Para text.", x=0, y=1)
+        self.assertTextAt("    # not heading", x=0, y=3)
+        self.assertTextAt("    x = a ** b", x=0, y=4)
         self.exitJoe()
         self.assertExited()
 
@@ -661,7 +714,7 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("Hello", x=2)
+        self.assertTextAt("Hello", x=0)
         self.exitJoe()
         self.assertExited()
         self.assertFileContents("test.md", content)
@@ -777,20 +830,19 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        # Line 1: H1
-        self.assertTextAt("  ", x=0, y=1)
-        self.assertTextAt("Title", x=2, y=1)
+        # Line 1: H1 \u2014 hidden bytes at zero width, text starts at column 0
+        self.assertTextAt("Title", x=0, y=1)
         # Line 2: H2
-        self.assertTextAt("Subtitle", x=3, y=2)
+        self.assertTextAt("Subtitle", x=0, y=2)
         # Line 3: blank
         # Line 4: bold + italic
-        self.assertTextAt("  bold   and  ital", x=0, y=4)
-        # Line 6: blockquote
+        self.assertTextAt("bold and italic", x=0, y=4)
+        # Line 6: blockquote (substitute only, unaffected by collapse)
         self.assertTextAt("\u2502 quote", x=0, y=6)
-        # Line 8: horizontal rule
+        # Line 8: horizontal rule (substitute only, unaffected by collapse)
         self.assertTextAt("\u2500\u2500\u2500", x=0, y=8)
         # Line 10: inline code
-        self.assertTextAt(" code  here", x=0, y=10)
+        self.assertTextAt("code here", x=0, y=10)
         self.exitJoe()
         self.assertExited()
 
@@ -865,14 +917,15 @@ class ViewModeTests(joefx.JoeTestBase):
 
     def test_viewmode_toggle_no_ghost_text(self):
         """Regression: toggling viewmode on must not leave ghost/raw text in buffer.
-        The raw ** delimiters should be hidden as spaces, not duplicated as ghost text
-        underneath the rendered content."""
+        The raw ** delimiters should be hidden at zero width, not duplicated as
+        ghost text underneath the rendered content."""
         self.workdir.fixtureData("test.md", "**Base URL:** http://localhost:3457\n")
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        # After toggle, positions 0,1 (opening **) should be spaces, not asterisks
-        self.assertTextAt("  Base URL:   http://l", x=0)
+        # After toggle, the opening ** contributes zero width — no asterisks,
+        # no leftover ghost characters, and no gap before "Base".
+        self.assertTextAt("Base URL: http://localhost:3457", x=0)
         self.exitJoe()
         self.assertExited()
 
@@ -884,13 +937,13 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startJoe()
         # Start in non-viewmode, toggle on
         self.mode("viewmode")
-        # Verify delimiters are spaces, not ghost raw text
-        self.assertTextAt("  bold   text  italic  h", x=0)
+        # Delimiters hidden at zero width, not ghost raw text
+        self.assertTextAt("bold text italic here", x=0)
         # Toggle off and back on
         self.mode("viewmode")
         self.mode("viewmode")
         # After re-toggle, still clean — no ghost text
-        self.assertTextAt("  bold   text  italic  h", x=0)
+        self.assertTextAt("bold text italic here", x=0)
         self.exitJoe()
         self.assertExited()
 

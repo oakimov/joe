@@ -355,7 +355,16 @@ fn lgenUnits(
         };
         if (opts.view) |vt| {
             switch (u) {
-                .cp => |cp| u = .{ .cp = resolveCp(vt, byte_idx, cp) },
+                .cp => |cp| {
+                    // Plan §4: a hidden byte with no substitute paints at
+                    // zero width — skip it entirely (no emit, no column
+                    // advance) rather than routing it through resolveCp as
+                    // a space. Substitute still wins when both are set.
+                    if (vt.subAt(byte_idx) == 0 and vt.isHidden(byte_idx)) {
+                        continue;
+                    }
+                    u = .{ .cp = resolveCp(vt, byte_idx, cp) };
+                },
                 else => {},
             }
         }
@@ -610,10 +619,11 @@ test "lgenLine applies viewmode hide and substitute" {
     var term = try TermScreen.init(testing.allocator, 8, 1);
     defer term.deinit();
     _ = lgenLine(&term, 0, 0, 8, "# Hi", .{ .view = &tables }, .none);
-    try testing.expectEqual(@as(u21, ' '), term.cells[0].cp);
-    try testing.expectEqual(@as(u21, ' '), term.cells[1].cp);
-    try testing.expectEqual(@as(u21, 'H'), term.cells[2].cp);
-    try testing.expectEqual(@as(u21, 'i'), term.cells[3].cp);
+    // Plan §4: hidden bytes paint at zero width, so "H"/"i" collapse to the
+    // start of the line rather than leaving two space cells where "# " was.
+    try testing.expectEqual(@as(u21, 'H'), term.cells[0].cp);
+    try testing.expectEqual(@as(u21, 'i'), term.cells[1].cp);
+    try testing.expectEqual(@as(u21, ' '), term.cells[2].cp); // trailing pad
 
     try analyzeLine(&tables, "> quote", null);
     var term2 = try TermScreen.init(testing.allocator, 10, 1);

@@ -587,11 +587,14 @@ pub fn buildColMap(tables: *ViewTables, line: []const u8, tab: u16) void {
     }
 }
 
-/// Resolve the painted codepoint for a lead byte (substitute wins over hide).
+/// Resolve the painted codepoint for a **visible** lead byte (substitute
+/// wins over the raw codepoint). Callers must not invoke this for a byte
+/// where `isHidden(byte_idx)` and `subAt(byte_idx) == 0` both hold — that
+/// byte paints at zero width (plan §4) and is skipped by the caller before
+/// reaching this function, not routed through it as a space.
 pub fn resolveCp(tables: *const ViewTables, byte_idx: usize, cp: u21) u21 {
     const sub = tables.subAt(byte_idx);
     if (sub != 0) return sub;
-    if (tables.isHidden(byte_idx)) return ' ';
     return cp;
 }
 

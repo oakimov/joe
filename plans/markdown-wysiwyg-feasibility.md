@@ -405,7 +405,8 @@ Every value traces to a specific Cursor scope.
 | `MdItalic` | `markup.italic` + `markup.italic.markdown` | `teal` italic |
 | `MdBoldItalic` | both | `amber` bold italic |
 | `MdStrike` | *(absent in Cursor)* | `muted` dim |
-| `MdCode`, `MdCodeBlock` | `markup.inline.raw.markdown` | `pink` |
+| `MdCode` (inline) | `markup.inline.raw.markdown` | `pink` |
+| `MdCodeBlock` (fenced body) | *(Cursor injects the language grammar)* | `fg` — see note |
 | `MdCodeFence` | `punctuation.definition.metadata.markdown` | `muted` dim |
 | `MdBlockquote` | `markup.quote.markdown` | `muted` italic |
 | *(quote bar `│`)* | `beginning.punctuation.definition.quote.markdown.xi` | `pink` |
@@ -421,6 +422,11 @@ Every value traces to a specific Cursor scope.
 | `MdTableBody` | — | *(empty — inherits body text)* |
 | `MdDelim` | `punctuation.definition.heading.markdown` | `muted` dim |
 | `MdEscape` | `constant.character.escape` | `orange` |
+
+**Fenced bodies are not pink.** Cursor scopes `#E394DC` to `markup.inline.raw` — *inline* code
+only — and paints fenced blocks with the injected language grammar. JOE defers nested
+highlighting (roadmap 2.5), so `MdCodeBlock` takes plain `fg`: a whole block in inline-code pink
+is a wall of colour Cursor would never render. Revisit when 2.5 lands.
 
 Note the link colours are **inverted relative to OpenCode**: Cursor puts the *label* in lavender
 and the *URL* in teal. Since JOE conceals bracketed URLs (§3.2), `MdLinkUrl` is visible only for

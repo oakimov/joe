@@ -1127,15 +1127,15 @@ test "paintBody applies viewmode hide and substitute" {
     try testing.expectEqual(@as(u21, 0x2502), cellAt(&term, t.x, @intCast(t.y + 1)).cp);
     try testing.expectEqual(@as(u21, 'q'), cellAt(&term, t.x + 2, @intCast(t.y + 1)).cp);
 
-    // "See [x](http://a)": '[', ']', '(', ')' hidden at zero width; the URL
-    // itself is not concealed yet (that's Phase 2). "See " occupies columns
-    // 0-3, so the hidden '[' contributes nothing and 'x' lands at column 4
-    // immediately — followed directly by the still-visible 'h' of the URL
-    // at column 5 (']' and '(' between them cost no columns either).
+    // "See [x](http://a)": '[', ']', '(', the destination, and ')' all
+    // hidden at zero width (plan §3.2 conceals the URL, not just the
+    // bracket syntax). "See " occupies columns 0-3, so the hidden '['
+    // contributes nothing and 'x' lands at column 4 immediately — nothing
+    // else on the line is visible, so column 5 is blank.
     try testing.expectEqual(@as(u21, 'x'), cellAt(&term, t.x + 4, @intCast(t.y + 2)).cp);
     try testing.expect(cellAt(&term, t.x + 4, @intCast(t.y + 2)).attr.underline);
     try testing.expect(terminal.Color.eql(cellAt(&term, t.x + 4, @intCast(t.y + 2)).attr.fg, render.view.link_fg));
-    try testing.expectEqual(@as(u21, 'h'), cellAt(&term, t.x + 5, @intCast(t.y + 2)).cp);
+    try testing.expectEqual(@as(u21, ' '), cellAt(&term, t.x + 5, @intCast(t.y + 2)).cp);
 }
 
 test "paintBody clears content when no stub lines" {

@@ -246,6 +246,8 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startJoe()
         self.mode("viewmode")
         self.assertTextAt("- List item", x=0)
+        self.mode("viewmode")  # toggle back to edit mode
+        self.assertTextAt("* List item", x=0)
         self.exitJoe()
         self.assertExited()
 
@@ -266,6 +268,8 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startJoe()
         self.mode("viewmode")
         self.assertTextAt("- List item", x=0)
+        self.mode("viewmode")  # toggle back to edit mode
+        self.assertTextAt("+ List item", x=0)
         self.exitJoe()
         self.assertExited()
 
@@ -380,6 +384,72 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startJoe()
         self.mode("viewmode")
         self.assertTextAt("click here", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    # --- Feature 2.11: Phase 2 conceal coverage (screen omits URL; edit mode reveals it) ---
+
+    def test_viewmode_inline_link_url_not_on_screen(self):
+        """Plan §3.2: the URL never appears on screen in viewmode; edit mode reveals it"""
+        self.workdir.fixtureData("test.md", "Click [here](http://example.com) now\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("Click here now", x=0)
+        row = self.joe.readLine(0, 0, self.joe.size.X)
+        self.assertNotIn("http://example.com", row)
+        self.mode("viewmode")  # toggle back to edit mode
+        self.assertTextAt("Click [here](http://example.com) now", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_reference_link_label_not_on_screen(self):
+        """Reference name is concealed in viewmode; edit mode reveals it"""
+        self.workdir.fixtureData("test.md", "See [docs][reference] here\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("See docs here", x=0)
+        row = self.joe.readLine(0, 0, self.joe.size.X)
+        self.assertNotIn("reference", row)
+        self.mode("viewmode")
+        self.assertTextAt("See [docs][reference] here", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_image_alt_text_only(self):
+        """Image ![alt](u) shows only alt text in viewmode; edit mode reveals the source"""
+        self.workdir.fixtureData("test.md", "![a diagram](http://x.com/d.png) end\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("a diagram end", x=0)
+        row = self.joe.readLine(0, 0, self.joe.size.X)
+        self.assertNotIn("http://x.com/d.png", row)
+        self.mode("viewmode")
+        self.assertTextAt("![a diagram](http://x.com/d.png) end", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_autolink_and_bare_url_stay_on_screen(self):
+        """Negative case for 2.6: autolinks/bare URLs have no label, so they stay visible"""
+        self.workdir.fixtureData("test.md", "See <http://x.com> and http://y.com here\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("See <http://x.com> and http://y.com here", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_html_entities(self):
+        """Named HTML entities substitute to their glyph in viewmode; edit mode shows the source"""
+        self.workdir.fixtureData("test.md", "a&nbsp;b&lt;c&gt;d&amp;e&quot;f\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("a b<c>d&e\"f", x=0)
+        self.mode("viewmode")
+        self.assertTextAt("a&nbsp;b&lt;c&gt;d&amp;e&quot;f", x=0)
         self.exitJoe()
         self.assertExited()
 

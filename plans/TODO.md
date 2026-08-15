@@ -163,22 +163,42 @@ Ship alone. No style changes in this commit.
 
 Target = plan §3.1 "JOE result" column, with the §3.2 deviation.
 
-- [ ] **2.1** Inline `[a](u)` → `a`: conceal `[`, `]`, `(`, destination, `)`
-- [ ] **2.2** Inline with title `[a](u "T")` → `a`: conceal the title too
-- [ ] **2.3** Reference `[a][r]` → `a` (conceal `[`, `]`, and the label)
-- [ ] **2.4** Collapsed `[a][]` and shortcut `[a]` → `a`
-- [ ] **2.5** Image `![alt](u)` → `alt` only (no image chrome; roadmap 2.6)
-- [ ] **2.6** Autolinks `<u>` and bare URLs stay **visible** — the deliberate exception; add a
-      negative test so a later refactor can't quietly conceal them
-- [ ] **2.7** HTML entities: `&nbsp;`/`&ensp;`/`&emsp;`→`" "`, `&lt;`→`<`, `&gt;`→`>`,
-      `&amp;`→`&`, `&quot;`→`"`
-- [ ] **2.8** List markers: normalise `*`/`+`/`-` → `-`
-- [ ] **2.9** ~~Ordered marker right-alignment~~ — **dropped** (plan R6). Left-align as authored;
+- [x] **2.1** Inline `[a](u)` → `a`: conceal `[`, `]`, `(`, destination, `)`
+- [x] **2.2** Inline with title `[a](u "T")` → `a`: conceal the title too. `applyLinks`
+      (`src/render/view.zig`) doesn't distinguish destination from title — it conceals the whole
+      `(...)` span verbatim, same as it always stored the whole span as `link_url`
+- [x] **2.3** Reference `[a][r]` → `a` (conceal `[`, `]`, and the label)
+- [x] **2.4** Collapsed `[a][]` and shortcut `[a]` → `a`. Shortcut (`[a]` with no following
+      `(...)`/`[...]`) was previously **unhandled entirely** (rendered as literal `[a]`) — added,
+      using the label text itself as the link name, matching CommonMark shortcut-reference
+      semantics
+- [x] **2.5** Image `![alt](u)` → `alt` only (no image chrome; roadmap 2.6). Same delimiter scan
+      as inline/reference links with a leading `!` check; images aren't styled as clickable text
+      (no underline/color) since there's no click target semantics yet
+- [x] **2.6** Autolinks `<u>` and bare URLs stay **visible** — never matched the `[` entry
+      condition in the first place, so no code change; added the negative test
+- [x] **2.7** HTML entities: `&nbsp;`/`&ensp;`/`&emsp;`→`" "`, `&lt;`→`<`, `&gt;`→`>`,
+      `&amp;`→`&`, `&quot;`→`"`. New `applyEntities` (`src/render/view.zig`), same
+      substitute-first-hide-rest mechanism as task checkboxes/HR; skips code spans like
+      `applyEmphasis` does. Unknown/unlisted entities (e.g. `&frobnicate;`) are left untouched —
+      no attempt at the full HTML5 entity table, matching this phase's explicit scope
+- [x] **2.8** List markers: normalise `*`/`+`/`-` → `-`. Folded into the existing task-checkbox
+      line-start block (both need the same leading-whitespace-then-marker scan). A
+      `* * *`-shaped thematic break also matches this bullet shape, but the HR check immediately
+      after unconditionally re-substitutes the whole line when it recognizes a real HR, so this
+      normalisation is harmlessly overwritten in that case — no special-casing needed
+- [x] **2.9** ~~Ordered marker right-alignment~~ — **dropped** (plan R6). Left-align as authored;
       no list-extent region. Unordered `-` normalisation (2.8) still applies
-- [ ] **2.10** Attach `link_url` / OSC 8 to the surviving label cells (URL cells no longer exist)
-- [ ] **2.11** Soak fixtures for each of the above at collapsed positions, including an explicit
-      "screen does not contain the URL" assertion for 2.1–2.5, and a paired edit-mode assertion
-      that the same fixture still shows the URL
+- [x] **2.10** Attach `link_url` / OSC 8 to the surviving label cells (URL cells no longer exist).
+      Verified rather than changed: `lgen.zig`'s `linkAt(byte_idx)` lookup only ever runs for
+      **visible** bytes (hidden bytes `continue` before reaching it, since Phase 1.2), so once the
+      destination bytes are hidden the existing OSC 8 emission automatically follows the label —
+      confirmed by the pre-existing `lgenLine applies viewmode link urls onto cells` test, still
+      green unmodified
+- [x] **2.11** Soak fixtures for each of the above at collapsed positions, including an explicit
+      "screen does not contain the URL" assertion for 2.1–2.5 (via `readLine` + `assertNotIn`,
+      no dedicated helper existed), and a paired edit-mode assertion (`self.mode("viewmode")`
+      toggled back off) that the same fixture still shows the raw source. Soak count 201 → 206
 
 ---
 

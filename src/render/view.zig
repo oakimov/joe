@@ -146,6 +146,9 @@ pub fn analyzeLine(tables: *ViewTables, line: []const u8, attrs: ?[]Attribute) !
     // Feature 1.6: Links — hide delimiters, store URL, style link text
     applyLinks(tables, line, attrs);
 
+    // Feature 2.7: HTML entities — substitute the named glyph
+    applyEntities(tables, line);
+
     buildColMap(tables, line, 8);
 }
 
@@ -208,13 +211,20 @@ pub fn analyzeLineStart(tables: *ViewTables, line: []const u8, tab: u16) bool {
         }
     }
 
-    // Feature 1.7.4: Task list checkbox `[ ]` / `[x]` → ☐ / ☑
+    // Feature 1.7.4 / 2.8: Task list checkbox `[ ]`/`[x]` → ☐/☑; also
+    // normalise the unordered marker itself (`*`/`+`/`-`) → `-`. A
+    // "* * *"-shaped thematic break also matches this leading bullet
+    // shape — Feature 1.8 below unconditionally re-substitutes the whole
+    // line to `─` when it recognizes an actual HR, so this normalisation
+    // is harmlessly overwritten in that case rather than needing to
+    // special-case it here.
     {
         var i: usize = 0;
         while (i < line.len and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {}
         if (i < line.len and (line[i] == '*' or line[i] == '-' or line[i] == '+') and
             i + 1 < line.len and (line[i + 1] == ' ' or line[i + 1] == '\t'))
         {
+            if (line[i] != '-') tables.substitute[i] = '-';
             var after = i + 2;
             while (after < line.len and (line[after] == ' ' or line[after] == '\t')) : (after += 1) {}
             if (after + 2 < line.len and line[after] == '[' and
@@ -290,6 +300,7 @@ pub fn analyzeLineInline(tables: *ViewTables, line: []const u8, attrs: ?[]Attrib
     applyEmphasis(tables, line);
     applyInlineCode(tables, line);
     applyLinks(tables, line, attrs);
+    applyEntities(tables, line);
     buildColMap(tables, line, if (tab == 0) 8 else tab);
 }
 
@@ -592,6 +603,66 @@ fn styleLinkText(attrs: ?[]Attribute, start: usize, end: usize) void {
     }
 }
 
+const HtmlEntity = struct { name: []const u8, glyph: u21 };
+const html_entities = [_]HtmlEntity{
+    .{ .name = "nbsp", .glyph = ' ' },
+    .{ .name = "ensp", .glyph = ' ' },
+    .{ .name = "emsp", .glyph = ' ' },
+    .{ .name = "lt", .glyph = '<' },
+    .{ .name = "gt", .glyph = '>' },
+    .{ .name = "amp", .glyph = '&' },
+    .{ .name = "quot", .glyph = '"' },
+};
+const html_entity_max_name_len = 4; // "nbsp" / "ensp" / "emsp" / "quot"
+
+/// Feature 2.7: named HTML entities (`&nbsp;`, `&lt;`, `&gt;`, `&amp;`,
+/// `&quot;`, `&ensp;`, `&emsp;`) substitute to their glyph — first byte
+/// gets `substitute`, the rest `hide`, same collapse mechanism as task
+/// checkboxes/HR/blockquote markers. Skips code spans: CommonMark doesn't
+/// decode entities there, matching `applyEmphasis`.
+fn applyEntities(tables: *ViewTables, line: []const u8) void {
+    if (line.len == 0) return;
+    var in_code_buf: [4096]u8 = undefined;
+    var heap_code: ?[]u8 = null;
+    defer if (heap_code) |h| tables.allocator.free(h);
+    const in_code: []u8 = blk: {
+        if (line.len <= in_code_buf.len) break :blk in_code_buf[0..line.len];
+        const h = tables.allocator.alloc(u8, line.len) catch return;
+        heap_code = h;
+        break :blk h;
+    };
+    markCodeSpans(in_code, line);
+
+    var i: usize = 0;
+    while (i < line.len) {
+        if (in_code[i] != 0 or line[i] != '&') {
+            i += 1;
+            continue;
+        }
+        const name_start = i + 1;
+        const scan_end = @min(line.len, name_start + html_entity_max_name_len + 1);
+        var j = name_start;
+        while (j < scan_end and line[j] != ';' and line[j] != '&') : (j += 1) {}
+        if (j < line.len and line[j] == ';' and j > name_start) {
+            const name = line[name_start..j];
+            var matched = false;
+            for (html_entities) |e| {
+                if (std.mem.eql(u8, name, e.name)) {
+                    tables.substitute[i] = e.glyph;
+                    hideSpan(tables, i + 1, j + 1);
+                    matched = true;
+                    break;
+                }
+            }
+            if (matched) {
+                i = j + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+}
+
 pub fn buildColMap(tables: *ViewTables, line: []const u8, tab: u16) void {
     const t: u64 = if (tab == 0) 1 else tab;
     var display_col: u64 = 0;
@@ -700,6 +771,21 @@ test "view task list checkbox substitution" {
     try expectRendered(testing.allocator, "- [X] Checked task", "- \u{2611}   Checked task");
 }
 
+test "view list marker normalises star/plus to dash" {
+    try expectRendered(testing.allocator, "* item one", "- item one");
+    try expectRendered(testing.allocator, "+ item two", "- item two");
+    try expectRendered(testing.allocator, "- item three", "- item three");
+}
+
+test "view ordered list marker left untouched" {
+    try expectRendered(testing.allocator, "1. item", "1. item");
+    try expectRendered(testing.allocator, "42) item", "42) item");
+}
+
+test "view task list marker also normalises to dash" {
+    try expectRendered(testing.allocator, "* [ ] todo", "- \u{2610}   todo");
+}
+
 test "view horizontal rule becomes box-drawing dashes" {
     try expectRendered(testing.allocator, "---", "\u{2500}\u{2500}\u{2500}");
     try expectRendered(testing.allocator, "***", "\u{2500}\u{2500}\u{2500}");
@@ -730,7 +816,9 @@ test "view emphasis hides delimiters as spaces" {
 }
 
 test "view list marker not treated as emphasis" {
-    try expectRendered(testing.allocator, "* List item", "* List item");
+    // The `*` marker itself normalises to `-` (Feature 2.8); what this test
+    // guards is that the rest of the line isn't misread as an emphasis run.
+    try expectRendered(testing.allocator, "* List item", "- List item");
     try expectRendered(testing.allocator, "- List item", "- List item");
 }
 
@@ -790,6 +878,22 @@ test "view image hides bang/brackets/destination, leaves alt visible" {
 test "view autolink and bare URL stay visible (no label to conceal to)" {
     try expectRendered(testing.allocator, "See <http://x> here", "See <http://x> here");
     try expectRendered(testing.allocator, "See http://x here", "See http://x here");
+}
+
+test "view html entities substitute to their glyph" {
+    var tables = ViewTables.init(testing.allocator);
+    defer tables.deinit();
+    const line = "a&nbsp;b&lt;c&gt;d&amp;e&quot;f&ensp;g&emsp;h";
+    try analyzeLine(&tables, line, null);
+    try expectRendered(testing.allocator, line, "a      b<   c>   d&    e\"     f      g      h");
+}
+
+test "view html entity inside code span is not decoded" {
+    try expectRendered(testing.allocator, "Use `&amp;` here", "Use  &amp;  here");
+}
+
+test "view unknown html entity left untouched" {
+    try expectRendered(testing.allocator, "a&frobnicate;b", "a&frobnicate;b");
 }
 
 test "view col_map treats hide as zero width" {

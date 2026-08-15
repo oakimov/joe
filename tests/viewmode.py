@@ -240,12 +240,12 @@ class ViewModeTests(joefx.JoeTestBase):
         self.assertExited()
 
     def test_viewmode_list_marker_not_emphasis(self):
-        """List marker * at line start should not be hidden as emphasis"""
+        """List marker * at line start should not be hidden as emphasis (normalises to -, plan §3.1/2.8)"""
         self.workdir.fixtureData("test.md", "* List item\n")
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("* List item", x=0)
+        self.assertTextAt("- List item", x=0)
         self.exitJoe()
         self.assertExited()
 
@@ -260,12 +260,12 @@ class ViewModeTests(joefx.JoeTestBase):
         self.assertExited()
 
     def test_viewmode_list_marker_plus_not_emphasis(self):
-        """List marker + at line start should not be hidden"""
+        """List marker + at line start should not be hidden (normalises to -, plan §3.1/2.8)"""
         self.workdir.fixtureData("test.md", "+ List item\n")
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("+ List item", x=0)
+        self.assertTextAt("- List item", x=0)
         self.exitJoe()
         self.assertExited()
 

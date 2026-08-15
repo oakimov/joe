@@ -47,23 +47,28 @@ Copy into the path the soak suite expects:
 cp -f zig-out/bin/joe joe/joe
 ```
 
-Release-ish install (bin + etc/joe + share/joe + man/doc/desktop; no symlinks):
+Release install (bin + etc/joe + share/joe + man/doc/desktop):
 
 ```sh
+# User-writable prefix (no sudo), e.g. MacPorts tree you own:
 zig build -Doptimize=ReleaseFast --prefix /opt/local
+
+# System prefix — sudo so install can write under bin/etc/share:
+sudo zig build -Doptimize=ReleaseFast --prefix /usr/local
 ```
 
 `JOERC`/`JOEDATA` default to `PREFIX/etc/joe/` and `PREFIX/share/joe/`. Override with
 `-Djoerc=` / `-Djoedata=` (empty forces builtins + `~/.joe` / XDG). Also: `-Dspell=`,
 `-Dselinux=true`, `-Dgpm=true` (Linux). Steps: `zig build run`, `terminal-test`,
-`render-test`, `window-test`, `phase8-verify`, `uninstall`.
+`render-test`, `window-test`, `phase8-verify`, `uninstall` (use `sudo` with the same
+`--prefix` when the install needed root).
 
 ### Soak gate (mandatory before claiming done)
 
 ```sh
 cp -f zig-out/bin/joe joe/joe
 ./runtests
-# Expect: Ran 196 tests ... OK
+# Expect: Ran 197 tests ... OK
 ```
 
 Do **not** use `pytest`. Root `./runtests` (or `cd tests && python3 -m unittest …` per project habit) only.
@@ -128,7 +133,7 @@ for-loop `switch` in `while (true)` such that Zig `continue` restarts the while
    (undersized fakes smash stacks — see Path A `ufile` history).
 5. **translate-c footguns:** `sc("...")` lengths, `while(true)+continue`, fake libc
    types, `return undefined`. Prefer hand-fixing control flow after translate-c.
-6. **Always soak** (`./runtests` → 196/196) before “done.”
+6. **Always soak** (`./runtests` → 197/197) before “done.”
 7. **Commits:** focused messages; update `plans/zig-rewrite-architecture.md` when
    finishing a phase-sized chunk.
 8. **Parallelism:** independent modules/tests can use subagents; keep one soak gate
@@ -136,7 +141,7 @@ for-loop `switch` in `while (true)` such that Zig `continue` restarts the while
 
 ## Post-change review checklist
 
-- Soak **196/196** (and relevant `zig build *-test` if you touched those trees)
+- Soak **197/197** (and relevant `zig build *-test` if you touched those trees)
 - No new unbounded `[*c]` writes; check help/status/paint paths manually if UI chrome
 - SELinux/GPM remain no-ops unless Linux + `-D` flags
 - Do not reintroduce linked `joe/*.c`
@@ -157,7 +162,7 @@ way. CI may still mention Autoconf for other branches.
 
 ## Key constraints
 
-- Mouse: **default on** via xterm/SGR (`-mouse`); `-nomouse` to disable; `-mouseclip` on by default (OSC 52 copy-on-select; selection stays; right-click pastes) and `-mousewheel N`. GPM remains Linux-only (`-Dgpm`).
+- Mouse: **default on** via xterm/SGR (`-mouse`); `-nomouse` to disable; `-mouseclip` on by default (OSC 52 copy-on-select; selection stays; right-click pastes); `-mousewheel N` (vertical = up/down arrow, horizontal = left/right arrow). GPM remains Linux-only (`-Dgpm`).
 - Live binary deps: **libc + ncurses** (+ optional Linux selinux/gpm)
 - Terminal degradation: truecolor → 256 → 16 → attributes
 - Viewmode must not modify buffer text

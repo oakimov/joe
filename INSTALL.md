@@ -23,14 +23,21 @@ Dev build (artifacts under `./zig-out/`):
 	./zig-out/bin/joe -help
 
 Release install into a prefix (Zig’s analogue of `make install`). Paths for
-system `joerc` / data are derived from `--prefix` automatically — no manual
-path flags or symlinks:
+system `joerc` / data are derived from `--prefix` automatically:
 
+	# User-writable prefix (no sudo), e.g. MacPorts tree you own:
 	zig build -Doptimize=ReleaseFast --prefix /opt/local
 
-	# or: sudo zig build -Doptimize=ReleaseFast --prefix /usr/local
+	# System prefix — sudo so the install step can write under the prefix:
+	sudo zig build -Doptimize=ReleaseFast --prefix /usr/local
 
-Layout under the prefix (real files; personality names are full binary copies):
+Uninstall with the same prefix (and the same `sudo` if install needed root):
+
+	zig build uninstall --prefix /opt/local
+	sudo zig build uninstall --prefix /usr/local
+
+Layout under the prefix (`jmacs` / `jstar` / `rjoe` / `jpico` are installed
+binaries; `argv[0]` selects the matching rc):
 
 	bin/joe jmacs jstar rjoe jpico
 	etc/joe/                 # joerc, jmacsrc, …, ftyperc, shell helpers
@@ -56,8 +63,8 @@ Useful options:
 Pass empty `-Djoerc=` / `-Djoedata=` to force builtins-only + `~/.joe` / XDG
 (skipping the installed system dirs).
 
-Other steps: `zig build uninstall`, `zig build run -- file.txt`,
-`zig build terminal-test`, `zig build phase8-verify`.
+Other steps: `zig build run -- file.txt`, `zig build terminal-test`,
+`zig build phase8-verify`.
 
 Notes:
 
@@ -74,6 +81,7 @@ Soak tests (from a built tree):
 
 	cp -f zig-out/bin/joe joe/joe
 	./runtests
+	# Expect: Ran 197 tests ... OK
 
 ---
 

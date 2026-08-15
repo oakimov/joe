@@ -120,8 +120,8 @@ pub fn build(b: *std.Build) void {
     mod.addCSourceFile(.{ .file = b.path("src/unicode_globals.c"), .flags = &.{ "-std=c99", "-fno-common" } });
 
     // ── Install binary + data (classic make install layout) ───────
-    // Real installed files only — no symlinks. Personality names are full
-    // copies of the joe binary (argv[0] selects jmacsrc/jstarrc/…).
+    // Personality names are installed copies of the joe binary (argv[0]
+    // selects jmacsrc/jstarrc/…).
     b.installArtifact(exe);
     for ([_][]const u8{ "jmacs", "jstar", "rjoe", "jpico" }) |name| {
         const inst = b.addInstallArtifact(exe, .{ .dest_sub_path = name });

@@ -11,6 +11,7 @@ pub const syntax = @import("syntax.zig");
 pub const view = @import("view.zig");
 pub const table = @import("table.zig");
 pub const lattr = @import("lattr.zig");
+pub const md_event = @import("md_event.zig");
 
 pub const Options = lgen.Options;
 pub const VisibleWs = lgen.VisibleWs;
@@ -44,4 +45,5 @@ test {
     _ = view;
     _ = table;
     _ = lattr;
+    _ = md_event;
 }

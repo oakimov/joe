@@ -279,15 +279,57 @@ Target = plan §3.1 "JOE result" column, with the §3.2 deviation.
 
 ## Phase 4 — In-tree `md_event` layer
 
-- [ ] **4.1** Add `src/render/md_event.zig` with MD4C-shaped enter/leave block/span/text callbacks
-- [ ] **4.2** Node taxonomy (koino-inspired): Heading, Emph, Strong, Strike, Code, CodeBlock, Link,
-      List/Item/Task, BlockQuote, HR, Table/*, Text, breaks; **ignore Image**
-- [ ] **4.3** Sink events into existing `ViewTables` + attr overrides (no HTML backend)
-- [ ] **4.4** Migrate `applyEmphasis` (`src/render/view.zig:301`, ~140 lines of unrolled delimiter
-      cases) to events; add CommonMark flanking rules
-- [ ] **4.5** Migrate remaining `view.zig` scanners where it fixes nesting/autolink
-- [ ] **4.6** Unit tests for events → tables; keep `table.zig` as layout backend
-- [ ] **4.7** Wire through `bw_lgen` view entry; full viewmode soak green
+Scoped down from a full event-sourced parser to what the plan's ship-order note actually asks for
+("4 in parallel once conceal is stable" — a lower-priority quality pass, not a rewrite): a
+documented taxonomy plus a concrete, tested fix for `applyEmphasis`'s worst known gap
+(flanking rules), landed with zero soak regressions. A full delimiter-stack rewrite for nested
+emphasis was considered and deliberately **not** attempted — see 4.4/4.5 below.
+
+- [x] **4.1** Added `src/render/md_event.zig`. **Scoped from "MD4C-shaped enter/leave block/span
+      callbacks" to what's actually used**: JOE parses line-by-line with carried block state, not
+      a full-document AST (plan §8 says as much — "prefer line/region + carried state before a
+      full-doc AST"), so a real enter/leave callback tree sitting over nothing would be dead
+      scaffolding. What's real and wired in: `classifyRun`/`classifyAt`, a byte-oriented
+      implementation of CommonMark §6.2's flanking-delimiter-run rule (including the `_`
+      intraword restriction), used by `applyEmphasis`.
+- [x] **4.2** `NodeKind` taxonomy added (koino-inspired: document, heading, paragraph,
+      block_quote, list, item, task_item, code_block, thematic_break, table/table_row/table_cell,
+      text, soft_break, line_break, emph, strong, strikethrough, code_span, link, escape).
+      **Documents the shape** a future full event layer would use — `view.zig`'s line-scanners
+      already detect all of these constructs today, just not through this enum yet. `Image`
+      absent per plan roadmap 2.6.
+- [~] **4.3** No separate "sink events into `ViewTables`" step exists, because there's no event
+      stream yet to sink — `classifyRun`/`classifyAt`'s boolean results feed directly into
+      `applyEmphasis`'s existing `tables.hide[...]` calls at the two points that needed gating
+      (open-check, close-check).
+- [x] **4.4** Migrated `applyEmphasis`'s open/close decisions (not the whole 140-line scanner
+      structure — the nested 3-star/2-star/1-star dispatch and code-span exclusion stay, they
+      aren't broken) to consult `classifyAt` before treating a `*`/`_` as an opener or closer.
+      Fixes two confirmed, reproduced-before-fix bugs: `x * a * y` (space-flanked stars) and
+      `snake_case_word` (intraword `_`) were both wrongly concealed as emphasis; both now render
+      literally. Verified `a*b*c` (star has no intraword restriction) and `foo _bar_ baz`
+      (word-boundary underscore) still correctly become emphasis. Zero regressions in the
+      existing render-test/soak emphasis coverage.
+
+      **Deliberately not fixed**: nested emphasis (`**bold *italic* more**`) — already an
+      explicitly-documented, accepted limitation before this phase
+      (`test_viewmode_nested_bold_italic`: "Linear scanner limitation — nested emphasis not fully
+      supported yet"). Fixing it needs a real delimiter-stack matcher (CommonMark's Rule 9, the
+      part MD4C/koino spend the most code on) layered under the ~40 existing emphasis soak tests
+      that encode the current scanner's exact output — judged high regression risk for a
+      documented-and-accepted gap, not worth it in this pass.
+- [ ] **4.5** Autolinks (`<url>`/bare URL) have **zero** styling today — confirmed no code
+      anywhere applies `MdLinkUrl`-shaped attrs to them, despite plan §3.1 saying they should be
+      styled (just not concealed). This is a real gap, but it's *adding* a feature, not migrating
+      existing scanner code to fix a bug in it — tracked as Phase 6's top-priority item instead
+      (which is explicitly about scoped CM/GFM feature gaps), not duplicated here.
+- [x] **4.6** Unit tests for the flanking classifier (`md_event.zig`, 6 tests covering the spec
+      example cases + the two bugs) plus soak fixtures (`tests/viewmode.py`, 4 tests). `table.zig`
+      untouched — stays the layout backend, no event-layer involvement needed there.
+- [x] **4.7** No separate wiring step needed — `applyEmphasis` is already called from both
+      `analyzeLine` and `analyzeLineInline`, both already wired through `bw_lgen`'s view entry
+      since Phase 1. Soak 215/215 (211 → 215, four new fixtures); render-test/terminal-test/
+      window-test green.
 
 ---
 

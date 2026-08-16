@@ -11,6 +11,7 @@
 const std = @import("std");
 const testing = std.testing;
 const terminal = @import("terminal");
+const md_event = @import("md_event.zig");
 
 pub const Attribute = terminal.Attribute;
 pub const Color = terminal.Color;
@@ -361,6 +362,21 @@ fn applyEmphasis(tables: *ViewTables, line: []const u8) void {
             continue;
         }
 
+        // Flanking-rule gate (plan §8/Phase 4, `md_event.classifyAt`): a
+        // `*`/`_` run that can't open emphasis here (e.g. followed by
+        // whitespace, or `_` mid-word) is left as literal text instead of
+        // being treated as a delimiter — fixes `x * a * y` and
+        // `snake_case_word` being wrongly concealed as emphasis. Run
+        // length doesn't affect the open/close decision (only what's
+        // before/after the whole run does), so a single check up front
+        // covers the 3/2/1-length cases below.
+        if ((line[j] == '*' or line[j] == '_') and
+            !md_event.classifyAt(line, j, if (line[j] == '*') .star else .underscore).can_open)
+        {
+            j += 1;
+            continue;
+        }
+
         if (line[j] == '*' and j + 2 < line.len and line[j + 1] == '*' and line[j + 2] == '*') {
             tables.hide[j] = 1;
             tables.hide[j + 1] = 1;
@@ -371,7 +387,9 @@ fn applyEmphasis(tables: *ViewTables, line: []const u8) void {
                     j += 1;
                     continue;
                 }
-                if (line[j] == '*' and j + 2 < line.len and line[j + 1] == '*' and line[j + 2] == '*') {
+                if (line[j] == '*' and j + 2 < line.len and line[j + 1] == '*' and line[j + 2] == '*' and
+                    md_event.classifyAt(line, j, .star).can_close)
+                {
                     tables.hide[j] = 1;
                     tables.hide[j + 1] = 1;
                     tables.hide[j + 2] = 1;
@@ -389,7 +407,9 @@ fn applyEmphasis(tables: *ViewTables, line: []const u8) void {
                     j += 1;
                     continue;
                 }
-                if (line[j] == '*' and j + 1 < line.len and line[j + 1] == '*') {
+                if (line[j] == '*' and j + 1 < line.len and line[j + 1] == '*' and
+                    md_event.classifyAt(line, j, .star).can_close)
+                {
                     tables.hide[j] = 1;
                     tables.hide[j + 1] = 1;
                     j += 2;
@@ -407,7 +427,9 @@ fn applyEmphasis(tables: *ViewTables, line: []const u8) void {
                     j += 1;
                     continue;
                 }
-                if (line[j] == '_' and j + 2 < line.len and line[j + 1] == '_' and line[j + 2] == '_') {
+                if (line[j] == '_' and j + 2 < line.len and line[j + 1] == '_' and line[j + 2] == '_' and
+                    md_event.classifyAt(line, j, .underscore).can_close)
+                {
                     tables.hide[j] = 1;
                     tables.hide[j + 1] = 1;
                     tables.hide[j + 2] = 1;
@@ -425,7 +447,9 @@ fn applyEmphasis(tables: *ViewTables, line: []const u8) void {
                     j += 1;
                     continue;
                 }
-                if (line[j] == '_' and j + 1 < line.len and line[j + 1] == '_') {
+                if (line[j] == '_' and j + 1 < line.len and line[j + 1] == '_' and
+                    md_event.classifyAt(line, j, .underscore).can_close)
+                {
                     tables.hide[j] = 1;
                     tables.hide[j + 1] = 1;
                     j += 2;
@@ -452,6 +476,7 @@ fn applyEmphasis(tables: *ViewTables, line: []const u8) void {
             }
         } else if (line[j] == '*' or line[j] == '_') {
             const delim = line[j];
+            const ch: md_event.DelimChar = if (delim == '*') .star else .underscore;
             if (j + 1 < line.len and line[j + 1] == delim) {
                 j += 1;
                 continue;
@@ -465,6 +490,10 @@ fn applyEmphasis(tables: *ViewTables, line: []const u8) void {
                 }
                 if (line[j] == delim) {
                     if (j + 1 < line.len and line[j + 1] == delim) break;
+                    if (!md_event.classifyAt(line, j, ch).can_close) {
+                        j += 1;
+                        continue;
+                    }
                     tables.hide[j] = 1;
                     j += 1;
                     break;

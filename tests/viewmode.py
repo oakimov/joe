@@ -239,6 +239,52 @@ class ViewModeTests(joefx.JoeTestBase):
         self.exitJoe()
         self.assertExited()
 
+    # --- Phase 4: flanking-delimiter-run rules (plan §8, src/render/md_event.zig) ---
+
+    def test_viewmode_spaced_stars_not_emphasis(self):
+        """CommonMark §6.2: '* a *' (space right after/before the '*') isn't
+        left/right-flanking, so it's not emphasis -- was previously
+        wrongly concealed by the old scanner (no flanking-rule concept)."""
+        self.workdir.fixtureData("test.md", "x * a * y\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("x * a * y", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_underscore_intraword_not_emphasis(self):
+        """CommonMark's intraword '_' restriction: 'snake_case_word' stays
+        literal -- '_' can't open/close mid-word the way '*' can."""
+        self.workdir.fixtureData("test.md", "snake_case_word\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("snake_case_word", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_underscore_word_boundary_still_emphasis(self):
+        """'_' touching a word on only one side (not mid-word) is still
+        legitimate emphasis."""
+        self.workdir.fixtureData("test.md", "foo _bar_ baz\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("foo bar baz", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_star_intraword_still_emphasis(self):
+        """Unlike '_', '*' has no intraword restriction: 'a*b*c' is emphasis."""
+        self.workdir.fixtureData("test.md", "a*b*c\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("abc", x=0)
+        self.exitJoe()
+        self.assertExited()
+
     def test_viewmode_list_marker_not_emphasis(self):
         """List marker * at line start should not be hidden as emphasis (normalises to -, plan §3.1/2.8)"""
         self.workdir.fixtureData("test.md", "* List item\n")

@@ -1206,6 +1206,139 @@ pub export fn zig_bw_viewmode_cursor_col(bw: ?*BW) i64 {
     return @intCast(tables.col_map[ctx.off]);
 }
 
+extern fn fork() c_int;
+extern fn _exit(status: c_int) noreturn;
+extern fn execlp(file: [*c]const u8, arg0: [*c]const u8, arg1: [*c]const u8, arg2: ?*const anyopaque) c_int;
+extern fn waitpid(pid: c_int, status: ?*c_int, options: c_int) c_int;
+extern fn signrm() void;
+
+/// Double-fork: the intermediate child exits immediately after spawning
+/// the grandchild, so the grandchild (the actual `open`/`xdg-open`
+/// process) gets reparented to init and never becomes joe's zombie to
+/// clean up. The single `waitpid` below only waits for the near-instant
+/// intermediate child, not the URL-opener itself — matches plan §5's
+/// "fork + `_exit` on failure, never block the editor."
+fn spawnOpenUrl(url_z: [*:0]const u8) void {
+    const pid = fork();
+    if (pid == 0) {
+        signrm();
+        const gpid = fork();
+        if (gpid == 0) {
+            // `execlp` never returns on success. Uses argv directly — never
+            // `/bin/sh -c` with the URL interpolated, so a URL like
+            // `http://a;rm -rf ~` is just one inert argv element, not a
+            // shell command (plan §5's explicit security requirement).
+            if (execlp("open", "open", url_z, null) == -1) {
+                _ = execlp("xdg-open", "xdg-open", url_z, null);
+            }
+            _exit(1);
+        }
+        _exit(0);
+    }
+    if (pid > 0) {
+        _ = waitpid(pid, null, 0);
+    }
+}
+
+/// Feature 5: open the link/image URL under the cursor in the system
+/// browser/handler (plan §5, hooked from `udefmup` in `mouse.zig` — a
+/// mouseup with no preceding drag). Read-only same as
+/// `zig_bw_viewmode_cursor_col`: viewmode+md only (via `cursorLineCtx`),
+/// no-ops silently (returns `0`) when there's no link at the cursor or its
+/// scheme isn't in the allowed set, rather than doing anything with an
+/// unsafe or absent URL. Returns `1` when a spawn was attempted.
+pub export fn zig_bw_try_open_link_at_cursor(bw: ?*BW) c_int {
+    var tmp: [16 * 1024]u8 = undefined;
+    const ctx = cursorLineCtx(bw, &tmp) orelse return 0;
+    if (ctx.off >= ctx.line.len) return 0;
+
+    const alloc = std.heap.c_allocator;
+    var tables = ViewTables.init(alloc);
+    defer tables.deinit();
+    render.analyzeLine(&tables, ctx.line, null) catch return 0;
+    if (ctx.off >= tables.link_url.len) return 0;
+    const raw_url = tables.link_url[ctx.off] orelse return 0;
+
+    // Reference-style links ([a][r]) store the reference *label* here, not
+    // a URL (Phase 2 never resolves references — plan R2's "no cache"
+    // decision: conceal doesn't need it, so don't scan the whole buffer on
+    // every paint). Resolve lazily, only now, at click time.
+    var ref_buf: [16 * 1024]u8 = undefined;
+    const url = if (render.md_event.isSafeUrlScheme(raw_url))
+        raw_url
+    else
+        resolveReferenceUrl(bw, ctx.cursor, raw_url, &ref_buf) orelse return 0;
+    if (!render.md_event.isSafeUrlScheme(url)) return 0;
+
+    var buf: [1024]u8 = undefined;
+    if (url.len >= buf.len) return 0;
+    @memcpy(buf[0..url.len], url);
+    buf[url.len] = 0;
+    spawnOpenUrl(buf[0..url.len :0]);
+    return 1;
+}
+
+/// Plan §5.2b: one-time buffer scan at click time for a reference
+/// definition line matching `^[ \t]{0,3}\[label\]:[ \t]*dest` (label
+/// match case-insensitive, matching CommonMark's reference-label rules).
+/// `scratch` is caller-owned so the returned slice (borrowed from it)
+/// outlives this call; returns `null` if no definition line matches.
+fn resolveReferenceUrl(bw: ?*BW, cursor: ?*P, label: []const u8, scratch: []u8) ?[]const u8 {
+    const eof_line = zig_c_bw_b_eof_line(bw);
+    const origin = zig_c_bw_bof(cursor) orelse return null;
+    const scan = pdup(origin, "resolveReferenceUrl") orelse return null;
+    defer prm(scan);
+
+    var n: i64 = 0;
+    while (n <= eof_line) : (n += 1) {
+        const ll = bwReadLine(scan, n, scratch.ptr, @intCast(scratch.len));
+        if (ll < 0) continue;
+        if (render.md_event.parseReferenceDef(scratch[0..@intCast(ll)], label)) |dest| return dest;
+    }
+    return null;
+}
+
+/// Feature 5: reverse of `zig_bw_viewmode_cursor_col` — given `bol_cursor`
+/// already positioned at the start of the target line (as `utomouse` does
+/// via `pline` before calling this) and a raw *display* column, find the
+/// buffer byte offset whose collapsed column best matches, so a mouse
+/// click on a concealed markdown line lands on the right byte instead of
+/// where raw `pcol` (uncollapsed) would put it — plan §5's "hit-test
+/// display cell → buffer byte → URL, using the collapsed col_map".
+/// Returns `-1` when not applicable (not viewmode/md); callers fall back
+/// to raw `pcol`.
+pub export fn zig_bw_viewmode_click_byte_offset(bw: ?*BW, bol_cursor: ?*P, goal_col: i64) i64 {
+    if (bw == null or bol_cursor == null) return -1;
+    if (zig_c_bw_get_viewmode(bw) == 0) return -1;
+    const syn = zig_c_bw_get_syntax(bw);
+    if (!syntaxNameIsMd(syn)) return -1;
+
+    const buf_line = zig_c_bw_pline_no(bol_cursor);
+    var tmp: [16 * 1024]u8 = undefined;
+    const ll = bwReadLine(bol_cursor, buf_line, &tmp, @intCast(tmp.len));
+    if (ll < 0) return -1;
+    const line: []const u8 = tmp[0..@intCast(ll)];
+    if (line.len == 0) return 0;
+
+    const alloc = std.heap.c_allocator;
+    var tables = ViewTables.init(alloc);
+    defer tables.deinit();
+    render.analyzeLine(&tables, line, null) catch return -1;
+
+    // col_map is non-decreasing; the click lands on the last byte whose
+    // collapsed column doesn't exceed goal_col (a click past the visible
+    // end of a concealed line clamps to the last byte, matching pcol's
+    // own end-of-line clamp behavior).
+    var best: usize = 0;
+    var i: usize = 0;
+    while (i < tables.col_map.len) : (i += 1) {
+        if (@as(i64, @intCast(tables.col_map[i])) <= goal_col) {
+            best = i;
+        } else break;
+    }
+    return @intCast(best);
+}
+
 /// Thin `lgen_view` chrome dispatcher (Path A).
 ///
 /// Prefers being called from `zig_bw_lgen_view_entry` (prelude + paint cleanup).

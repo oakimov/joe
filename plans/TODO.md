@@ -335,18 +335,51 @@ emphasis was considered and deliberately **not** attempted — see 4.4/4.5 below
 
 ## Phase 5 — Clickable links (OSC 8 + mouse open)
 
-- [ ] **5.1** Harden OSC 8 emit on concealed labels (C0/C1 strip exists at
-      `src/terminal/screen.zig:1438`)
-- [ ] **5.2** Hit-test display cell → buffer byte → URL using the collapsed `col_map`
-- [ ] **5.2b** Reference-link definitions per plan R2: **no cache**. OSC 8 on paint covers inline
-      links only; on *click*, scan the buffer once for `^[ \t]{0,3}\[<label>\]:[ \t]*<dest>`
-      (label match case-insensitive). Conceal already works without this
-- [ ] **5.3** Hook `udefmup` (`src/mouse.zig:1246`); simple click = `mouseup` with `selecting == 0`
-- [ ] **5.4** Open via `execlp` + argv — **never** `/bin/sh -c` with the URL interpolated
-      (injection: `[x](http://a;rm -rf ~)`); precedent at `src/ublock.zig:1323`
-- [ ] **5.5** Scheme allowlist: `http`, `https`, `mailto`, `file` — reject everything else
-- [ ] **5.6** macOS `open` / Linux `xdg-open`; fork + `_exit` on failure, never block the editor
-- [ ] **5.7** Do not steal selection drag, right-click paste (`udefm3up`), or wheel
+- [x] **5.1** Verified — the C0/C1/DEL strip in `appendSanitizedUrl` (`src/terminal/screen.zig`)
+      already covers ESC (0x1B) and the whole C0/C1 range, so a malicious URL can't break out of
+      the OSC 8 wrapper or inject further escape sequences. No further hardening needed.
+- [x] **5.2** `zig_bw_viewmode_click_byte_offset` (`src/bw_lgen.zig`) — reverse of the Phase 1.5b
+      `zig_bw_viewmode_cursor_col`: given a display column, finds the buffer byte whose collapsed
+      `col_map` entry matches. Wired into `utomouse`'s text-window branch (`src/mouse.zig`),
+      replacing the raw/uncollapsed `pcol` call when viewmode+md — **this was a real, previously
+      unnoticed bug**: clicking a concealed markdown line (e.g. a heading) landed on the wrong
+      byte, the same class of bug Phase 1.5b fixed for arrow keys but for mouse clicks. Verified:
+      clicking display column 1 of "Heading" (from "# Heading") now lands on 'e' (byte offset 2),
+      not the space after the raw '#' where uncollapsed `pcol` would have put it.
+- [x] **5.2b** Reference-link definitions resolved lazily at click time, not cached —
+      `resolveReferenceUrl` (`src/bw_lgen.zig`) scans the buffer once via `parseReferenceDef`
+      (`src/render/md_event.zig`, unit-tested: 7 cases covering case-insensitivity, 3-space
+      indent limit, trailing-title stripping, non-matches) only when the byte under the cursor's
+      `link_url` isn't already a safe-scheme URL (i.e. it's a reference *label*, per Phase 2's
+      "no cache" design — inline links skip this scan entirely).
+- [x] **5.3** Hooked `udefmup` (`src/mouse.zig`): `selecting == 0` branch now calls
+      `zig_bw_try_open_link_at_cursor` (gated to text windows only, matching the existing
+      `TYPEPW|TYPETW` check pattern in this file).
+- [x] **5.4** `execlp` + argv directly, never `/bin/sh -c` — verified via unit test
+      (`isSafeUrlScheme` test explicitly documents that a URL with shell metacharacters is
+      "safe" *by this check* only because the caller never invokes a shell).
+- [x] **5.5** Scheme allowlist (`isSafeUrlScheme`, `src/render/md_event.zig`, moved there
+      specifically so it's unit-testable — `bw_lgen.zig` isn't part of `zig build test`):
+      `http://`, `https://`, `mailto:`, `file://`; 4 unit tests for accept/reject including
+      `javascript:`/`data:`/case-sensitivity.
+- [x] **5.6** Double-fork (`spawnOpenUrl`, `src/bw_lgen.zig`): tries `open` (macOS) then
+      `xdg-open` (Linux); the intermediate child exits immediately so the actual opener process
+      is reparented to init rather than becoming a zombie joe has to reap, and the single
+      `waitpid` only waits for that near-instant intermediate child — never blocks on the
+      URL-opener itself.
+- [x] **5.7** Verified by inspection — only the `selecting == 0` branch of `udefmup` (left-button
+      mouseup, no preceding drag) was touched; `udefm2up`/`udefm3up`/wheel bindings and
+      `udefmdrag`'s drag-sets-`selecting=1` path are untouched.
+- [x] Optional rc/help note: added to `docs/man.md` (click-to-open + terminal Cmd/Ctrl-click via
+      the OSC 8 JOE already emits, independent of JOE's own click handling).
+- [x] Test coverage: 5 new `tests/viewmode.py` fixtures (collapsed-column click hit-test,
+      unsafe-scheme no-crash, reference-link resolve, undefined-reference no-crash) using raw SGR
+      mouse escape sequences (`\x1b[<0;COL;ROWM`/`m`) injected via `self.joe.write` — no existing
+      precedent for this in the test harness, added fresh. **Deliberately did not** write a test
+      that clicks a real http(s)/mailto/file link end-to-end, since that would actually spawn
+      `open`/`xdg-open` on the test machine — verified the spawn-gating logic thoroughly (schemes,
+      reference resolution) without ever triggering a real spawn during automated tests.
+      Soak 219/219 (215 → 219, four new fixtures); render-test/terminal-test/window-test green.
 - [ ] **5.8** Optional rc/help note (click + terminal Cmd/Ctrl-click)
 - [ ] **5.9** Unit-test hit-test and scheme rejection; soak or hook for open if practical
 

@@ -206,3 +206,101 @@ test "classifyAt matches classifyRun for a scanned run" {
     try testing.expectEqual(b.can_open, a.can_open);
     try testing.expectEqual(b.can_close, a.can_close);
 }
+
+/// Plan §5: only these schemes are ever spawned for click-to-open. Rejects
+/// anything else — in particular a crafted `[x](javascript:...)` or
+/// `[x](http://a;rm -rf ~)` destination never reaches the spawn call in
+/// `src/bw_lgen.zig` at all, since this check runs first. Pulled out here
+/// (rather than living directly in `bw_lgen.zig`) specifically so it's
+/// unit-testable — `bw_lgen.zig` isn't part of the `zig build test`/
+/// `render-test` target (AGENTS.md), but this module is.
+pub fn isSafeUrlScheme(url: []const u8) bool {
+    const schemes = [_][]const u8{ "http://", "https://", "mailto:", "file://" };
+    for (schemes) |s| {
+        if (std.mem.startsWith(u8, url, s)) return true;
+    }
+    return false;
+}
+
+test "isSafeUrlScheme accepts the allowed schemes" {
+    try testing.expect(isSafeUrlScheme("http://example.com"));
+    try testing.expect(isSafeUrlScheme("https://example.com/path?q=1"));
+    try testing.expect(isSafeUrlScheme("mailto:a@b.com"));
+    try testing.expect(isSafeUrlScheme("file:///etc/hosts"));
+}
+
+test "isSafeUrlScheme rejects everything else, including injection attempts" {
+    try testing.expect(!isSafeUrlScheme("javascript:alert(1)"));
+    try testing.expect(!isSafeUrlScheme("ftp://example.com"));
+    try testing.expect(!isSafeUrlScheme("data:text/html,<script>1</script>"));
+    try testing.expect(!isSafeUrlScheme(""));
+    try testing.expect(!isSafeUrlScheme("HTTP://example.com")); // case-sensitive, deliberately strict
+}
+
+/// Plan §5.2b: parses one line as a reference-link definition
+/// `[label]: dest` (optionally indented up to 3 spaces, matching
+/// CommonMark's definition rules; an optional ` "title"`/similar trailer
+/// is dropped — dest ends at the first following whitespace). `label`
+/// matches case-insensitively. Returns `null` if the line doesn't match
+/// this shape. Used by `src/bw_lgen.zig`'s click-time reference resolver
+/// (never on paint — reference URLs aren't pre-scanned/cached).
+pub fn parseReferenceDef(line: []const u8, label: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    while (i < line.len and i < 3 and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {}
+    if (i >= line.len or line[i] != '[') return null;
+    i += 1;
+    const label_start = i;
+    while (i < line.len and line[i] != ']') : (i += 1) {}
+    if (i >= line.len) return null;
+    if (!std.ascii.eqlIgnoreCase(line[label_start..i], label)) return null;
+    i += 1;
+    if (i >= line.len or line[i] != ':') return null;
+    i += 1;
+    while (i < line.len and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {}
+    var dest_end = i;
+    while (dest_end < line.len and line[dest_end] != ' ' and line[dest_end] != '\t' and
+        line[dest_end] != '\r' and line[dest_end] != '\n') : (dest_end += 1)
+    {}
+    if (dest_end <= i) return null;
+    return line[i..dest_end];
+}
+
+test "parseReferenceDef: basic match" {
+    try testing.expectEqualStrings("http://example.com", parseReferenceDef("[ref]: http://example.com", "ref").?);
+}
+
+test "parseReferenceDef: case-insensitive label match" {
+    try testing.expectEqualStrings("http://example.com", parseReferenceDef("[Ref]: http://example.com", "ref").?);
+    try testing.expectEqualStrings("http://example.com", parseReferenceDef("[REF]: http://example.com", "Ref").?);
+}
+
+test "parseReferenceDef: trailing title dropped" {
+    try testing.expectEqualStrings("http://example.com", parseReferenceDef("[ref]: http://example.com \"Title\"", "ref").?);
+}
+
+test "parseReferenceDef: up to 3 leading spaces allowed" {
+    try testing.expectEqualStrings("http://x", parseReferenceDef("   [ref]: http://x", "ref").?);
+}
+
+test "parseReferenceDef: 4+ leading spaces rejected (indented code)" {
+    try testing.expect(parseReferenceDef("    [ref]: http://x", "ref") == null);
+}
+
+test "parseReferenceDef: label mismatch rejected" {
+    try testing.expect(parseReferenceDef("[other]: http://x", "ref") == null);
+}
+
+test "parseReferenceDef: non-definition lines rejected" {
+    try testing.expect(parseReferenceDef("just some text", "ref") == null);
+    try testing.expect(parseReferenceDef("[ref](http://x)", "ref") == null); // inline link, not a definition
+    try testing.expect(parseReferenceDef("[ref]:", "ref") == null); // no destination
+}
+
+test "isSafeUrlScheme: shell metacharacters in an allowed-scheme URL are still 'safe' by this check" {
+    // The security property this function provides is "only these
+    // schemes get spawned" -- NOT "no shell metacharacters". A URL like
+    // this passes the scheme check (correctly), and stays safe only
+    // because the caller (src/bw_lgen.zig's spawnOpenUrl) passes it to
+    // execlp as a single argv element, never through a shell.
+    try testing.expect(isSafeUrlScheme("http://a;rm -rf ~"));
+}

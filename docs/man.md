@@ -2868,6 +2868,13 @@ When -mouse is set, you can:
 * Left-click in a text window to set the cursor position.  Left-click in a
   different window to move the cursor to a different window.
 
+* Left-click a link or image destination in Markdown viewmode (`^T A`) to
+  open it in your system's default handler (`open` on macOS, `xdg-open` on
+  Linux). Only `http://`, `https://`, `mailto:`, and `file://` links open
+  this way; other schemes are left alone. Most terminals also support
+  Cmd/Ctrl-click to open the OSC 8 hyperlink JOE emits under the link text,
+  independent of JOE's own click handling.
+
 * Select text with the mouse.  Left-click and drag to select some text- it
 will be as if you had used __^K B__ and __^K K__ to mark it. Left-click (but don't
 drag) to position the cursor somewhere else.  Middle click to copy the

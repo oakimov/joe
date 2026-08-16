@@ -1086,6 +1086,83 @@ class ViewModeTests(joefx.JoeTestBase):
         self.exitJoe()
         self.assertExited()
 
+    # --- Feature 5: clickable links (plan §5, src/mouse.zig + src/bw_lgen.zig) ---
+
+    def test_click_lands_on_collapsed_column(self):
+        """Plan §5 hit-test: a mouse click on a display cell of a concealed
+        markdown line lands on the buffer byte under that glyph (using
+        col_map), not the position raw/uncollapsed pcol would compute.
+        '# Heading' -> 'Heading' visible; clicking display column 1 (the
+        'e') should NOT land on the space right after the raw '#' (which
+        is where the old uncollapsed pcol-based hit-test would have put
+        the cursor)."""
+        self.workdir.fixtureData("test.md", "# Heading\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("Heading", x=0)
+        # SGR mouse click: button 0 (left) press+release, no drag between
+        # them, at screen col=2 row=2 (1-based -> display col=1, content
+        # row=1, matching assertCursor's 0-based x/y).
+        self.joe.write("\x1b[<0;2;2M")
+        self.joe.write("\x1b[<0;2;2m")
+        self.assertCursor(x=1, y=1)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_click_unsafe_scheme_link_does_not_crash(self):
+        """Clicking a link whose scheme isn't http(s)/mailto/file no-ops
+        instead of spawning anything -- verifies the gate doesn't crash or
+        otherwise misbehave, without needing to observe (or trigger) an
+        actual subprocess spawn for an allowed scheme."""
+        self.workdir.fixtureData("test.md", "See [x](javascript:alert1) here\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("See x here", x=0)
+        self.joe.write("\x1b[<0;5;2M")
+        self.joe.write("\x1b[<0;5;2m")
+        self.joe.expect(lambda: False)
+        self.assertTextAt("See x here", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_click_reference_link_resolves_definition(self):
+        """Plan §5.2b: reference-style links ([a][r]) store the reference
+        label, not a URL -- clicking one must scan the buffer once for a
+        `[ref]: dest` definition line, at click time. Uses an unsafe
+        scheme in the definition so nothing actually spawns, while still
+        exercising the full resolve path (label lookup, buffer scan,
+        scheme check on the *resolved* destination)."""
+        self.workdir.fixtureData(
+            "test.md", "See [docs][ref] here\n\n[ref]: javascript:alert1\n"
+        )
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("See docs here", x=0)
+        self.joe.write("\x1b[<0;6;2M")
+        self.joe.write("\x1b[<0;6;2m")
+        self.joe.expect(lambda: False)
+        self.assertTextAt("See docs here", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_click_undefined_reference_link_does_not_crash(self):
+        """A reference link with no matching definition anywhere in the
+        buffer resolves to nothing and no-ops, rather than crashing."""
+        self.workdir.fixtureData("test.md", "See [docs][missing] here\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("See docs here", x=0)
+        self.joe.write("\x1b[<0;6;2M")
+        self.joe.write("\x1b[<0;6;2m")
+        self.joe.expect(lambda: False)
+        self.assertTextAt("See docs here", x=0)
+        self.exitJoe()
+        self.assertExited()
+
 class MarkdownSyntaxTests(joefx.JoeTestBase):
     """Tests for Markdown syntax highlighting (DFA correctness, viewmode off).
        Content starts at y=1 (y=0 is the status bar).

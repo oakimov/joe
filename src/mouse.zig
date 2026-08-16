@@ -339,6 +339,16 @@ pub extern fn ttgetc() c_int;
 pub extern fn ttgetch() c_int;
 pub extern fn ttputs(s: [*c]const u8) void;
 pub extern fn ttflsh() c_int;
+/// Feature 5 (plan §5): open the link/image URL under the cursor, if any —
+/// viewmode+md only, no-ops (returns 0) otherwise (`src/bw_lgen.zig`).
+extern fn zig_bw_try_open_link_at_cursor(bw: ?*anyopaque) c_int;
+/// Feature 5: collapsed-column-aware click hit-testing; -1 falls back to
+/// raw `pcol` (`src/bw_lgen.zig`).
+extern fn zig_bw_viewmode_click_byte_offset(bw: ?*anyopaque, bol_cursor: ?*anyopaque, goal_col: i64) i64;
+/// Plan R5 follow-up (Phase 1.5b): sets `cursor.xcol` to the collapsed
+/// column so subsequent up/down preserves visual position; -1 when not
+/// applicable (`src/bw_lgen.zig`).
+extern fn zig_bw_viewmode_fixup_cursor(bw: ?*anyopaque) c_int;
 pub extern var obuf: [*c]u8;
 pub extern var obufp: ptrdiff_t;
 pub extern var obufsiz: ptrdiff_t;
@@ -547,10 +557,19 @@ pub export fn utomouse(arg_xx: [*c]W, arg_k: c_int) c_int {
                 goal_line = @as(off_t, y - w.*.y) + bw_1.*.top.*.line;
             }
             _ = pline(bw_1.*.cursor, goal_line);
-            _ = pcol(bw_1.*.cursor, goal_col);
+            // Markdown viewmode: hit-test using the collapsed col_map
+            // (plan §5) so a click lands on the byte under the visible
+            // glyph, not where raw/uncollapsed pcol would put it. -1 means
+            // not applicable (not viewmode/md) -- fall back to raw pcol.
+            const vm_off = zig_bw_viewmode_click_byte_offset(@ptrCast(bw_1), @ptrCast(bw_1.*.cursor), @intCast(goal_col));
+            if (vm_off >= 0) {
+                _ = pgoto(bw_1.*.cursor, bw_1.*.cursor.*.byte + vm_off);
+            } else {
+                _ = pcol(bw_1.*.cursor, goal_col);
+            }
             if (floatmouse != 0) {
                 bw_1.*.cursor.*.xcol = goal_col;
-            } else {
+            } else if (zig_bw_viewmode_fixup_cursor(@ptrCast(bw_1)) != 0) {
                 bw_1.*.cursor.*.xcol = piscol(bw_1.*.cursor);
             }
             return 0;
@@ -1252,6 +1271,11 @@ pub export fn udefmup(arg_w: [*c]W, arg_k: c_int) c_int {
     if (selecting != 0) {
         select_done(@as([*c]BW, @ptrCast(@alignCast(maint.*.curwin.*.object))).*.b.*.o.charmap);
         selecting = 0;
+    } else if ((maint.*.curwin.*.watom.*.what & (TYPEPW | TYPETW)) != 0) {
+        // A simple click (mouseup with no preceding drag): `udefmdown`
+        // already moved the cursor here via `utomouse`. Left click only —
+        // `udefm3up`/right-click stays paste, wheel bindings untouched.
+        _ = zig_bw_try_open_link_at_cursor(@ptrCast(@alignCast(maint.*.curwin.*.object)));
     }
     return 0;
 }

@@ -2,8 +2,8 @@
 
 > **Branch:** work on **`markdown`** (synced from `zig-rewrite`).
 > **Source:** `plans/markdown-wysiwyg-feasibility.md` (Zig Path A)
-> **Status:** Phases 0–7 **complete**. One deliberate gap: setext headings (§Phase 6 / 6.2) —
-> not implemented, reasoning documented there. `T.2–T.6` (multi-emulator checks) not attempted
+> **Status:** Phases 0–7 **complete**, including 6.2 (setext headings, added after the
+> Phase 7 gate — see 6.2 for what changed). `T.2–T.6` (multi-emulator checks) not attempted
 > (needs real alternate terminal emulators, unavailable in this environment).
 > **Constraint:** Self-contained Zig — borrow ideas from koino/MD4C/OpenCode; **no** vendored markdown libs.
 > **References:** conceal + layout from OpenCode (`~/Projects/opencode-research`, plan §2);
@@ -400,27 +400,28 @@ emphasis was considered and deliberately **not** attempted — see 4.4/4.5 below
       "see http://example.com." doesn't swallow the sentence's full stop into the link. 6 new
       unit tests (styling, `link_url`, punctuation trim, balanced-parens URLs, code-span
       exclusion, no-double-claim).
-- [ ] **6.2** Setext headings (`Text\n===`/`Text\n---`) — **investigated, deliberately not
-      implemented.** The concealment pipeline (`zig_bw_view_line_start` → `analyzeLineStart`,
-      `src/bw_lgen.zig`/`src/render/view.zig`) and the DFA-driven syntax-highlight class/color
-      assignment (`parse()` in `zig_bw_lgen_view_entry`, a separate, earlier pass) are two
-      distinct systems reached through different call chains. Detecting a setext heading needs
-      looking at the *adjacent* line (is the line below an underline / is the line above a
-      plausible paragraph) — `analyzeLineStart` and the render-test-facing `analyzeLine` are pure
-      single-line functions with zero buffer access by design; only `zig_bw_lgen_view` (the
-      caller) has the `P`/buffer access needed, following the existing `zig_bw_fence_detect`
-      precedent for bounded cross-line lookback. That part is tractable. What isn't
-      low-risk: getting the *heading color* onto the text line requires overriding output from
-      the DFA pass that already ran by the time `zig_bw_lgen_view` executes — achievable in
-      principle via the same attr-overlay mechanism `applyAutolinks`/`styleLinkText` use, but
-      doing it correctly means threading a new parameter through `zig_bw_view_line_start`,
-      `analyzeLineStart` (two call sites, one of them the render-test unit-test path), and
-      verifying `zig_bw_view_inline`/`analyzeLineInline` still run against a line that also needs
-      to bypass the normal HR/heading "done" dispatch. Judged too much correctness-critical
-      surface to change carefully in this pass, for a comparatively rare construct (ATX `#`
-      headings cover the vast majority of real documents). Left as a real, understood gap rather
-      than attempting a rushed partial fix — a `---` line right after a paragraph still
-      misrenders as a horizontal rule today, unchanged from before this phase.
+- [x] **6.2** Setext headings (`Text\n===`/`Text\n---`) — implemented after the Phase 7 gate,
+      addressing the gap this item originally documented. `src/bw_lgen.zig` gained four small
+      pure helpers: `setextUnderlineLevel` (does a line match `^(=+|-+)[ \t]*$`, returns 1/2/0),
+      `looksLikeSetextParagraph` (approximate — non-blank, not 4-space-indented, not itself
+      another block-start construct), `isSetextUnderline` and `setextHeadingLevel`, each doing a
+      single bounded `bwReadLine` on the one adjacent line (previous/next respectively) —
+      following the existing `zig_bw_fence_detect` precedent for bounded cross-line lookback
+      rather than threading buffer access into the pure single-line `analyzeLineStart`/
+      `analyzeLineInline` functions themselves. Two new parameters carry the results in:
+      `zig_bw_view_line_start` takes `is_setext_underline` (when set, returns early with the line
+      fully unconcealed, before Feature 1.8's thematic-break check — otherwise a `---` underline
+      would misrender as an HR, the original bug); `zig_bw_view_inline` takes
+      `setext_heading_level` and, when nonzero, ORs bold (+underline for level 1, H1) onto every
+      cell's attribute and overwrites its color to `FG_CYAN` (new indexed-color constant,
+      matching `table.zig`'s `header_fg` styling approach), overriding whatever the link-styling
+      pass in the same function set — same priority ATX headings already have over inline
+      styling. Both new params are computed once in `zig_bw_lgen_view` (the only caller with `P`/
+      buffer access) and passed down; `analyzeLineStart`/`analyzeLine` (the render-test-facing
+      pure entry points) are unaffected since they don't see adjacent lines. 3 new soak tests in
+      `tests/viewmode.py` (setext H1/H2 stay unconcealed, a genuine blank-line-preceded `---` HR
+      still renders as `───`); `zig build render-test`/`terminal-test`/`window-test` unaffected
+      (no existing test needed updating). Soak 219 → 222.
 - [x] **6.3** Table header cells: `src/render/table.zig`'s `paintRow` already set `bold` for
       header rows (pre-existing); added `header_fg` (indexed color, same "viewmode-only attribute
       overlay independent of the class system" approach as `view.zig`'s `link_fg`, since table

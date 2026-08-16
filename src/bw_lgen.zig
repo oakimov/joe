@@ -71,6 +71,11 @@ const FG_SHIFT: c_int = 21;
 const FG_NOT_DEFAULT: c_int = 256 << FG_SHIFT;
 const FG_MASK: c_int = 1023 << FG_SHIFT;
 const FG_BLUE: c_int = FG_NOT_DEFAULT | (4 << FG_SHIFT);
+/// Same heading-color choice as `table.zig`'s `header_fg` and the Cursor
+/// Dark scheme's `nord_blue` role — indexed cyan, in this codebase's
+/// basic viewmode-only attribute-overlay convention (independent of the
+/// `.jcf`/DFA class system).
+const FG_CYAN: c_int = FG_NOT_DEFAULT | (6 << FG_SHIFT);
 
 const SCRN = opaque {};
 const P = opaque {};
@@ -832,6 +837,68 @@ pub export fn zig_bw_view_table_hl(
     return 0;
 }
 
+/// Feature 6.2: does `line` match a setext heading underline,
+/// `^(=+|-+)[ \t]*$`? Returns `1` for `=` (H1), `2` for `-` (H2), `0`
+/// otherwise. A `-` run also matches Feature 1.8's thematic-break shape —
+/// resolving that ambiguity (is this an HR, or a setext H2 underline?)
+/// needs the *previous* line's content, which this pure, single-line
+/// function deliberately doesn't have; see `isSetextUnderline` below.
+fn setextUnderlineLevel(line: []const u8) u8 {
+    if (line.len == 0) return 0;
+    const ch = line[0];
+    if (ch != '=' and ch != '-') return 0;
+    var i: usize = 0;
+    while (i < line.len and line[i] == ch) : (i += 1) {}
+    while (i < line.len and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {}
+    if (i != line.len) return 0;
+    return if (ch == '=') 1 else 2;
+}
+
+/// Feature 6.2: is `line` a plausible paragraph line for a setext
+/// underline to apply to — non-blank, not itself 4+ columns indented
+/// (indented code block), and not the start of a different block
+/// construct (heading/blockquote/fence/list marker/table row/another
+/// setext underline). Deliberately approximate, not a full CommonMark
+/// block-start check — see plan TODO.md 6.2 for the reasoning on scope.
+fn looksLikeSetextParagraph(line: []const u8) bool {
+    var i: usize = 0;
+    while (i < line.len and i < 4 and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {}
+    if (i >= line.len) return false; // blank
+    if (i >= 4) return false; // indented code block
+    const c = line[i];
+    if (c == '#' or c == '>' or c == '`' or c == '~' or c == '|') return false;
+    if ((c == '-' or c == '*' or c == '+') and i + 1 < line.len and
+        (line[i + 1] == ' ' or line[i + 1] == '\t')) return false; // list marker
+    if (setextUnderlineLevel(line) != 0) return false; // another underline
+    return true;
+}
+
+/// Feature 6.2: is `bol_cursor` (positioned at the start of `buf_line`,
+/// whose content is `line`) itself a setext underline for the line above?
+/// Single bounded `bwReadLine` call for `buf_line - 1` — no scan window
+/// needed (only ever looks at exactly one adjacent line, unlike fence
+/// detection's bounded forward simulation).
+fn isSetextUnderline(bol_cursor: ?*P, buf_line: i64, line: []const u8) bool {
+    if (buf_line <= 0) return false;
+    if (setextUnderlineLevel(line) == 0) return false;
+    var tmp: [1024]u8 = undefined;
+    const ll = bwReadLine(bol_cursor, buf_line - 1, &tmp, @intCast(tmp.len));
+    if (ll < 0) return false;
+    return looksLikeSetextParagraph(tmp[0..@intCast(ll)]);
+}
+
+/// Feature 6.2: is `buf_line` (content `line`) a setext heading *text*
+/// line — is it a plausible paragraph, and is the line below it an
+/// underline? Returns the level (1/2) or 0. Single bounded `bwReadLine`
+/// call for `buf_line + 1`.
+fn setextHeadingLevel(bol_cursor: ?*P, buf_line: i64, line: []const u8) u8 {
+    if (!looksLikeSetextParagraph(line)) return 0;
+    var tmp: [1024]u8 = undefined;
+    const ll = bwReadLine(bol_cursor, buf_line + 1, &tmp, @intCast(tmp.len));
+    if (ll < 0) return 0;
+    return setextUnderlineLevel(tmp[0..@intCast(ll)]);
+}
+
 /// Path A `lgen_view` line-start chrome: heading/fence/blockquote/HR/task.
 /// Returns:
 /// - `1` — line fully handled (`goto done`); col_map filled
@@ -847,6 +914,7 @@ pub export fn zig_bw_view_line_start(
     col_map: ?[*]i64,
     col_map_len: c_int,
     tab: c_int,
+    is_setext_underline: c_int,
 ) c_int {
     if (line_ptr == null or hide == null or subst == null or col_map == null) return -1;
     if (line_len < 0) return -1;
@@ -869,6 +937,18 @@ pub export fn zig_bw_view_line_start(
 
     @memset(hide_slice, 0);
     @memset(subst_scratch, 0);
+
+    // Feature 6.2: a setext heading underline (`===`/`---` right after a
+    // paragraph line) must not reach the normal dispatch below — in
+    // particular Feature 1.8's thematic-break check, which a `---` line
+    // would otherwise match (`===` doesn't collide with anything, but is
+    // handled the same way for consistency). Leave it fully unconcealed
+    // (hide/subst already zeroed above) and let the caller's inline pass
+    // build col_map — nothing on a pure `=`/`-`/space line matches
+    // emphasis/link/entity patterns, so that pass is a correctness no-op
+    // here, just the thing that already owns building col_map for a
+    // "not done" line.
+    if (is_setext_underline != 0) return 0;
 
     var tables = ViewTables.init(alloc);
     tables.bindScratch(hide_slice, subst_scratch, url_scratch, col_scratch, n);
@@ -902,6 +982,7 @@ pub export fn zig_bw_view_inline(
     atr: ?[*]c_int,
     atr_len: c_int,
     tab: c_int,
+    setext_heading_level: c_int,
 ) c_int {
     if (line_ptr == null or hide == null or subst == null or col_map == null) return -1;
     if (line_len < 0) return -1;
@@ -962,6 +1043,23 @@ pub export fn zig_bw_view_inline(
             if (!attrs[ai].underline) continue;
             atr.?[ai] |= UNDERLINE;
             if ((atr.?[ai] & FG_MASK) == 0) atr.?[ai] |= FG_BLUE;
+        }
+    }
+
+    // Feature 6.2: setext heading text line — the whole line gets heading
+    // styling (matching ATX: H1 bold+underline, H2 bold only), overriding
+    // whatever the link-styling pass above set, same as ATX headings take
+    // priority over inline styling within them. Applied here rather than
+    // via the DFA/`md.jsf` class system (which has already run by the time
+    // this executes, in a separate earlier pass) — same viewmode-only
+    // attribute-overlay approach as link/table-header styling above.
+    if (setext_heading_level != 0 and atr != null and atr_len > 0 and n > 0) {
+        const alen: usize = @intCast(atr_len);
+        var ai: usize = 0;
+        while (ai < n and ai < alen) : (ai += 1) {
+            atr.?[ai] |= BOLD;
+            if (setext_heading_level == 1) atr.?[ai] |= UNDERLINE;
+            atr.?[ai] = (atr.?[ai] & ~FG_MASK) | FG_CYAN;
         }
     }
 
@@ -1466,6 +1564,11 @@ pub export fn zig_bw_lgen_view(
     }
 
     // 1) Line-start Feature 1.3/1.5/1.7/1.8 (+ task).
+    // Feature 6.2: resolve setext-underline ambiguity (a `-` run also
+    // matches Feature 1.8's thematic break) with a single bounded look at
+    // the previous line, before the normal dispatch runs.
+    const cur_line_slice: []const u8 = if (line_len > 0) line_ptr.?[0..@intCast(line_len)] else &.{};
+    const is_setext_underline: c_int = if (isSetextUnderline(p, buf_line, cur_line_slice)) 1 else 0;
     const zls = zig_bw_view_line_start(
         line_ptr,
         line_len,
@@ -1476,6 +1579,7 @@ pub export fn zig_bw_lgen_view(
         col_map,
         col_map_len,
         tab,
+        is_setext_underline,
     );
     if (zls < 0) return -1;
     if (zls == 1) {
@@ -1622,6 +1726,10 @@ pub export fn zig_bw_lgen_view(
         return -1;
 
     // 4) Inline Feature 1.4/1.5/1.6 + col_map.
+    // Feature 6.2: a plausible-paragraph line immediately followed by a
+    // setext underline gets heading styling (bold[+underline for H1])
+    // applied below, on top of whatever this pass's own link styling set.
+    const setext_level: c_int = @intCast(setextHeadingLevel(p, buf_line, cur_line_slice));
     if (zig_bw_view_inline(
         line_ptr,
         line_len,
@@ -1636,6 +1744,7 @@ pub export fn zig_bw_lgen_view(
         atr,
         atr_len,
         tab,
+        setext_level,
     ) < 0)
         return -1;
     col_map_line.?.* = buf_line;

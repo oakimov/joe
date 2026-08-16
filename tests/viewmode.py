@@ -619,6 +619,46 @@ class ViewModeTests(joefx.JoeTestBase):
         self.exitJoe()
         self.assertExited()
 
+    # --- Feature 6.2: setext headings (plan TODO.md 6.2) ---
+
+    def test_viewmode_setext_h1_not_concealed(self):
+        """'Title\\n=====' isn't concealed -- both lines stay literal
+        (setext headings aren't hidden, matching OpenCode's "both lines
+        visible" rule -- only the heading *color/weight* changes)."""
+        self.workdir.fixtureData("test.md", "Title\n=====\n\nbody text\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("Title", x=0, y=1)
+        self.assertTextAt("=====", x=0, y=2)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_setext_h2_not_misread_as_horizontal_rule(self):
+        """The actual bug this fixes: a '---' underline right after a
+        paragraph must not become a thematic-break '───' rule."""
+        self.workdir.fixtureData("test.md", "Subtitle\n--------\n\nbody text\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("Subtitle", x=0, y=1)
+        self.assertTextAt("--------", x=0, y=2)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_hr_after_blank_line_still_hr(self):
+        """Regression guard: an actual thematic break (blank line before
+        the dash run, not a paragraph) still becomes a '───' rule."""
+        self.workdir.fixtureData("test.md", "para one\n\n---\n\npara two\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("para one", x=0, y=1)
+        self.assertTextAt("───", x=0, y=3)
+        self.assertTextAt("para two", x=0, y=5)
+        self.exitJoe()
+        self.assertExited()
+
     def test_viewmode_horizontal_rule_no_bleed(self):
         """Horizontal rule substitution must not bleed to next line"""
         self.workdir.fixtureData("test.md", "---\nabc\n")

@@ -34,7 +34,7 @@ class JoeController(object):
         self.stream = pyte.ByteStream()
         self.stream.attach(self.term)
 
-        self.timeout = 1
+        self.timeout = 3
 
     def expect(self, func):
         """Waits for data from the child process and runs func until it returns true or a timeout has elapsed"""

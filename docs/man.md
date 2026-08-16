@@ -2759,6 +2759,9 @@ differently because viewmode is on.
 What viewmode conceals or substitutes:
 
 * Heading `#`/`##`/... markers and the following space
+* Setext headings (a text line followed by a line of `===` or `---`) get
+  the same heading color/weight as ATX headings — neither line is
+  concealed (there's no delimiter to hide), only styled
 * Emphasis delimiters: `**bold**`, `*em*`, `~~strike~~`, `` `code` ``
 * Fenced code block backtick/tilde fences and the language tag
 * Link and image syntax — see the deviation from OpenCode below
@@ -2807,10 +2810,6 @@ A few choices here are intentional trade-offs, not bugs:
   delimiter-stack parser; the current line scanner handles the common,
   non-nested cases correctly (including CommonMark's flanking-run rules,
   e.g. `* not emphasis *` and `snake_case_word` are correctly left alone).
-* **Setext headings** (a line of text followed by a line of `===` or
-  `---`) are not recognized as headings at all. A `---` line right after a
-  paragraph is still misread as a thematic break. Use ATX headings
-  (`#`/`##`/...) instead.
 * **Left-arrow out of a concealed run** can "bounce" — landing one
   position further right than expected — right at the boundary where a
   concealed delimiter run meets visible text. Right-arrow and mouse clicks

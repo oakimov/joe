@@ -1,0 +1,443 @@
+# Cursor Dark — JOE's native color scheme, translated from the "Cursor Dark"
+# VS Code/Cursor theme (cursor-official-themes package, uiTheme vs-dark, 225
+# token rules). Replaces the nine legacy schemes (plan §6.2) as JOE's one
+# native scheme; conceal semantics and block layout still come from
+# OpenCode (plan §3), only the color VALUES come from Cursor.
+#
+# Palette, per-scope mapping, and alpha-flattening math:
+# plans/markdown-wysiwyg-feasibility.md §6.2. Upstream theme JSON kept at
+# colors/reference/cursor-dark-color-theme.json for re-derivation.
+#
+# Redistribution note: this file contains translated color VALUES (hex
+# codes mapped to JOE's own class names), not a copy of Cursor's theme
+# JSON or code. Multiple independent third-party re-publications of this
+# exact palette exist under permissive licenses (e.g. MIT-licensed
+# hasokeric/cursor-anysphere-theme, CedricVerlinden/cursor-dark) with no
+# apparent objection from Cursor/Anysphere. See colors/reference/README.md
+# for the full research note (plan §6.2.8 / TODO 3.2e).
+
+.colors 16
+
+# 8-color/attribute-only fallback (plan §3.6): apply_scheme() picks the
+# best color-set whose declared depth fits the terminal, so without this
+# section a 16-color terminal would match nothing at all and render with
+# no scheme applied. Named colors approximate the 256/truecolor palette's
+# hue groupings (teal/nord_blue -> cyan/blue, lavender/pink -> magenta,
+# amber/sand -> yellow, orange -> red) so related classes still look
+# related, just less precisely.
+-selection		default/default inverse
+-menusel		default/default inverse
+-status			default/default inverse
+-linum			default dim
+-curlinum		default bold
+-visiblews		default dim
+
+=Idle
+=Comment		green dim
+=Keyword		cyan
+=Statement		+Keyword
+=Conditional		+Keyword
+=Loop			+Keyword
+=Control		+Keyword
+=Label			+Keyword
+=String			magenta
+=Character		+String
+=StringVariable		+String
+=Number			yellow
+=Float			+Number
+=DefinedFunction	red
+=Builtin		+DefinedFunction
+=Type			red
+=Structure		+Type
+=StorageClass		+Type
+=Ident			default
+=Variable		+Ident
+=DefinedIdent		+Ident
+=Key			+Ident
+=Value			+Ident
+=Constant		cyan
+=Boolean		+Constant
+=Preproc		green
+=Define			+Preproc
+=Precond		+Preproc
+=Macro			+Preproc
+=IncSystem		+Preproc
+=IncLocal		+Preproc
+=Escape			red
+=StringEscape		+Escape
+=CharacterEscape	+Escape
+=Operator		default
+=Brace			+Operator
+=Bad			default/default inverse
+=Garbage		+Bad
+=TODO			yellow bold
+=Title			blue bold
+=Tag			magenta
+=TagName		+Tag
+=TagEnd			+Tag
+=TagEdge		+Tag
+=Ignore			default dim
+
+=diff.AddLine		magenta
+=diff.DelLine		default
+=diff.ChgLine		red
+=diff.Hunk		default dim
+=diff.FileNew		default dim
+=diff.FileOld		default dim
+=diff.Garbage		default dim
+
+=MdText
+=MdH1			blue bold underline
+=MdH2			blue bold
+=MdH3			+MdH2
+=MdH4			+MdH2
+=MdH5			+MdH2
+=MdH6			+MdH2
+=MdBold			yellow bold
+=MdItalic		cyan italic
+=MdBoldItalic		yellow bold italic
+=MdStrike		default dim
+=MdCode			magenta
+=MdCodeBlock		default
+=MdCodeFence		default dim
+=MdBlockquote		default dim italic
+=MdList			default
+=MdListEnum		+MdList
+=MdRule			default dim
+=MdLinkText		magenta underline
+=MdLinkUrl		cyan underline
+=MdImageAlt		magenta
+=MdImageUrl		cyan
+=MdTableHeader		blue bold
+=MdTableSeparator	default dim
+=MdTableAlign		+MdTableSeparator
+=MdTableBody
+=MdDelim		default dim
+=MdEscape		red
+
+# For backwards compatibility with older syntaxes that specify raw
+# terminal color indices (same identity mapping as the other schemes).
+-term  0 0
+-term  1 1
+-term  2 2
+-term  3 3
+-term  4 4
+-term  5 5
+-term  6 6
+-term  7 7
+-term  8 8
+-term  9 9
+-term 10 10
+-term 11 11
+-term 12 12
+-term 13 13
+-term 14 14
+-term 15 15
+
+.colors 256
+
+.set bg		234
+.set fg		255
+.set near_white		188
+.set muted		247
+.set teal		116
+.set lavender		147
+.set amber		221
+.set pink		176
+.set orange		216
+.set sand		186
+.set green		150
+.set nord_blue		110
+.set linenum		241
+.set sel		236
+.set status_bg		233
+.set curlin_bg		235
+.set visiblews		238
+.set ansi_black		235
+.set ansi_red		204
+.set ansi_green		71
+.set ansi_yellow		173
+.set ansi_blue		109
+.set ansi_magenta		139
+.set ansi_bright_green		72
+.set ansi_bright_yellow		215
+.set ansi_bright_blue		110
+.set white_pure		231
+
+-text			[fg]/[bg]
+-status			[muted]/[status_bg]
+-curlin			/[curlin_bg]
+-curlinum		[fg]/[curlin_bg]
+-linum			[linenum]/[curlin_bg]
+-selection		/[sel]
+-menusel		/[sel] bold
+-cursor			[bg]/[fg]
+-visiblews		[visiblews]
+
+=Idle
+=Comment		[muted] italic
+=Keyword		[teal]
+=Statement		+Keyword
+=Conditional		+Keyword
+=Loop			+Keyword
+=Control		+Keyword
+=Label			+Keyword
+=String			[pink]
+=Character		+String
+=StringVariable		+String
+=Number			[sand]
+=Float			+Number
+=DefinedFunction	[orange]
+=Builtin		+DefinedFunction
+=Type			[orange]
+=Structure		+Type
+=StorageClass		+Type
+=Ident			[near_white]
+=Variable		+Ident
+=DefinedIdent		+Ident
+=Key			+Ident
+=Value			+Ident
+=Constant		[teal]
+=Boolean		+Constant
+=Preproc		[green]
+=Define			+Preproc
+=Precond		+Preproc
+=Macro			+Preproc
+=IncSystem		+Preproc
+=IncLocal		+Preproc
+=Escape			[orange]
+=StringEscape		+Escape
+=CharacterEscape	+Escape
+=Operator		[near_white]
+=Brace			+Operator
+=Bad			[fg]/[ansi_red]
+=Garbage		+Bad
+=TODO			[amber] bold
+=Title			[nord_blue] bold
+=Tag			[lavender]
+=TagName		+Tag
+=TagEnd			+Tag
+=TagEdge		+Tag
+=Ignore			[muted] dim
+
+=diff.AddLine		[pink]
+=diff.DelLine		[near_white]
+=diff.ChgLine		[orange]
+=diff.Hunk		[muted]
+=diff.FileNew		[muted]
+=diff.FileOld		[muted]
+=diff.Garbage		[muted]
+
+# Markdown (plan §6.2.3). H2-H6 share weight/color (font-size varies in
+# Cursor, a terminal can't) but H1 alone keeps the underline so the
+# hierarchy still reads on a character grid (plan §6.2.4 note 1).
+=MdText			[fg]
+=MdH1			[nord_blue] bold underline
+=MdH2			[nord_blue] bold
+=MdH3			+MdH2
+=MdH4			+MdH2
+=MdH5			+MdH2
+=MdH6			+MdH2
+=MdBold			[amber] bold
+=MdItalic		[teal] italic
+=MdBoldItalic		[amber] bold italic
+=MdStrike		[muted] dim
+=MdCode			[pink]
+# Fenced bodies stay plain fg, not inline-code pink: Cursor scopes pink to
+# *inline* code only and paints fenced blocks with the injected language
+# grammar, which JOE doesn't do yet (roadmap 2.5). A whole block in
+# inline-code pink is a wall of color Cursor would never render.
+=MdCodeBlock		[fg]
+=MdCodeFence		[muted] dim
+=MdBlockquote		[muted] italic
+=MdList			[near_white]
+=MdListEnum		+MdList
+=MdRule			[muted]
+# Link colors are inverted relative to OpenCode: Cursor puts the label in
+# lavender and the URL in teal. Since JOE conceals bracketed destinations
+# (plan §3.2), MdLinkUrl only paints autolinks/bare URLs and edit mode.
+=MdLinkText		[lavender] underline
+=MdLinkUrl		[teal] underline
+=MdImageAlt		[lavender]
+=MdImageUrl		[teal]
+=MdTableHeader		[nord_blue] bold
+=MdTableSeparator	[muted] dim
+=MdTableAlign		+MdTableSeparator
+=MdTableBody
+=MdDelim		[muted] dim
+=MdEscape		[orange]
+
+# Terminal colors (plan §6.2.7). Cursor's ANSI set is cooler/lower-sat than
+# a stock palette: red/bright-red and magenta/bright-magenta are identical,
+# cyan/bright-cyan share the heading color (#88C0D0) — not a mistake here,
+# reusing [nord_blue]/[muted]/[fg] below matches that intentionally.
+-term  0 [ansi_black]
+-term  1 [ansi_red]
+-term  2 [ansi_green]
+-term  3 [ansi_yellow]
+-term  4 [ansi_blue]
+-term  5 [ansi_magenta]
+-term  6 [nord_blue]
+-term  7 [fg]
+-term  8 [muted]
+-term  9 [ansi_red]
+-term 10 [ansi_bright_green]
+-term 11 [ansi_bright_yellow]
+-term 12 [ansi_bright_blue]
+-term 13 [ansi_magenta]
+-term 14 [nord_blue]
+-term 15 [white_pure]
+
+.colors *
+
+.set bg		$181818
+.set fg		$F0F0F0
+.set near_white		$D6D6DD
+.set muted		$9A9A9A
+.set teal		$82D2CE
+.set lavender		$AAA0FA
+.set amber		$F8C762
+.set pink		$E394DC
+.set orange		$EFB080
+.set sand		$EBC88D
+.set green		$A8CC7C
+.set nord_blue		$88C0D0
+.set linenum		$666666
+.set sel		$303030
+.set status_bg		$141414
+.set curlin_bg		$262626
+.set visiblews		$3F3F3F
+.set ansi_black		$242424
+.set ansi_red		$FC6B83
+.set ansi_green		$3FA266
+.set ansi_yellow		$D2943E
+.set ansi_blue		$81A1C1
+.set ansi_magenta		$B48EAD
+.set ansi_bright_green		$70B489
+.set ansi_bright_yellow		$F1B467
+.set ansi_bright_blue		$87A6C4
+.set white_pure		$FFFFFF
+
+-text			[fg]/[bg]
+-status			[muted]/[status_bg]
+-curlin			/[curlin_bg]
+-curlinum		[fg]/[curlin_bg]
+-linum			[linenum]/[curlin_bg]
+-selection		/[sel]
+-menusel		/[sel] bold
+-cursor			[bg]/[fg]
+-visiblews		[visiblews]
+
+=Idle
+=Comment		[muted] italic
+=Keyword		[teal]
+=Statement		+Keyword
+=Conditional		+Keyword
+=Loop			+Keyword
+=Control		+Keyword
+=Label			+Keyword
+=String			[pink]
+=Character		+String
+=StringVariable		+String
+=Number			[sand]
+=Float			+Number
+=DefinedFunction	[orange]
+=Builtin		+DefinedFunction
+=Type			[orange]
+=Structure		+Type
+=StorageClass		+Type
+=Ident			[near_white]
+=Variable		+Ident
+=DefinedIdent		+Ident
+=Key			+Ident
+=Value			+Ident
+=Constant		[teal]
+=Boolean		+Constant
+=Preproc		[green]
+=Define			+Preproc
+=Precond		+Preproc
+=Macro			+Preproc
+=IncSystem		+Preproc
+=IncLocal		+Preproc
+=Escape			[orange]
+=StringEscape		+Escape
+=CharacterEscape	+Escape
+=Operator		[near_white]
+=Brace			+Operator
+=Bad			[fg]/[ansi_red]
+=Garbage		+Bad
+=TODO			[amber] bold
+=Title			[nord_blue] bold
+=Tag			[lavender]
+=TagName		+Tag
+=TagEnd			+Tag
+=TagEdge		+Tag
+=Ignore			[muted] dim
+
+=diff.AddLine		[pink]
+=diff.DelLine		[near_white]
+=diff.ChgLine		[orange]
+=diff.Hunk		[muted]
+=diff.FileNew		[muted]
+=diff.FileOld		[muted]
+=diff.Garbage		[muted]
+
+# Markdown (plan §6.2.3). H2-H6 share weight/color (font-size varies in
+# Cursor, a terminal can't) but H1 alone keeps the underline so the
+# hierarchy still reads on a character grid (plan §6.2.4 note 1).
+=MdText			[fg]
+=MdH1			[nord_blue] bold underline
+=MdH2			[nord_blue] bold
+=MdH3			+MdH2
+=MdH4			+MdH2
+=MdH5			+MdH2
+=MdH6			+MdH2
+=MdBold			[amber] bold
+=MdItalic		[teal] italic
+=MdBoldItalic		[amber] bold italic
+=MdStrike		[muted] dim
+=MdCode			[pink]
+# Fenced bodies stay plain fg, not inline-code pink: Cursor scopes pink to
+# *inline* code only and paints fenced blocks with the injected language
+# grammar, which JOE doesn't do yet (roadmap 2.5). A whole block in
+# inline-code pink is a wall of color Cursor would never render.
+=MdCodeBlock		[fg]
+=MdCodeFence		[muted] dim
+=MdBlockquote		[muted] italic
+=MdList			[near_white]
+=MdListEnum		+MdList
+=MdRule			[muted]
+# Link colors are inverted relative to OpenCode: Cursor puts the label in
+# lavender and the URL in teal. Since JOE conceals bracketed destinations
+# (plan §3.2), MdLinkUrl only paints autolinks/bare URLs and edit mode.
+=MdLinkText		[lavender] underline
+=MdLinkUrl		[teal] underline
+=MdImageAlt		[lavender]
+=MdImageUrl		[teal]
+=MdTableHeader		[nord_blue] bold
+=MdTableSeparator	[muted] dim
+=MdTableAlign		+MdTableSeparator
+=MdTableBody
+=MdDelim		[muted] dim
+=MdEscape		[orange]
+
+# Terminal colors (plan §6.2.7). Cursor's ANSI set is cooler/lower-sat than
+# a stock palette: red/bright-red and magenta/bright-magenta are identical,
+# cyan/bright-cyan share the heading color (#88C0D0) — not a mistake here,
+# reusing [nord_blue]/[muted]/[fg] below matches that intentionally.
+-term  0 [ansi_black]
+-term  1 [ansi_red]
+-term  2 [ansi_green]
+-term  3 [ansi_yellow]
+-term  4 [ansi_blue]
+-term  5 [ansi_magenta]
+-term  6 [nord_blue]
+-term  7 [fg]
+-term  8 [muted]
+-term  9 [ansi_red]
+-term 10 [ansi_bright_green]
+-term 11 [ansi_bright_yellow]
+-term 12 [ansi_bright_blue]
+-term 13 [ansi_magenta]
+-term 14 [nord_blue]
+-term 15 [white_pure]

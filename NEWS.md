@@ -242,6 +242,15 @@ After:
 
 		* zenburn by Jani Nurminen
 
+	  **Removed** on the `markdown` branch (markdown WYSIWYG viewmode
+	  work): these eight schemes plus the built-in `default` scheme were
+	  replaced by a single native scheme, `cursor-dark.jcf`, translated
+	  from the Cursor editor's "Cursor Dark" theme. `-colors default`
+	  still works unchanged (an identical scheme remains built into the
+	  binary as a fallback); `-colors gruvbox` and the other seven named
+	  schemes above no longer resolve to a file. Credited here rather
+	  than silently dropped.
+
 	* The current line can be highlighted by pressing ^T U or by
 	  enabling the **-hiline** option.
 

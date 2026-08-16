@@ -19,6 +19,9 @@
 =Idle
 =Bad
 
+# Body text (plan R4) — plain content with no special styling
+=MdText		+Idle
+
 # Heading colors (H1-H6)
 =MdH1		+Title +Preproc +Keyword
 =MdH2		+Title +Preproc
@@ -41,12 +44,14 @@
 # Block elements
 =MdBlockquote	+Comment
 =MdList		+TagName +Tag
+=MdListEnum	+MdList
 =MdRule		+Preproc
 
 # Links and images
 =MdLinkText	+Title +String
 =MdLinkUrl	+Number +Constant
 =MdImageAlt	+Type
+=MdImageUrl	+MdLinkUrl
 
 # Tables
 =MdTableHeader	+Keyword +Bold
@@ -61,7 +66,7 @@
 # ============================================================
 # Initial state: beginning of each line
 # ============================================================
-:line_start Idle
+:line_start MdText
 	*		idle		noeat
 	"#"		atx_h1		recolor=-1
 	">"		blockquote	recolor=-1
@@ -76,7 +81,7 @@
 # ============================================================
 # Idle state: inline content processing
 # ============================================================
-:idle Idle
+:idle MdText
 	*		idle
 	"\n"		line_start
 	"\\"		escape		recolor=-1
@@ -586,19 +591,19 @@
 	"-*+"		rule
 	*		idle		noeat
 
-:list_content Idle
+:list_content MdText
 	*		idle		noeat
 
 :list MdList
 	*		list_content	noeat
 	"\n"		line_start
 
-:ordered_list MdList
+:ordered_list MdListEnum
 	"0-9"		ordered_list
 	".)"		ordered_mark	recolor=-1
 	*		idle		noeat
 
-:ordered_mark Idle
+:ordered_mark MdListEnum
 	" \t"		list_content
 	*		idle		noeat
 
@@ -655,7 +660,7 @@
 	"["		image_ref	recolormark
 	*		idle		noeat
 
-:image_url MdLinkUrl
+:image_url MdImageUrl
 	"\n"		line_start
 	*		image_url
 	")"		link_end	noeat

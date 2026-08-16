@@ -204,35 +204,76 @@ Target = plan §3.1 "JOE result" column, with the §3.2 deviation.
 
 ## Phase 3 — Native colour scheme (Cursor Dark) + style mapping
 
-- [ ] **3.1** `syntax/md.jsf` — six state retargets per plan R4: `:ordered_list` and
-      `:ordered_mark` → `MdListEnum`; `:image_url` → `MdImageUrl`; `:idle`, `:line_start`,
-      `:list_content` → `MdText`. `MdConceal` is **not** needed (table grid uses the existing
-      `MdTableSeparator`)
-- [ ] **3.2** Create `colors/cursor-dark.jcf` from plan §6.2 — markdown mapping (§6.2.3), general
-      syntax (§6.2.5), UI keys (§6.2.6), 16 `-term` entries (§6.2.7). **Both** `.colors 256` and
-      `.colors *` sections
-- [ ] **3.2f** Status bar is **darker** than the editor (`#141414` bg, `#9A9A9A` fg) — not JOE's
-      conventional inverted light bar (§6.2.6)
-- [ ] **3.2a** Alpha handling per §6.2.1: flattened hex in the truecolor section
-      (`#F0F0F099`→`#9A9A9A`, `#F0F0F05C`→`#666666`, `#40404099`→`#303030`); base colour + `dim`
-      in the 256 section
-- [ ] **3.2b** Delete the nine existing schemes (`default`, `gruvbox`, `ir_black`, `molokai`,
-      `solarized`, `wombat`, `xoria`, `zenburn`, `zenburn-hc`)
-- [ ] **3.2c** Update `colors/Makefile.am` `data_color_DATA` (autoconf path breaks otherwise);
-      `build.zig:138` installs the directory wholesale and needs no change
-- [ ] **3.2d** Rewrite `NEWS.md:231-243` — it credits the seven upstream scheme authors by name.
-      Record the removal; do not silently drop the attributions
-- [ ] **3.2e** Check Cursor's licence terms for the theme package before vendoring its colours;
-      record the outcome next to the scheme
-- [ ] **3.3** View attrs: H1 bold+underline; H2–H6 bold; strong bold; emph italic; quote italic;
-      link label and URL underlined
-- [ ] **3.4** Exact colours per plan §6.2.3 / §6.2.5. Note Cursor inverts OpenCode's link
-      colours: label = lavender `#AAA0FA`, URL = teal `#82D2CE`
-- [ ] **3.5** Edit mode: all source visible; soft-align highlight to the same palette
-- [ ] **3.6** Degradation check: truecolor → 256 → 16 → attributes; every `Md*` legible at 16.
-      Cursor Dark is a dark-background theme — verify on a light terminal too
-- [ ] **3.7** Visual check against Cursor Dark side by side (colours), and against OpenCode for
-      conceal/layout (§3)
+- [x] **3.1** `syntax/md.jsf` — six state retargets per plan R4 applied. **Also required a
+      seventh change not in the plan**: `md.jsf`'s own top-of-file `=ClassName [+fallback]` block
+      is a *class registry* that the file's `:state ClassName` declarations are validated
+      against at parse time (`src/syntax.zig` — completely separate from which `.jcf` color
+      scheme happens to be active). Retargeting six states to reference `MdText`/`MdListEnum`/
+      `MdImageUrl` without also registering those three names there breaks the whole syntax file
+      (`Unknown class` parse errors → the file's `high_syntax` doesn't resolve as usable → **both
+      highlighting and viewmode conceal silently stop working**, since `syntaxNameIsMd` no longer
+      matches). Added `=MdText +Idle`, `=MdListEnum +MdList`, `=MdImageUrl +MdLinkUrl` alongside
+      the existing entries. `MdConceal` is **not** needed (table grid uses the existing
+      `MdTableSeparator`), confirmed.
+
+      **Also discovered**: `src/builtins_data.zig` embeds a compiled-in copy of `md.jsf` (and
+      every other builtin rc/syntax/color file) used when `-Djoerc=`/`-Djoedata=` are empty
+      (AGENTS.md's documented "empty forces builtins" mode) — normal `zig build` testing doesn't
+      exercise it (the `sys` tier in `open_configrc_file`'s fallback chain finds the real
+      `zig-out/share/joe/...` copy first), so it's easy to silently drift out of sync. Kept it in
+      sync with a regeneration script (comment/blank-line stripping to match the existing
+      convention) rather than hand-patching twice.
+- [x] **3.2** Created `colors/cursor-dark.jcf` from plan §6.2 — markdown mapping (§6.2.3), general
+      syntax (§6.2.5), UI keys (§6.2.6), 16 `-term` entries (§6.2.7), **both** `.colors 256` and
+      `.colors *` sections, generated programmatically (palette table → file) to avoid
+      hand-transcription drift between the two sections.
+- [x] **3.2f** Status bar darker than the editor (`#141414`/`#9A9A9A`) per §6.2.6 — done.
+- [x] **3.2a** Alpha flattening per §6.2.1 — done (`.set` values match the flattened hex table
+      exactly; truecolor section uses the flattened hex, 256 section uses the given index).
+- [x] **3.2b** Deleted the nine existing schemes. **Verified, not assumed**, that this is a true
+      no-op for `-colors default` specifically: diffed `colors/default.jcf`'s content against the
+      embedded builtin `default.jcf` in `builtins_data.zig` before deleting — functionally
+      identical, so the embedded copy picks up the slack seamlessly. `-colors gruvbox` (and the
+      other six removed non-default names) now fail to resolve, which is expected —
+      `apply_scheme(null)` is a documented no-op, doesn't crash, covered by
+      `test_removed_scheme_name_degrades_gracefully` in the new `tests/colors.py`.
+      `-colors cursor-dark` is **opt-in**, matching how the eight non-default schemes always
+      worked — `rc/joerc.in`'s `-colors scheme` line stays commented out, so out-of-box behavior
+      is genuinely unchanged (plan §6.2.8's claim, now verified rather than assumed).
+- [x] **3.2c** `colors/Makefile.am` `data_color_DATA` now just `cursor-dark.jcf`.
+- [x] **3.2d** `NEWS.md` — added a removal note right after the seven-author credit list rather
+      than deleting it, naming what replaced them and that `-colors default` still works.
+- [x] **3.2e** Researched (could not find definitive license text for the specific
+      `cursor-official-themes` package). Found: the exact palette is independently republished by
+      multiple unrelated third parties under permissive licenses (MIT ×3, one GPL-3.0) with no
+      apparent objection from Cursor/Anysphere; `cursor-dark.jcf` is a derived translation of
+      color *values* into JOE's own class names/file format, not a copy of the theme JSON or any
+      other copyrightable expression. Judged reasonable to ship on that basis — not a legal
+      opinion. Full note in `colors/reference/README.md`.
+- [x] **3.3** View attrs match plan exactly: H1 bold+underline, H2–H6 bold (`+MdH2` inheritance),
+      strong(`MdBold`) bold, emph(`MdItalic`) italic, quote(`MdBlockquote`) italic, link label
+      and URL both underlined.
+- [x] **3.4** Exact colours per §6.2.3/§6.2.5, including the OpenCode-inverted link colours
+      (label lavender, URL teal).
+- [x] **3.5** Edit mode (viewmode off) verified to apply the same classes/colors to the raw,
+      unconcealed delimiters as viewmode applies to the concealed-then-revealed text —
+      `test_heading_colored_in_edit_mode` in `tests/colors.py`. "Soft-align highlight" reduces to
+      `MdTableAlign`, already covered by the scheme; no separate mechanism found anywhere else in
+      the codebase for that phrase.
+- [x] **3.6** `.colors 16` section added (plan asks for a degradation check; the plan's own §3.2
+      checklist item only explicitly required 256+truecolor, but `apply_scheme` picks the best
+      color-set whose depth fits the terminal and returns a no-op if *none* fit — without a 16
+      tier, a 16-color terminal would render with **no scheme applied at all**, not a degraded
+      one). Verified the whole file parses cleanly. **Also discovered**, while testing this: the
+      soak suite's pinned test dependency (`pyte==0.5.2`) doesn't parse extended 256-color/
+      truecolor SGR sequences into its `Char.fg` field (confirmed by diffing against pyte 0.8.2
+      locally, where the same JOE output does show the real fg hex) — bold/underline parse
+      correctly in both. `tests/colors.py`'s color tests assert on bold/underscore, not fg value,
+      documented inline; a fg-value assertion would have been a false negative under the pinned
+      dependency, not a real bug. Have not separately verified on an actual light-background
+      terminal (§3.6's other explicit ask) — out of scope for what's automatable here.
+- [ ] **3.7** Visual check against Cursor Dark side by side, and against OpenCode for
+      conceal/layout — needs a human looking at a real terminal; not attempted.
 
 ---
 

@@ -1,5 +1,6 @@
 from blocks import *
 from cmdline import *
+from colors import *
 from commands import *
 from editing import *
 from encoding import *

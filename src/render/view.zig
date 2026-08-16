@@ -147,6 +147,9 @@ pub fn analyzeLine(tables: *ViewTables, line: []const u8, attrs: ?[]Attribute) !
     // Feature 1.6: Links — hide delimiters, store URL, style link text
     applyLinks(tables, line, attrs);
 
+    // Feature 6: autolinks/bare URLs — style only, never concealed
+    applyAutolinks(tables, line, attrs);
+
     // Feature 2.7: HTML entities — substitute the named glyph
     applyEntities(tables, line);
 
@@ -301,6 +304,7 @@ pub fn analyzeLineInline(tables: *ViewTables, line: []const u8, attrs: ?[]Attrib
     applyEmphasis(tables, line);
     applyInlineCode(tables, line);
     applyLinks(tables, line, attrs);
+    applyAutolinks(tables, line, attrs);
     applyEntities(tables, line);
     buildColMap(tables, line, if (tab == 0) 8 else tab);
 }
@@ -623,6 +627,118 @@ fn applyLinks(tables: *ViewTables, line: []const u8, attrs: ?[]Attribute) void {
     }
 }
 
+fn isAutolinkSchemeChar(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or
+        c == '+' or c == '.' or c == '-';
+}
+
+/// CommonMark explicit autolink: `<scheme:rest>`, scheme
+/// `[a-zA-Z][a-zA-Z0-9+.-]{1,31}`, no space/`<` before the closing `>`.
+/// `line[at]` must be `<`. Returns the index of the closing `>`.
+fn scanAutolinkBracket(line: []const u8, at: usize) ?usize {
+    if (at >= line.len or line[at] != '<') return null;
+    var i = at + 1;
+    if (i >= line.len or !std.ascii.isAlphabetic(line[i])) return null;
+    const scheme_start = i;
+    i += 1;
+    while (i < line.len and isAutolinkSchemeChar(line[i])) : (i += 1) {}
+    const scheme_len = i - scheme_start;
+    if (scheme_len < 2 or scheme_len > 32) return null;
+    if (i >= line.len or line[i] != ':') return null;
+    i += 1;
+    const rest_start = i;
+    while (i < line.len and line[i] != '>' and line[i] != '<' and line[i] != ' ' and line[i] != '\t') : (i += 1) {}
+    if (i >= line.len or line[i] != '>' or i == rest_start) return null;
+    return i;
+}
+
+fn bareUrlPrefixLen(line: []const u8, at: usize) usize {
+    if (std.mem.startsWith(u8, line[at..], "https://")) return 8;
+    if (std.mem.startsWith(u8, line[at..], "http://")) return 7;
+    return 0;
+}
+
+/// GFM extended-autolink trailing-punctuation trim (simplified): a bare
+/// URL stops at whitespace/`<`/`>`, then sheds trailing `.,!?;:` and a
+/// single unmatched trailing `)` (so "see (http://x)" keeps the URL's own
+/// parens balanced but drops the closing paren that belongs to the prose).
+fn scanBareUrlEnd(line: []const u8, at: usize) usize {
+    var end = at;
+    while (end < line.len and line[end] != ' ' and line[end] != '\t' and
+        line[end] != '<' and line[end] != '>') : (end += 1)
+    {}
+    while (end > at) {
+        const c = line[end - 1];
+        if (c == '.' or c == ',' or c == '!' or c == '?' or c == ';' or c == ':') {
+            end -= 1;
+            continue;
+        }
+        if (c == ')') {
+            var opens: usize = 0;
+            var closes: usize = 0;
+            for (line[at..end]) |ch| {
+                if (ch == '(') opens += 1;
+                if (ch == ')') closes += 1;
+            }
+            if (closes > opens) {
+                end -= 1;
+                continue;
+            }
+        }
+        break;
+    }
+    return end;
+}
+
+/// Feature 6 (Phase 6, top priority): autolinks (`<url>`) and bare URLs
+/// get link styling — never concealed (plan §3.2's explicit exception:
+/// there's no label to fall back on if the URL itself is hidden). Runs
+/// after `applyLinks` and skips any byte it already claimed (hidden, or
+/// already has a `link_url`), so a URL inside `[text](url)` isn't
+/// re-processed as a bare URL. Skips code spans like the other scanners.
+fn applyAutolinks(tables: *ViewTables, line: []const u8, attrs: ?[]Attribute) void {
+    if (line.len == 0) return;
+    var in_code_buf: [4096]u8 = undefined;
+    var heap_code: ?[]u8 = null;
+    defer if (heap_code) |h| tables.allocator.free(h);
+    const in_code: []u8 = blk: {
+        if (line.len <= in_code_buf.len) break :blk in_code_buf[0..line.len];
+        const h = tables.allocator.alloc(u8, line.len) catch return;
+        heap_code = h;
+        break :blk h;
+    };
+    markCodeSpans(in_code, line);
+
+    var i: usize = 0;
+    while (i < line.len) {
+        if (in_code[i] != 0 or tables.hide[i] != 0 or tables.link_url[i] != null) {
+            i += 1;
+            continue;
+        }
+        if (line[i] == '<') {
+            if (scanAutolinkBracket(line, i)) |close| {
+                const url = line[i + 1 .. close];
+                var lp = i;
+                while (lp <= close) : (lp += 1) tables.link_url[lp] = url;
+                styleLinkText(attrs, i, close + 1);
+                i = close + 1;
+                continue;
+            }
+        } else if (bareUrlPrefixLen(line, i) > 0) {
+            const end = scanBareUrlEnd(line, i);
+            if (end > i) {
+                const url = line[i..end];
+                var lp = i;
+                while (lp < end) : (lp += 1) tables.link_url[lp] = url;
+                styleLinkText(attrs, i, end);
+                i = end;
+                continue;
+            }
+        }
+        i += 1;
+    }
+}
+
 fn styleLinkText(attrs: ?[]Attribute, start: usize, end: usize) void {
     const row = attrs orelse return;
     var lp = start;
@@ -907,6 +1023,63 @@ test "view image hides bang/brackets/destination, leaves alt visible" {
 test "view autolink and bare URL stay visible (no label to conceal to)" {
     try expectRendered(testing.allocator, "See <http://x> here", "See <http://x> here");
     try expectRendered(testing.allocator, "See http://x here", "See http://x here");
+}
+
+test "view autolink gets link styling and link_url" {
+    var tables = ViewTables.init(testing.allocator);
+    defer tables.deinit();
+    const line = "See <http://example.com> here";
+    var attrs: [64]Attribute = .{Attribute.none} ** 64;
+    try analyzeLine(&tables, line, attrs[0..line.len]);
+    // 'h' of http is at byte 5 (inside the brackets, byte 4 is '<')
+    try testing.expect(attrs[5].underline);
+    try testing.expect(Color.eql(attrs[5].fg, link_fg));
+    try testing.expectEqualStrings("http://example.com", tables.linkAt(5).?);
+    // The brackets themselves are part of the styled+linked span too.
+    try testing.expect(attrs[4].underline);
+    try testing.expectEqualStrings("http://example.com", tables.linkAt(4).?);
+}
+
+test "view bare URL gets link styling and link_url, trailing punctuation trimmed" {
+    var tables = ViewTables.init(testing.allocator);
+    defer tables.deinit();
+    const line = "See http://example.com, thanks.";
+    var attrs: [64]Attribute = .{Attribute.none} ** 64;
+    try analyzeLine(&tables, line, attrs[0..line.len]);
+    try testing.expectEqualStrings("http://example.com", tables.linkAt(4).?);
+    // The trailing comma isn't part of the link.
+    const comma_idx = std.mem.indexOf(u8, line, ",").?;
+    try testing.expect(!attrs[comma_idx].underline);
+    try testing.expect(tables.linkAt(comma_idx) == null);
+}
+
+test "view bare URL in parens keeps balanced inner parens, drops the wrapping one" {
+    var tables = ViewTables.init(testing.allocator);
+    defer tables.deinit();
+    const line = "see (http://example.com/wiki/Foo_(bar)) end";
+    try analyzeLine(&tables, line, null);
+    try testing.expectEqualStrings("http://example.com/wiki/Foo_(bar)", tables.linkAt(6).?);
+}
+
+test "view autolink/bare URL inside code span is not styled" {
+    try expectRendered(testing.allocator, "Use `http://x` here", "Use  http://x  here");
+    var tables = ViewTables.init(testing.allocator);
+    defer tables.deinit();
+    const line = "Use `http://x` here";
+    try analyzeLine(&tables, line, null);
+    const h_idx = std.mem.indexOf(u8, line, "http").?;
+    try testing.expect(tables.linkAt(h_idx) == null);
+}
+
+test "view autolink/bare URL do not re-claim an existing markdown link" {
+    var tables = ViewTables.init(testing.allocator);
+    defer tables.deinit();
+    const line = "[a](http://example.com)";
+    try analyzeLine(&tables, line, null);
+    // The destination is hidden (Feature 2.1) — applyAutolinks must not
+    // un-hide it or otherwise reprocess it as a bare URL.
+    const h_idx = std.mem.indexOf(u8, line, "http").?;
+    try testing.expect(tables.isHidden(h_idx));
 }
 
 test "view html entities substitute to their glyph" {

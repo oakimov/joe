@@ -387,14 +387,57 @@ emphasis was considered and deliberately **not** attempted — see 4.4/4.5 below
 
 ## Phase 6 — Scoped CM/GFM gaps
 
-- [ ] **6.1** Autolinks / bare URLs: detect and attach OSC 8 + click. Text stays the URL itself —
-      conceal does not apply (task 2.6)
-- [ ] **6.2** Setext headings (both lines visible, heading-styled — matches OpenCode)
-- [ ] **6.3** Table header cells styled `markup.heading` (bold + heading color)
-- [ ] **6.4** Table pipes / delimiter row muted (`punctuation.special`)
+- [x] **6.1** `applyAutolinks` (`src/render/view.zig`) — explicit CM autolinks (`<http://x>`,
+      scheme `[a-zA-Z][a-zA-Z0-9+.-]{1,31}:`) and bare `http://`/`https://` URLs get link styling
+      (underline + `link_fg`, same as bracketed link text) and `link_url` (so Phase 5's
+      click-to-open and OSC 8 both cover them) — never concealed, matching plan §3.2's explicit
+      exception (no label to fall back on). Runs after `applyLinks` and skips any byte already
+      claimed (hidden, or already has a `link_url`) so a URL inside `[text](url)` isn't
+      double-processed as a bare URL; skips code spans. GFM trailing-punctuation trim
+      (`.,!?;:` and a lone unmatched trailing `)`) implemented per plan's "bare URLs" scope, so
+      "see http://example.com." doesn't swallow the sentence's full stop into the link. 6 new
+      unit tests (styling, `link_url`, punctuation trim, balanced-parens URLs, code-span
+      exclusion, no-double-claim).
+- [ ] **6.2** Setext headings (`Text\n===`/`Text\n---`) — **investigated, deliberately not
+      implemented.** The concealment pipeline (`zig_bw_view_line_start` → `analyzeLineStart`,
+      `src/bw_lgen.zig`/`src/render/view.zig`) and the DFA-driven syntax-highlight class/color
+      assignment (`parse()` in `zig_bw_lgen_view_entry`, a separate, earlier pass) are two
+      distinct systems reached through different call chains. Detecting a setext heading needs
+      looking at the *adjacent* line (is the line below an underline / is the line above a
+      plausible paragraph) — `analyzeLineStart` and the render-test-facing `analyzeLine` are pure
+      single-line functions with zero buffer access by design; only `zig_bw_lgen_view` (the
+      caller) has the `P`/buffer access needed, following the existing `zig_bw_fence_detect`
+      precedent for bounded cross-line lookback. That part is tractable. What isn't
+      low-risk: getting the *heading color* onto the text line requires overriding output from
+      the DFA pass that already ran by the time `zig_bw_lgen_view` executes — achievable in
+      principle via the same attr-overlay mechanism `applyAutolinks`/`styleLinkText` use, but
+      doing it correctly means threading a new parameter through `zig_bw_view_line_start`,
+      `analyzeLineStart` (two call sites, one of them the render-test unit-test path), and
+      verifying `zig_bw_view_inline`/`analyzeLineInline` still run against a line that also needs
+      to bypass the normal HR/heading "done" dispatch. Judged too much correctness-critical
+      surface to change carefully in this pass, for a comparatively rare construct (ATX `#`
+      headings cover the vast majority of real documents). Left as a real, understood gap rather
+      than attempting a rushed partial fix — a `---` line right after a paragraph still
+      misrenders as a horizontal rule today, unchanged from before this phase.
+- [x] **6.3** Table header cells: `src/render/table.zig`'s `paintRow` already set `bold` for
+      header rows (pre-existing); added `header_fg` (indexed color, same "viewmode-only attribute
+      overlay independent of the class system" approach as `view.zig`'s `link_fg`, since table
+      painting is its own pipeline separate from `md.jsf`'s DFA) for the header row's text.
+- [x] **6.4** Table pipes / separator row muted: separator row (`├──┼──┤`) already used one
+      attr for its whole (text-free) row, so `dim = true` there was a one-line addition. The `│`
+      column borders in header/body rows needed a **new, separate `pipe_attr`** distinct from the
+      cell-text attr they sit next to (previously both used the same `attr`, so making header
+      borders dim would have also un-bolded/un-colored them) — split so header text is
+      bold+colored while its own `│` stays muted like every other row's. Two existing tests
+      (`table.zig`, `window/paint.zig`) asserted the pre-6.3/6.4 pipe-is-bold behavior; updated to
+      check the text cell for bold+color and the border cell for dim, matching the new,
+      intentional split. `applySimpleBorders` (the simpler Feature 2.1 fallback used when no
+      column-width layout is available) takes a `substitute`-only output with no `Attribute`
+      parameter to add dim/color to — left unchanged, a pre-existing, narrower gap in that
+      fallback path specifically, not touched here.
 
-**Out of scope here:** images, footnotes, raw HTML, math, nested fence language HL (roadmap 2.5),
-block margins, dropped fence lines, wrapped table cells (plan §5).
+**Out of scope here (unchanged from plan):** images, footnotes, raw HTML, math, nested fence
+language HL (roadmap 2.5), block margins, dropped fence lines, wrapped table cells (plan §5).
 
 ---
 

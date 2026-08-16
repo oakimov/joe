@@ -1100,8 +1100,12 @@ test "paintBody paints padded table box-drawing in viewmode" {
     // Body padded
     try testing.expectEqual(@as(u21, 0x2502), cellAt(&term, t.x, @intCast(t.y + 2)).cp);
     try testing.expectEqual(@as(u21, 'c'), cellAt(&term, t.x + 2, @intCast(t.y + 2)).cp);
-    // Header bold border
-    try testing.expect(cellAt(&term, t.x, @intCast(t.y)).attr.bold);
+    // Header text bold (Feature 6.3); t.x+2 is 'H' of "Header1" (t.x is the
+    // '│' border, t.x+1 is padding).
+    try testing.expect(cellAt(&term, t.x + 2, @intCast(t.y)).attr.bold);
+    // The '│' border itself is muted, not bold (Feature 6.4).
+    try testing.expect(cellAt(&term, t.x, @intCast(t.y)).attr.dim);
+    try testing.expect(!cellAt(&term, t.x, @intCast(t.y)).attr.bold);
 }
 
 test "paintBody applies viewmode hide and substitute" {

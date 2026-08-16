@@ -11,7 +11,16 @@ const terminal = @import("terminal");
 
 pub const TermScreen = terminal.Screen;
 pub const Attribute = terminal.Attribute;
+pub const Color = terminal.Color;
 pub const displayWidth = terminal.displayWidth;
+
+/// Feature 6.3: table header text color (plan §3.1 "markup.heading" /
+/// cursor-dark's `nord_blue`, approximated in this indexed-color overlay
+/// the same way `view.zig`'s `link_fg` approximates link color — a
+/// viewmode-only attribute override independent of the syntax-highlight
+/// class system, since table painting is a separate pipeline from
+/// `md.jsf`'s DFA).
+pub const header_fg: Color = .{ .indexed = 6 };
 
 pub const max_cols: usize = 64;
 /// Max lines scanned for a single table region (JOE scans up to 200).
@@ -247,7 +256,20 @@ pub fn paintRow(
     if (w == 0) return true;
 
     var attr = base_attr;
-    if (row_kind == .header) attr.bold = true;
+    // Feature 6.3: header text bold + heading color (was bold-only).
+    if (row_kind == .header) {
+        attr.bold = true;
+        if (Color.eql(attr.fg, .default)) attr.fg = header_fg;
+    }
+    // Feature 6.4: the separator row (├──┼──┤) is pure border, no text, so
+    // muting `attr` for the whole row is enough — no separate pipe/text
+    // split needed there the way header/body rows need below.
+    if (row_kind == .separator) attr.dim = true;
+    // The `│` column borders in header/body rows are muted independent of
+    // the cell text/header color they sit next to (plan §6.4's "pipes...
+    // muted", distinct from §6.3's header text color).
+    var pipe_attr = base_attr;
+    pipe_attr.dim = true;
 
     const end_x: u16 = x +| w;
     var pipe_pos: [max_cols]usize = undefined;
@@ -306,7 +328,7 @@ pub fn paintRow(
         if (cw < cells[col].width) cw = cells[col].width;
         if (@as(u32, oc) + 1 + 1 + cw + 1 > limit) break;
 
-        put(term, &oc, limit, y, 0x2502, attr); // │
+        put(term, &oc, limit, y, 0x2502, pipe_attr); // │
         put(term, &oc, limit, y, ' ', attr);
 
         const avail = cw;
@@ -358,7 +380,7 @@ pub fn paintRow(
         }
         if (oc < limit) put(term, &oc, limit, y, ' ', attr); // right pad
     }
-    if (oc < limit) put(term, &oc, limit, y, 0x2502, attr); // closing │
+    if (oc < limit) put(term, &oc, limit, y, 0x2502, pipe_attr); // closing │
     if (oc < end_x) clearEol(term, oc, y, end_x, base_attr);
     return true;
 }
@@ -499,8 +521,16 @@ test "table paint separator and padded body" {
     // Body: │ cell1   │ cell2   │
     try expectRow(&term, 0, 2, "\u{2502} cell1   \u{2502} cell2   \u{2502}");
     try expectRow(&term, 0, 3, "\u{2502} cell3   \u{2502} cell4   \u{2502}");
-    // Header bold
-    try testing.expect(term.cells[0].attr.bold);
+    // Header text bold + heading color (Feature 6.3); col 2 is 'H' of
+    // "Header1" (col 0 is the '│' border, col 1 is the padding space).
+    try testing.expect(term.cells[2].attr.bold);
+    try testing.expect(Color.eql(term.cells[2].attr.fg, header_fg));
+    // The '│' border itself is muted, not bold/colored (Feature 6.4) —
+    // distinct from the header text next to it.
+    try testing.expect(term.cells[0].attr.dim);
+    try testing.expect(!term.cells[0].attr.bold);
+    // Separator row (├──┼──┤, screen row 1) is muted too.
+    try testing.expect(term.cells[40 + 0].attr.dim);
 }
 
 test "table paint varying widths and body wider than header" {

@@ -23,10 +23,16 @@ the Python soak suite stay intact.
 other way round.
 
 A markdown viewmode is **landed** in the live Zig paint path
-(`src/bw_lgen.zig` + `src/render/`), including the plan's current Phase 1
-(zero-width conceal, `markdown` branch). Active markdown plan:
-`plans/markdown-wysiwyg-feasibility.md` + `plans/TODO.md` (OpenCode-style rich
-viewmode; self-contained Zig — no vendored markdown libs).
+(`src/bw_lgen.zig` + `src/render/`): zero-width conceal (Phase 1), link/image/
+entity/list-marker conceal coverage (Phase 2), the native `cursor-dark` color
+scheme (Phase 3), a flanking-delimiter-rule fix for emphasis (Phase 4),
+click-to-open links via OSC 8 and the mouse (Phase 5), and autolink styling +
+table header/border colors (Phase 6). Setext headings are a known,
+documented gap (plan §Phase 6 / TODO.md 6.2) — ATX headings only. User-facing
+docs: `docs/man.md` "Markdown viewmode" section (deviations from OpenCode,
+known limitations). Plan/status: `plans/markdown-wysiwyg-feasibility.md` +
+`plans/TODO.md` (OpenCode-style rich viewmode; self-contained Zig — no
+vendored markdown libs).
 
 ## Current state (read this first)
 
@@ -162,8 +168,14 @@ for-loop `switch` in `while (true)` such that Zig `continue` restarts the while
 ## Markdown / rendering (already in tree)
 
 Viewmode conceals markdown delimiters at zero width, paints emphasis/headings/tables,
-OSC 8 links, Unicode table borders — implemented on the Zig paint path, not by editing
-deleted `joe/bw.c`. Syntax still driven by `syntax/md.jsf` + color schemes under `colors/`.
+autolinks, OSC 8 links (click-to-open via the mouse too), Unicode table borders — implemented
+on the Zig paint path, not by editing deleted `joe/bw.c`. Syntax still driven by
+`syntax/md.jsf` + the native `cursor-dark` color scheme under `colors/` (the nine legacy
+schemes were removed; `-colors default` still resolves via an embedded builtin fallback).
+`src/render/md_event.zig` holds the CommonMark flanking-rule classifier and link-safety/
+reference-resolution helpers, kept there specifically so they're covered by `zig build
+render-test` (`src/bw_lgen.zig` itself isn't part of that target). Known gap: setext headings
+aren't recognized (`docs/man.md` "Markdown viewmode" has the full user-facing list).
 
 ## Classic Autoconf (reference only)
 

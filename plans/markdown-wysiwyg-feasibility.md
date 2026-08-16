@@ -12,9 +12,13 @@
 > **References:** conceal + layout from OpenCode (`~/Projects/opencode-research`, §2);
 > **all colours from Cursor Dark** (`cursor-official-themes-0.0.5.vsix`, §6.2)
 
-This document **replaces** the old C-era feasibility essay as the active plan. A Phase 1–2
-viewmode already ships on the Zig paint path; the work below brings **OpenCode-like** rich
-rendering, correct conceal, and clickable links.
+This document **replaces** the old C-era feasibility essay as the active plan. Phases 1–6
+(§9) ship on the Zig paint path: zero-width conceal, full link/image/entity/list-marker
+coverage, the native Cursor Dark color scheme, a CommonMark flanking-rule fix for emphasis,
+click-to-open links, and autolink styling + table header/border colors. Setext headings
+(§Phase 6) are a known, documented gap. Phase 7 (docs) is this pass. See `plans/TODO.md`
+for the authoritative, item-by-item status — this document is the design rationale, not the
+live tracker.
 
 ---
 

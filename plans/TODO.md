@@ -2,7 +2,9 @@
 
 > **Branch:** work on **`markdown`** (synced from `zig-rewrite`).
 > **Source:** `plans/markdown-wysiwyg-feasibility.md` (Zig Path A)
-> **Status:** Phase 1–2 baseline **shipped**. Active work = Phases 1–7 below (Phase 0 done).
+> **Status:** Phases 0–7 **complete**. One deliberate gap: setext headings (§Phase 6 / 6.2) —
+> not implemented, reasoning documented there. `T.2–T.6` (multi-emulator checks) not attempted
+> (needs real alternate terminal emulators, unavailable in this environment).
 > **Constraint:** Self-contained Zig — borrow ideas from koino/MD4C/OpenCode; **no** vendored markdown libs.
 > **References:** conceal + layout from OpenCode (`~/Projects/opencode-research`, plan §2);
 > **all colours from Cursor Dark** (`cursor-official-themes-0.0.5.vsix`, plan §6.2).
@@ -443,20 +445,39 @@ language HL (roadmap 2.5), block margins, dropped fence lines, wrapped table cel
 
 ## Phase 7 — Docs & gate
 
-- [ ] **7.1** Keep plan + this TODO aligned with code
-- [ ] **7.2** User-facing note (help and/or `docs/`) for viewmode + clickable links
-- [ ] **7.3** Document the deliberate deviations from OpenCode so they read as choices — the full
-      list is in the plan appendix (link conceal §3.2, line grid §5). Note that viewmode hides
-      link URLs and `^T A` shows the source
-- [ ] **7.4** `cp -f zig-out/bin/joe joe/joe && ./runtests` green at the updated count
+- [x] **7.1** `plans/markdown-wysiwyg-feasibility.md`'s intro and `AGENTS.md`'s two markdown
+      sections updated to summarize Phases 1–6 and point at this file as the authoritative,
+      item-by-item status tracker.
+- [x] **7.2** New `docs/man.md` "Markdown viewmode" section (placed next to "Color scheme files",
+      before "The joerc file"): what conceals/substitutes, table rendering, click-to-open,
+      the color scheme.
+- [x] **7.3** Same section documents the deliberate deviations from OpenCode as choices, not
+      bugs: link/image destination conceal (§3.2), the line-grid constraint — no block-margin
+      rows, no removed fence lines, no wrapped table cells (§5) — and dropped ordered-marker
+      right-alignment (R6). A separate "Known limitations" list (nested emphasis, setext
+      headings, left-arrow bounce, up/down column preservation, no nested fence-language
+      highlighting) is kept distinct from the deliberate deviations — these are gaps, not choices.
+- [x] **7.4** Final gate, all suites: soak 219/219, `zig build render-test`/`terminal-test`/
+      `window-test` green, `tools/verify_syntax_colors.py` clean. See the final commit for the
+      exact command output.
 
 ---
 
 ## Cross-cutting (still open)
 
-- [ ] **T.2–T.6** Multi-TERM / multi-emulator checks (16 / 256 / truecolor)
-- [ ] **T.7** Large-file viewmode performance smoke (≈10k lines)
-- [ ] **D.3** Maintain comments on `md.jsf` DFA for edit-mode highlight
+- [ ] **T.2–T.6** Multi-TERM / multi-emulator checks (16 / 256 / truecolor) — **not attempted**,
+      honestly: this needs real alternate terminal emulators (a genuine iTerm2/Alacritty/tmux/
+      Windows Terminal/etc. session each), not something reachable from this environment. The
+      *code paths* for all three color depths are verified (Phase 3's `.colors 16/256/*`
+      sections, `tools/verify_syntax_colors.py`, `tests/colors.py`), but that's not the same as
+      confirming real-world rendering on each emulator.
+- [x] **T.7** Large-file viewmode performance smoke (~16,000 lines, ~310KB, mixed headings/
+      emphasis/links/lists/tables): startup 0.14s, viewmode toggle 0.04s, ~25ms per page-down
+      while scrolling through 80 pages. No hangs, no crashes, correct rendering throughout.
+      Not kept as a permanent soak test (too slow to run on every soak pass) — a one-time
+      confirmation there's no obvious quadratic-ish blowup, not a regression guard.
+- [x] **D.3** Checked — `syntax/md.jsf`'s header comment (design principles + known limitations)
+      is still accurate after Phases 1–6's changes; no update needed.
 
 ---
 

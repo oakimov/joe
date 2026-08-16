@@ -2745,6 +2745,85 @@ References to `dark_blue` must be in brackets, and their values will be
 substituted by a simple string replacement before parsing the line (which
 means macros can contain any text, not just color values).
 
+## Markdown viewmode
+
+JOE has a dual-mode Markdown display for `.md` files: **edit mode** (the
+default) shows the raw source exactly as it's stored on disk, with `#`,
+`**`, `[...]`, and every other delimiter visible and syntax-highlighted.
+**Viewmode**, toggled with `^T A`, additionally *conceals* the pure-syntax
+delimiter bytes at zero display width and substitutes a few of them with a
+single glyph, so the buffer reads closer to rendered Markdown while the
+underlying file is completely unchanged — nothing is ever written back
+differently because viewmode is on.
+
+What viewmode conceals or substitutes:
+
+* Heading `#`/`##`/... markers and the following space
+* Emphasis delimiters: `**bold**`, `*em*`, `~~strike~~`, `` `code` ``
+* Fenced code block backtick/tilde fences and the language tag
+* Link and image syntax — see the deviation from OpenCode below
+* Blockquote `>` → `│`; task list `[ ]`/`[x]` → `☐`/`☑`; thematic break
+  `---`/`***`/`___` → a full-width `─` rule
+* List markers `*`/`+`/`-` normalise to `-` (both modes; this is a
+  substitution, not a conceal, so it's visible either way)
+* A handful of HTML entities (`&nbsp;`, `&lt;`, `&gt;`, `&amp;`, `&quot;`,
+  `&ensp;`, `&emsp;`) substitute to their glyph
+
+Markdown tables render as a padded, box-drawn grid in viewmode; in edit
+mode the raw `|`-delimited source is shown unchanged.
+
+Left-click a link, image, or reference-style link destination in viewmode
+to open it (see "Xterm Mouse support" above); autolinks and bare URLs are
+clickable too. Colors come from JOE's native `cursor-dark` scheme (see
+"Color schemes" above) — `-colors cursor-dark` to enable it explicitly, it
+is not the out-of-box default.
+
+### Deliberate differences from a Markdown renderer
+
+A few choices here are intentional trade-offs, not bugs:
+
+* **Link and image destinations are concealed, not just the brackets.**
+  `[label](https://example.com/very/long/url)` displays as just `label` —
+  most Markdown-aware editors leave the destination visible next to the
+  label. JOE hides it because the destination is the single biggest source
+  of visual noise in prose you read and re-read; switch to edit mode
+  (`^T A`) to see it, or hover/click to open it directly.
+* **No blank line is inserted between blocks**, and **fenced code blocks
+  are never removed from the display** — unlike some Markdown renderers,
+  JOE's screen layout is always exactly one buffer line per screen row.
+  Concealing delimiters can only shorten a line, never remove or insert
+  one. This keeps scrolling, the line-number gutter, and search results
+  aligned with the file you're editing, at the cost of matching a web
+  renderer's spacing exactly.
+* **Ordered list markers (`1.`, `2.`, ...) are left exactly as typed**,
+  not renumbered or right-aligned to the widest marker in the list.
+* **Table cells are not word-wrapped.** A cell wider than the window just
+  runs off the edge, same as any other long line.
+
+### Known limitations
+
+* **Nested emphasis** (`**bold *italic* bold**`) doesn't fully conceal —
+  the inner `*italic*` delimiters stay visible. Fixing this needs a full
+  delimiter-stack parser; the current line scanner handles the common,
+  non-nested cases correctly (including CommonMark's flanking-run rules,
+  e.g. `* not emphasis *` and `snake_case_word` are correctly left alone).
+* **Setext headings** (a line of text followed by a line of `===` or
+  `---`) are not recognized as headings at all. A `---` line right after a
+  paragraph is still misread as a thematic break. Use ATX headings
+  (`#`/`##`/...) instead.
+* **Left-arrow out of a concealed run** can "bounce" — landing one
+  position further right than expected — right at the boundary where a
+  concealed delimiter run meets visible text. Right-arrow and mouse clicks
+  are unaffected.
+* **Up/down arrow between lines with different amounts of concealment**
+  doesn't always preserve the visual column exactly — it's much closer
+  than before this dual-mode support existed, but not pixel-perfect
+  across, say, a heading line and a plain text line with very different
+  amounts of hidden syntax.
+* Fenced code block bodies are not syntax-highlighted for their fenced
+  language (no nested grammar injection) — they display in the plain body
+  color, same as an indented code block.
+
 ## The joerc file
 
 __^T__ options, the help screens and the key-sequence to editor command

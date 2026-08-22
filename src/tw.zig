@@ -5,9 +5,13 @@
 const std = @import("std");
 const ptrdiff_t = c_long;
 
+// stdbuf must match the real definition (gapbuffer/intern.zig); size comes from
+// gap_types.stdsiz so the extern view can never silently disagree again.
+const gap_types = @import("gapbuffer/types.zig");
+
 pub const FITHEIGHT: c_int = 4;
 pub const SAVED_SIZE: c_int = 80;
-pub const stdsiz: c_int = 8192;
+pub const stdsiz: c_int = @intCast(gap_types.stdsiz);
 pub const TYPETW: c_int = 0x0100;
 pub const TYPEPW: c_int = 0x0200;
 pub const TYPEMENU: c_int = 0x0800;
@@ -223,8 +227,7 @@ pub const struct_window = extern struct {
     notify: [*c]c_int = null,
     bstack: [*c]struct_bstack = null,
 };
-pub const struct_lattr_db = opaque {
-};
+pub const struct_lattr_db = opaque {};
 const struct_unnamed_3 = extern struct {
     ww: c_int = 0,
     ai: c_int = 0,
@@ -363,7 +366,7 @@ pub extern var dostaupd: c_int;
 pub extern var leave: c_int;
 pub extern var maint: [*c]Screen;
 pub extern var errbuf: [*c]B;
-pub extern var stdbuf: [8192]u8;
+pub extern var stdbuf: [gap_types.stdsiz]u8;
 pub extern var locale_map: [*c]struct_charmap;
 pub extern var recmac: [*c]struct_recmac;
 pub extern var markb: [*c]P;
@@ -863,8 +866,10 @@ pub export fn stagen(arg_stalin: [*c]u8, arg_bw_1: [*c]BW, arg_s: [*c]const u8, 
                             {
                                 l = 0;
                                 while ((@as(c_int, s[@bitCast(@as(isize, @intCast(l + @as(c_int, 1))))]) != 0) and (@as(c_int, s[@bitCast(@as(isize, @intCast(l + @as(c_int, 1))))]) != @as(c_int, '%'))) : (l += 1) {
+                                    if (l >= @as(c_int, @intCast(buf.len))) break;
                                     buf[@bitCast(@as(isize, @intCast(l)))] = s[@bitCast(@as(isize, @intCast(l + @as(c_int, 1))))];
                                 }
+                                if (l >= @as(c_int, @intCast(buf.len))) l = @as(c_int, @intCast(buf.len)) - 1;
                             }
                             if ((@as(c_int, s[@bitCast(@as(isize, @intCast(l + @as(c_int, 1))))]) == @as(c_int, '%')) and (@as(c_int, buf[@as(c_int, 0)]) != 0)) {
                                 buf[@bitCast(@as(isize, @intCast(l)))] = 0;
@@ -887,8 +892,10 @@ pub export fn stagen(arg_stalin: [*c]u8, arg_bw_1: [*c]BW, arg_s: [*c]const u8, 
                             {
                                 l = 0;
                                 while ((@as(c_int, s[@bitCast(@as(isize, @intCast(l + @as(c_int, 1))))]) != 0) and (@as(c_int, s[@bitCast(@as(isize, @intCast(l + @as(c_int, 1))))]) != @as(c_int, '%'))) : (l += 1) {
+                                    if (l >= @as(c_int, @intCast(buf.len))) break;
                                     buf[@bitCast(@as(isize, @intCast(l)))] = s[@bitCast(@as(isize, @intCast(l + @as(c_int, 1))))];
                                 }
+                                if (l >= @as(c_int, @intCast(buf.len))) l = @as(c_int, @intCast(buf.len)) - 1;
                             }
                             if ((@as(c_int, s[@bitCast(@as(isize, @intCast(l + @as(c_int, 1))))]) == @as(c_int, '%')) and (@as(c_int, buf[@as(c_int, 0)]) != 0)) {
                                 buf[@bitCast(@as(isize, @intCast(l)))] = 0;

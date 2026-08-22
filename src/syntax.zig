@@ -836,7 +836,7 @@ pub export fn parse(arg_syntax: [*c]struct_high_syntax, arg_line: [*c]P, arg_h_s
     h_state.state = h.*.no;
     return h_state;
 }
-pub fn find_state(arg_syntax: [*c]struct_high_syntax, arg_name: [*c]u8) callconv(.c) [*c]struct_high_state {
+pub export fn find_state(arg_syntax: [*c]struct_high_syntax, arg_name: [*c]u8) callconv(.c) [*c]struct_high_state {
     var syntax = arg_syntax;
     _ = &syntax;
     var name = arg_name;

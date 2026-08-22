@@ -6,5 +6,7 @@ from editing import *
 from encoding import *
 from find import *
 from format import *
+from locks import *
+from locks_long import *
 from viewmode import *
 from window import *

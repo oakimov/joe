@@ -31,6 +31,7 @@ pub const loadSyntax = syntax.load;
 pub const ViewTables = view.ViewTables;
 pub const analyzeLine = view.analyzeLine;
 pub const analyzeLineStart = view.analyzeLineStart;
+pub const looksLikeIndentedCode = view.looksLikeIndentedCode;
 pub const analyzeLineInline = view.analyzeLineInline;
 pub const buildColMap = view.buildColMap;
 pub const tryPaintTable = table.tryPaintFromLines;

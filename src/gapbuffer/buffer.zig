@@ -87,6 +87,16 @@ const poffline_ = pointer.poffline_;
 const ponline_ = pointer.ponline_;
 const brc_ = pointer.brc_;
 
+/// Bumped on every buffer content mutation (insert/delete/replace). Viewmode
+/// region caches (fence/table windows in `bw_lgen.zig`) persist across paints,
+/// so they must be able to detect that lines changed under them; comparing
+/// this generation against their snapshot is the cheap way to do it.
+/// Single-threaded edloop: no ordering/tearing concerns.
+pub export var vm_content_generation: u64 = 0;
+inline fn touchContentGeneration() void {
+    vm_content_generation +%= 1;
+}
+
 const ansi_mod = @import("ansi.zig");
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -96,20 +106,43 @@ const ansi_mod = @import("ansi.zig");
 pub fn bmkchn(chn: *H, prop: ?*B, amnt: i64, nlines: i64) *B {
     _ = intern.ensureBufs();
     intern.ensureFrebufs();
-    const b = @as(*B, @alignCast(@ptrCast(intern.alitem(Blink(&intern.frebufs_sentinel), @sizeOf(B)) orelse unreachable)));
+    const b = @as(*B, @ptrCast(@alignCast(intern.alitem(Blink(&intern.frebufs_sentinel), @sizeOf(B)) orelse unreachable)));
     b.* = .{
         .link = .{ .next = undefined, .prev = undefined },
-        .bof = null, .eof = null, .name = null,
-        .locked = 0, .ignored_lock = 0, .didfirst = 0, ._pad0 = 0,
-        .mod_time = time(null), .check_time = 0,
-        .gave_notice = 0, .orphan = 0, .count = 1, .changed = 0, .backup = 1,
-        ._pad1 = 0, .undo = null,
+        .bof = null,
+        .eof = null,
+        .name = null,
+        .locked = 0,
+        .ignored_lock = 0,
+        .didfirst = 0,
+        ._pad0 = 0,
+        .mod_time = time(null),
+        .check_time = 0,
+        .gave_notice = 0,
+        .orphan = 0,
+        .count = 1,
+        .changed = 0,
+        .backup = 1,
+        ._pad1 = 0,
+        .undo = null,
         .marks = [_]?*P{null} ** 11,
         .o = undefined,
-        .oldcur = null, .oldtop = null, .err = null, .current_dir = null,
-        .shell_flag = 0, .rdonly = 0, .internal = 1, .scratch = 0,
-        .er = -3, .pid = 0, .out = -1, .vt = null, .raw = 0,
-        ._pad2 = 0, .db = null, .parseone = null,
+        .oldcur = null,
+        .oldtop = null,
+        .err = null,
+        .current_dir = null,
+        .shell_flag = 0,
+        .rdonly = 0,
+        .internal = 1,
+        .scratch = 0,
+        .er = -3,
+        .pid = 0,
+        .out = -1,
+        .vt = null,
+        .raw = 0,
+        ._pad2 = 0,
+        .db = null,
+        .parseone = null,
     };
     // Match C bmkchn: copy prop options, otherwise start from pdefault.
     if (prop) |p| b.o = p.o else b.o = pdefault;
@@ -137,7 +170,7 @@ pub fn bmkchn(chn: *H, prop: ?*B, amnt: i64, nlines: i64) *B {
     b.eof.?.end = 1;
     vunlock_page(b.eof.?.ptr);
     {
-        const prev = @as(*Link, @alignCast(@ptrCast(chn.link.prev)));
+        const prev = @as(*Link, @ptrCast(@alignCast(chn.link.prev)));
         b.eof.?.hdr = link2H(prev);
     }
     b.eof.?.ptr = vlock(intern.vmem, b.eof.?.hdr.?.seg);
@@ -161,17 +194,24 @@ pub export fn bmk(prop: ?*B) *B {
 // brm / brmall
 // ═══════════════════════════════════════════════════════════════════════
 
+extern var errbuf: [*c]B;
+extern fn unlock_it(qpath: [*c]const u8) void;
+extern fn plain_file(b: ?*B) c_int;
+
 pub export fn brm(b: ?*B) void {
     const bp = b orelse return;
     if (bp.count == 0) return;
     bp.count -= 1;
     if (bp.count > 0) return;
     if (bp.changed != 0) abrerr(bp.name);
+    if (bp.locked != 0 and bp.ignored_lock == 0 and plain_file(bp) != 0)
+        unlock_it(@ptrCast(bp.name));
+    if (@intFromPtr(bp) == @intFromPtr(errbuf)) errbuf = null;
     if (bp.undo) |u| undorm(u);
     if (bp.eof) |eof| {
         hfreechn(eof.hdr.?);
         while (!qempty_(Plink(bp.bof.?))) {
-            prm(link2P(@alignCast(@ptrCast(bp.bof.?.link.next))));
+            prm(link2P(@ptrCast(@alignCast(bp.bof.?.link.next))));
         }
         prm(bp.bof.?);
     }
@@ -184,7 +224,7 @@ pub export fn brm(b: ?*B) void {
 pub export fn brmall() void {
     _ = intern.ensureBufs();
     while (!qempty_(Blink(&intern.bufs))) {
-        brm(link2B(@alignCast(@ptrCast(intern.bufs.link.next))));
+        brm(link2B(@ptrCast(@alignCast(intern.bufs.link.next))));
     }
 }
 
@@ -194,8 +234,8 @@ pub export fn brmall() void {
 
 pub export fn boffline(b: ?*B) ?*B {
     const bp = b.?;
-    var p = link2P(@alignCast(@ptrCast(bp.bof.?.link.next)));
-    while (!ptrEq(p, bp.bof.?)) : (p = link2P(@alignCast(@ptrCast(p.link.next)))) {
+    var p = link2P(@ptrCast(@alignCast(bp.bof.?.link.next)));
+    while (!ptrEq(p, bp.bof.?)) : (p = link2P(@ptrCast(@alignCast(p.link.next)))) {
         _ = poffline_(p);
     }
     return bp;
@@ -203,8 +243,8 @@ pub export fn boffline(b: ?*B) ?*B {
 
 pub export fn bonline(b: ?*B) ?*B {
     const bp = b.?;
-    var p = link2P(@alignCast(@ptrCast(bp.bof.?.link.next)));
-    while (!ptrEq(p, bp.bof.?)) : (p = link2P(@alignCast(@ptrCast(p.link.next)))) {
+    var p = link2P(@ptrCast(@alignCast(bp.bof.?.link.next)));
+    while (!ptrEq(p, bp.bof.?)) : (p = link2P(@ptrCast(@alignCast(p.link.next)))) {
         _ = ponline_(p);
     }
     return bp;
@@ -218,6 +258,14 @@ pub export fn breplace(b: ?*B, n: ?*B) void {
     const bp = b.?;
     const np = n.?;
     abrerr(bp.name);
+    touchContentGeneration();
+
+    if (bp.locked != 0 and bp.ignored_lock == 0 and plain_file(bp) != 0) {
+        unlock_it(@ptrCast(bp.name));
+        bp.locked = 0;
+    }
+
+    if (@intFromPtr(bp) == @intFromPtr(errbuf)) errbuf = null;
 
     if (bp.undo) |u| {
         undorm(u);
@@ -225,8 +273,8 @@ pub export fn breplace(b: ?*B, n: ?*B) void {
     }
 
     // Remove all vfile references on b's pointers.
-    var p = link2P(@alignCast(@ptrCast(bp.eof.?.link.next)));
-    while (!ptrEq(p, bp.eof.?)) : (p = link2P(@alignCast(@ptrCast(p.link.next)))) {
+    var p = link2P(@ptrCast(@alignCast(bp.eof.?.link.next)));
+    while (!ptrEq(p, bp.eof.?)) : (p = link2P(@ptrCast(@alignCast(p.link.next)))) {
         if (p.ptr) |pt| vunlock_page(pt);
     }
     if (bp.eof.?.ptr) |pt| vunlock_page(pt);
@@ -266,8 +314,8 @@ pub export fn breplace(b: ?*B, n: ?*B) void {
     bp.eof.?.end = 1;
 
     // Reset other pointers in b
-    p = link2P(@alignCast(@ptrCast(bp.eof.?.link.next)));
-    while (!ptrEq(p, bp.eof.?)) : (p = link2P(@alignCast(@ptrCast(p.link.next)))) {
+    p = link2P(@ptrCast(@alignCast(bp.eof.?.link.next)));
+    while (!ptrEq(p, bp.eof.?)) : (p = link2P(@ptrCast(@alignCast(p.link.next)))) {
         if (!ptrEq(p, bp.bof.?)) {
             const goal_line = p.line;
             const goal_col = p.xcol;
@@ -285,9 +333,9 @@ pub export fn breplace(b: ?*B, n: ?*B) void {
 
     // Delete pointers from n (except bof/eof whose locks transferred)
     {
-        var pp = link2P(@alignCast(@ptrCast(np.eof.?.link.next)));
+        var pp = link2P(@ptrCast(@alignCast(np.eof.?.link.next)));
         while (!ptrEq(pp, np.eof.?)) {
-            const next = link2P(@alignCast(@ptrCast(pp.link.next)));
+            const next = link2P(@ptrCast(@alignCast(pp.link.next)));
             if (!ptrEq(pp, np.bof.?)) prm(pp);
             pp = next;
         }
@@ -350,9 +398,7 @@ pub export fn bcpy(from: ?*P, to: ?*P) ?*B {
             lptr = vlock(intern.vmem, l.seg);
             l.nlines = q.hdr.?.nlines;
             _ = mmove(lptr, q.ptr, @as(isize, @intCast(q.hdr.?.hole)));
-            _ = mmove(@ptrFromInt(@intFromPtr(lptr) + @as(usize, @intCast(q.hdr.?.hole))),
-                      @ptrFromInt(@intFromPtr(q.ptr) + @as(usize, @intCast(q.hdr.?.ehole))),
-                      @as(isize, @intCast(SEGSIZ - q.hdr.?.ehole)));
+            _ = mmove(@ptrFromInt(@intFromPtr(lptr) + @as(usize, @intCast(q.hdr.?.hole))), @ptrFromInt(@intFromPtr(q.ptr) + @as(usize, @intCast(q.hdr.?.ehole))), @as(isize, @intCast(SEGSIZ - q.hdr.?.ehole)));
             l.hole = gsize_(q.hdr.?);
             vchanged_page(lptr);
             vunlock_page(lptr);
@@ -372,7 +418,7 @@ pub export fn bcpy(from: ?*P, to: ?*P) ?*B {
         }
     }
 
-    const result = link2H(@alignCast(@ptrCast(anchor.link.next)));
+    const result = link2H(@ptrCast(@alignCast(anchor.link.next)));
     deque_(Hlink(&anchor));
     prm(q);
     return bmkchn(result, f.b, t.byte - f.byte, t.line - f.line);
@@ -446,8 +492,8 @@ pub fn bcut_(from: *P, to: *P) ?*B {
         from.ofst = 0;
 
         if (!ptrEq(@as(?*anyopaque, @ptrCast(a.?.link.next)), @as(?*anyopaque, @ptrCast(to.hdr)))) {
-            const snip_first = @as(*Link, @alignCast(@ptrCast(a.?.link.next)));
-            const snip_last = @as(*Link, @alignCast(@ptrCast(to.hdr.?.link.prev)));
+            const snip_first = @as(*Link, @ptrCast(@alignCast(a.?.link.next)));
+            const snip_last = @as(*Link, @ptrCast(@alignCast(to.hdr.?.link.prev)));
             snip_(snip_first, snip_last);
             if (h == null) {
                 h = link2H(snip_first);
@@ -464,7 +510,7 @@ pub fn bcut_(from: *P, to: *P) ?*B {
 
     // If to is empty, it was at EOF — delete it
     if (gsize_(to.hdr.?) == 0 and from.byte != 0) {
-        const ph = @as(*H, @alignCast(@ptrCast(from.hdr.?.link.prev)));
+        const ph = @as(*H, @ptrCast(@alignCast(from.hdr.?.link.prev)));
         hfree(from.hdr.?);
         vunlock_page(from.ptr);
         from.hdr = ph;
@@ -487,15 +533,15 @@ pub fn bcut_(from: *P, to: *P) ?*B {
     delerr(from.b.?.name, from.line, nlines);
 
     // Fix pointers
-    var pp = link2P(@alignCast(@ptrCast(from.link.next)));
-    while (!ptrEq(pp, from)) : (pp = link2P(@alignCast(@ptrCast(pp.link.next)))) {
+    var pp = link2P(@ptrCast(@alignCast(from.link.next)));
+    while (!ptrEq(pp, from)) : (pp = link2P(@ptrCast(@alignCast(pp.link.next)))) {
         if (pp.line == from.line and (pp.byte > from.byte or (pp.end != 0 and pp.byte == from.byte))) {
             pp.valcol = 0;
             pp.valattr = 0;
         }
     }
-    pp = link2P(@alignCast(@ptrCast(from.link.next)));
-    while (!ptrEq(pp, from)) : (pp = link2P(@alignCast(@ptrCast(pp.link.next)))) {
+    pp = link2P(@ptrCast(@alignCast(from.link.next)));
+    while (!ptrEq(pp, from)) : (pp = link2P(@ptrCast(@alignCast(pp.link.next)))) {
         if (pp.byte >= from.byte) {
             if (pp.byte <= from.byte + amnt) {
                 if (pp.ptr != null) {
@@ -517,6 +563,7 @@ pub fn bcut_(from: *P, to: *P) ?*B {
 
 pub fn bdel_(from: *P, to: *P) void {
     if (to.byte - from.byte > 0) {
+        touchContentGeneration();
         const b = bcut_(from, to);
         if (b) |bp| {
             const u = from.b.?.undo;
@@ -530,7 +577,9 @@ pub fn bdel_(from: *P, to: *P) void {
     }
 }
 
-pub export fn bdel(from: ?*P, to: ?*P) void { bdel_(from.?, to.?); }
+pub export fn bdel(from: ?*P, to: ?*P) void {
+    bdel_(from.?, to.?);
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // pcoalesce — merge small adjacent segments
@@ -541,7 +590,7 @@ pub fn pcoalesce_(p: *P) void {
     if (!ptrEq(p.hdr, p.b.?.eof.?.hdr) and
         @as(i32, gsize_(p.hdr.?)) + @as(i32, gsize_(intern.H_of(p.hdr.?.link.next))) <= @as(i32, SEGSIZ) - @divTrunc(@as(i32, SEGSIZ), 4))
     {
-        const hdr = @as(*H, @alignCast(@ptrCast(p.hdr.?.link.next)));
+        const hdr = @as(*H, @ptrCast(@alignCast(p.hdr.?.link.next)));
         const ptr = vlock(intern.vmem, hdr.seg);
         const osize = gsize_(p.hdr.?);
         const size = gsize_(hdr);
@@ -550,8 +599,8 @@ pub fn pcoalesce_(p: *P) void {
         p.hdr.?.nlines += hdr.nlines;
         vunlock_page(ptr);
         hfree(hdr);
-        var q = link2P(@alignCast(@ptrCast(p.link.next)));
-        while (!ptrEq(q, p)) : (q = link2P(@alignCast(@ptrCast(q.link.next)))) {
+        var q = link2P(@ptrCast(@alignCast(p.link.next)));
+        while (!ptrEq(q, p)) : (q = link2P(@ptrCast(@alignCast(q.link.next)))) {
             if (q.hdr == hdr) {
                 q.hdr = p.hdr;
                 if (q.ptr) |qp| {
@@ -566,7 +615,7 @@ pub fn pcoalesce_(p: *P) void {
     if (!ptrEq(p.hdr, p.b.?.bof.?.hdr) and
         @as(i32, gsize_(intern.H_of(p.hdr.?.link.prev))) + @as(i32, gsize_(p.hdr.?)) <= @as(i32, SEGSIZ) - @divTrunc(@as(i32, SEGSIZ), 4))
     {
-        const hdr = @as(*H, @alignCast(@ptrCast(p.hdr.?.link.prev)));
+        const hdr = @as(*H, @ptrCast(@alignCast(p.hdr.?.link.prev)));
         const ptr = vlock(intern.vmem, hdr.seg);
         const size = gsize_(hdr);
         gstgap(hdr, ptr, size);
@@ -575,8 +624,8 @@ pub fn pcoalesce_(p: *P) void {
         vunlock_page(ptr);
         hfree(hdr);
         p.ofst += size;
-        var q = link2P(@alignCast(@ptrCast(p.link.next)));
-        while (!ptrEq(q, p)) : (q = link2P(@alignCast(@ptrCast(q.link.next)))) {
+        var q = link2P(@ptrCast(@alignCast(p.link.next)));
+        while (!ptrEq(q, p)) : (q = link2P(@ptrCast(@alignCast(q.link.next)))) {
             if (q.hdr == hdr) {
                 q.hdr = p.hdr;
                 if (q.ptr) |qp| {
@@ -590,7 +639,9 @@ pub fn pcoalesce_(p: *P) void {
     }
 }
 
-pub export fn pcoalesce(p: ?*P) void { pcoalesce_(p.?); }
+pub export fn pcoalesce(p: ?*P) void {
+    pcoalesce_(p.?);
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // bsplit / bldchn / inschn / fixupins — insert machinery
@@ -609,8 +660,8 @@ fn bsplit_(p: *P) void {
         vchanged_page(ptr);
         enquef_(Hlink(p.hdr.?), Hlink(hdr));
         vunlock_page(p.ptr);
-        var pp = link2P(@alignCast(@ptrCast(p.link.next)));
-        while (!ptrEq(pp, p)) : (pp = link2P(@alignCast(@ptrCast(pp.link.next)))) {
+        var pp = link2P(@ptrCast(@alignCast(p.link.next)));
+        while (!ptrEq(pp, p)) : (pp = link2P(@ptrCast(@alignCast(pp.link.next)))) {
             if (pp.hdr == p.hdr and pp.ofst >= p.ofst) {
                 pp.hdr = hdr;
                 if (pp.ptr) |qpp| {
@@ -646,7 +697,7 @@ fn bldchn_(blk: ?*const anyopaque, size: isize) ?*H {
         bytes += @as(usize, @intCast(amnt));
         remain -= amnt;
     }
-    const result = link2H(@alignCast(@ptrCast(anchor.link.next)));
+    const result = link2H(@ptrCast(@alignCast(anchor.link.next)));
     deque_(Hlink(&anchor));
     return result;
 }
@@ -664,13 +715,13 @@ fn inschn_(p: *P, a: *H) void {
             p.ptr = vlock(intern.vmem, a.seg);
             _ = pset_(p.b.?.bof.?, p);
         }
-        p.b.?.eof.?.hdr = @as(*H, @alignCast(@ptrCast(a.link.prev)));
+        p.b.?.eof.?.hdr = @as(*H, @ptrCast(@alignCast(a.link.prev)));
         vunlock_page(p.b.?.eof.?.ptr);
         p.b.?.eof.?.ptr = vlock(intern.vmem, p.b.?.eof.?.hdr.?.seg);
         p.b.?.eof.?.ofst = gsize_(p.b.?.eof.?.hdr.?);
     } else if (piseof(p) != 0) {
         // At EOF: append chain a
-        p.b.?.eof.?.hdr = @as(*H, @alignCast(@ptrCast(a.link.prev)));
+        p.b.?.eof.?.hdr = @as(*H, @ptrCast(@alignCast(a.link.prev)));
         _ = spliceb_f_(Hlink(p.b.?.bof.?.hdr.?), Hlink(a));
         vunlock_page(p.b.?.eof.?.ptr);
         p.b.?.eof.?.ptr = vlock(intern.vmem, p.b.?.eof.?.hdr.?.seg);
@@ -703,15 +754,15 @@ fn fixupins_(p: *P, amnt: i64, nlines: i64, hdr: ?*H, hdramnt: i16) void {
     if (p.b.?.db) |d| lattr_ins(d, p.line, nlines);
     inserr(p.b.?.name, p.line, nlines, if (pisbol(p) != 0) 1 else 0);
 
-    var pp = link2P(@alignCast(@ptrCast(p.link.next)));
-    while (!ptrEq(pp, p)) : (pp = link2P(@alignCast(@ptrCast(pp.link.next)))) {
+    var pp = link2P(@ptrCast(@alignCast(p.link.next)));
+    while (!ptrEq(pp, p)) : (pp = link2P(@ptrCast(@alignCast(pp.link.next)))) {
         if (pp.line == p.line and (pp.byte > p.byte or (pp.end != 0 and pp.byte == p.byte))) {
             pp.valcol = 0;
             pp.valattr = 0;
         }
     }
-    pp = link2P(@alignCast(@ptrCast(p.link.next)));
-    while (!ptrEq(pp, p)) : (pp = link2P(@alignCast(@ptrCast(pp.link.next)))) {
+    pp = link2P(@ptrCast(@alignCast(p.link.next)));
+    while (!ptrEq(pp, p)) : (pp = link2P(@ptrCast(@alignCast(pp.link.next)))) {
         if (pp.byte == p.byte and pp.end == 0) {
             if (pp.ptr != null) {
                 _ = pset_(pp, p);
@@ -751,14 +802,13 @@ pub export fn binsb(p: ?*P, b: ?*B) ?*P {
     return pp;
 }
 
-
 pub export fn binsm(p: ?*P, blk: ?*const anyopaque, amnt: isize) ?*P {
     return @ptrCast(binsm_(p.?, blk, amnt));
 }
 
-
 pub fn binsm_(p: *P, blk: ?*const anyopaque, amnt: isize) ?*P {
     if (amnt == 0) return p;
+    touchContentGeneration();
     const q = pdup_(p, "binsm");
     var h: ?*H = null;
     var hdramnt: i16 = 0;
@@ -884,35 +934,35 @@ extern fn strlen(s: [*c]const u8) usize;
 pub export fn bafter(b: ?*B) ?*B {
     _ = intern.ensureBufs();
     const first = b.?;
-    var cur = link2B(@alignCast(@ptrCast(first.link.next)));
+    var cur = link2B(@ptrCast(@alignCast(first.link.next)));
     while (!ptrEq(cur, first) and (cur.internal != 0 or cur.scratch != 0 or ptrEq(cur, &intern.bufs))) {
-        cur = link2B(@alignCast(@ptrCast(cur.link.next)));
+        cur = link2B(@ptrCast(@alignCast(cur.link.next)));
     }
     return if (ptrEq(cur, first)) null else cur;
 }
 
 pub export fn bnext() ?*B {
     _ = intern.ensureBufs();
-    var b = link2B(@alignCast(@ptrCast(intern.bufs.link.prev)));
+    var b = link2B(@ptrCast(@alignCast(intern.bufs.link.prev)));
     while (!ptrEq(b, &intern.bufs) and b.internal != 0) {
-        b = link2B(@alignCast(@ptrCast(b.link.prev)));
+        b = link2B(@ptrCast(@alignCast(b.link.prev)));
     }
     return if (ptrEq(b, &intern.bufs)) null else b;
 }
 
 pub export fn bprev() ?*B {
     _ = intern.ensureBufs();
-    var b = link2B(@alignCast(@ptrCast(intern.bufs.link.next)));
+    var b = link2B(@ptrCast(@alignCast(intern.bufs.link.next)));
     while (!ptrEq(b, &intern.bufs) and b.internal != 0) {
-        b = link2B(@alignCast(@ptrCast(b.link.next)));
+        b = link2B(@ptrCast(@alignCast(b.link.next)));
     }
     return if (ptrEq(b, &intern.bufs)) null else b;
 }
 
 pub export fn borphan() ?*B {
     _ = intern.ensureBufs();
-    var b = link2B(@alignCast(@ptrCast(intern.bufs.link.next)));
-    while (!ptrEq(b, &intern.bufs)) : (b = link2B(@alignCast(@ptrCast(b.link.next)))) {
+    var b = link2B(@ptrCast(@alignCast(intern.bufs.link.next)));
+    while (!ptrEq(b, &intern.bufs)) : (b = link2B(@ptrCast(@alignCast(b.link.next)))) {
         if (b.orphan != 0 and (b.scratch == 0 or b.pid != 0)) {
             b.orphan = 0;
             return b;
@@ -928,8 +978,8 @@ pub export fn borphan() ?*B {
 
 pub export fn set_file_pos_orphaned() void {
     _ = intern.ensureBufs();
-    var b = link2B(@alignCast(@ptrCast(intern.bufs.link.next)));
-    while (!ptrEq(b, &intern.bufs)) : (b = link2B(@alignCast(@ptrCast(b.link.next)))) {
+    var b = link2B(@ptrCast(@alignCast(intern.bufs.link.next)));
+    while (!ptrEq(b, &intern.bufs)) : (b = link2B(@ptrCast(@alignCast(b.link.next)))) {
         if (b.orphan != 0 and b.oldcur != null) {
             set_file_pos(@ptrCast(b.name), b.oldcur.?.line);
         }

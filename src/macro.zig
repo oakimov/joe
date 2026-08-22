@@ -44,8 +44,7 @@ pub const struct_window = extern struct {
     object: ?*anyopaque = null,
     _pad1: [40]u8 = std.mem.zeroes([40]u8),
 };
-pub const struct_p = opaque {
-};
+pub const struct_p = opaque {};
 pub const P = struct_p;
 pub const struct_b = opaque {};
 pub const B = struct_b;
@@ -372,85 +371,53 @@ pub export fn mparse(arg_m: [*c]MACRO, arg_buf: [*c]const u8, arg_sta: [*c]ptrdi
     }
     return undefined;
 }
-pub export fn unescape(arg_ptr: [*c]u8, arg_c: c_int) [*c]u8 {
+/// Bytes of space left between write cursor and buffer end.
+inline fn room_left(end: [*c]u8, ptr: [*c]u8) isize {
+    return @as(isize, @bitCast(@intFromPtr(end) -% @intFromPtr(ptr)));
+}
+pub fn unescape_b(arg_ptr: [*c]u8, end: [*c]u8, arg_c: c_int) [*c]u8 {
     var ptr = arg_ptr;
     _ = &ptr;
     var c = arg_c;
     _ = &c;
     if (c == @as(c_int, '"')) {
-        (blk: {
-            const ref = &ptr;
-            const tmp = ref.*;
-            ref.* += 1;
-            break :blk tmp;
-        }).* = '\\';
-        (blk: {
-            const ref = &ptr;
-            const tmp = ref.*;
-            ref.* += 1;
-            break :blk tmp;
-        }).* = '"';
+        if (room_left(end, ptr) < 2) return ptr;
+        ptr[0] = '\\';
+        ptr[1] = '"';
+        ptr += 2;
     } else if (c == @as(c_int, '\\')) {
-        (blk: {
-            const ref = &ptr;
-            const tmp = ref.*;
-            ref.* += 1;
-            break :blk tmp;
-        }).* = '\\';
-        (blk: {
-            const ref = &ptr;
-            const tmp = ref.*;
-            ref.* += 1;
-            break :blk tmp;
-        }).* = '\\';
+        if (room_left(end, ptr) < 2) return ptr;
+        ptr[0] = '\\';
+        ptr[1] = '\\';
+        ptr += 2;
     } else if (c == @as(c_int, '\'')) {
-        (blk: {
-            const ref = &ptr;
-            const tmp = ref.*;
-            ref.* += 1;
-            break :blk tmp;
-        }).* = '\\';
-        (blk: {
-            const ref = &ptr;
-            const tmp = ref.*;
-            ref.* += 1;
-            break :blk tmp;
-        }).* = '\'';
+        if (room_left(end, ptr) < 2) return ptr;
+        ptr[0] = '\\';
+        ptr[1] = '\'';
+        ptr += 2;
     } else if ((c < @as(c_int, 32)) or (c == @as(c_int, 127))) {
-        (blk: {
-            const ref = &ptr;
-            const tmp = ref.*;
-            ref.* += 1;
-            break :blk tmp;
-        }).* = '\\';
-        (blk: {
-            const ref = &ptr;
-            const tmp = ref.*;
-            ref.* += 1;
-            break :blk tmp;
-        }).* = 'x';
-        (blk: {
-            const ref = &ptr;
-            const tmp = ref.*;
-            ref.* += 1;
-            break :blk tmp;
-        }).* = "0123456789ABCDEF"[@bitCast(@as(isize, @intCast(@as(c_int, 15) & (c >> @intCast(@as(c_int, 4))))))];
-        (blk: {
-            const ref = &ptr;
-            const tmp = ref.*;
-            ref.* += 1;
-            break :blk tmp;
-        }).* = "0123456789ABCDEF"[@bitCast(@as(isize, @intCast(@as(c_int, 15) & c)))];
+        if (room_left(end, ptr) < 4) return ptr;
+        ptr[0] = '\\';
+        ptr[1] = 'x';
+        ptr[2] = "0123456789ABCDEF"[@bitCast(@as(isize, @intCast(@as(c_int, 15) & (c >> @intCast(@as(c_int, 4))))))];
+        ptr[3] = "0123456789ABCDEF"[@bitCast(@as(isize, @intCast(@as(c_int, 15) & c)))];
+        ptr += 4;
     } else {
-        ptr += @as(usize, @bitCast(@as(isize, @intCast(utf8_encode(ptr, c)))));
+        if (room_left(end, ptr) < 4) return ptr; // max UTF-8 width; check BEFORE encode
+        const n: isize = @intCast(utf8_encode(ptr, c));
+        if (n > 0) ptr += @as(usize, @intCast(n));
     }
     return ptr;
 }
-pub fn domtext(arg_m: [*c]MACRO, arg_ptr: [*c]u8, arg_first: [*c]c_int, arg_instr: [*c]c_int) callconv(.c) [*c]u8 {
+pub export fn unescape(arg_ptr: [*c]u8, arg_c: c_int) [*c]u8 {
+    return unescape_b(arg_ptr, arg_ptr + 1024, arg_c);
+}
+pub fn domtext_b(arg_m: [*c]MACRO, arg_ptr: [*c]u8, arg_end: [*c]u8, arg_first: [*c]c_int, arg_instr: [*c]c_int) [*c]u8 {
     var m = arg_m;
     _ = &m;
     var ptr = arg_ptr;
     _ = &ptr;
+    const end = arg_end;
     var first = arg_first;
     _ = &first;
     var instr = arg_instr;
@@ -462,72 +429,50 @@ pub fn domtext(arg_m: [*c]MACRO, arg_ptr: [*c]u8, arg_first: [*c]c_int, arg_inst
         {
             x = 0;
             while (x != m.*.n) : (x += 1) {
-                ptr = domtext(m.*.steps[@bitCast(@as(isize, @intCast(x)))], ptr, first, instr);
+                ptr = domtext_b(m.*.steps[@bitCast(@as(isize, @intCast(x)))], ptr, end, first, instr);
+                if (room_left(end, ptr) <= 0) return ptr;
             }
         }
     } else {
         if ((instr.* != 0) and (strcmp(m.*.cmd.*.name, "type") != 0)) {
-            (blk: {
-                const ref = &ptr;
-                const tmp = ref.*;
-                ref.* += 1;
-                break :blk tmp;
-            }).* = '"';
+            if (room_left(end, ptr) < 1) return ptr;
+            ptr[0] = '"';
+            ptr += 1;
             instr.* = 0;
         }
         if (first.* != 0) {
             first.* = 0;
         } else if (!(instr.* != 0)) {
-            (blk: {
-                const ref = &ptr;
-                const tmp = ref.*;
-                ref.* += 1;
-                break :blk tmp;
-            }).* = ',';
+            if (room_left(end, ptr) < 1) return ptr;
+            ptr[0] = ',';
+            ptr += 1;
         }
         if (!(strcmp(m.*.cmd.*.name, "type") != 0)) {
             if (!(instr.* != 0)) {
-                (blk: {
-                    const ref = &ptr;
-                    const tmp = ref.*;
-                    ref.* += 1;
-                    break :blk tmp;
-                }).* = '"';
+                if (room_left(end, ptr) < 1) return ptr;
+                ptr[0] = '"';
+                ptr += 1;
                 instr.* = 1;
             }
-            ptr = unescape(ptr, m.*.k);
+            ptr = unescape_b(ptr, end, m.*.k);
         } else {
             {
                 x = 0;
                 while (@as(c_int, m.*.cmd.*.name[@bitCast(@as(isize, @intCast(x)))]) != 0) : (x += 1) {
-                    (blk: {
-                        const ref = &ptr;
-                        const tmp = ref.*;
-                        ref.* += 1;
-                        break :blk tmp;
-                    }).* = m.*.cmd.*.name[@bitCast(@as(isize, @intCast(x)))];
+                    if (room_left(end, ptr) < 2) return ptr; // keep room for the NUL
+                    ptr[0] = m.*.cmd.*.name[@bitCast(@as(isize, @intCast(x)))];
+                    ptr += 1;
                 }
             }
             if ((((!(strcmp(m.*.cmd.*.name, "play") != 0) or !(strcmp(m.*.cmd.*.name, "gomark") != 0)) or !(strcmp(m.*.cmd.*.name, "setmark") != 0)) or !(strcmp(m.*.cmd.*.name, "record") != 0)) or !(strcmp(m.*.cmd.*.name, "uarg") != 0)) {
-                (blk: {
-                    const ref = &ptr;
-                    const tmp = ref.*;
-                    ref.* += 1;
-                    break :blk tmp;
-                }).* = ',';
-                (blk: {
-                    const ref = &ptr;
-                    const tmp = ref.*;
-                    ref.* += 1;
-                    break :blk tmp;
-                }).* = '"';
-                ptr = unescape(ptr, m.*.k);
-                (blk: {
-                    const ref = &ptr;
-                    const tmp = ref.*;
-                    ref.* += 1;
-                    break :blk tmp;
-                }).* = '"';
+                if (room_left(end, ptr) < 3) return ptr;
+                ptr[0] = ',';
+                ptr[1] = '"';
+                ptr += 2;
+                ptr = unescape_b(ptr, end, m.*.k);
+                if (room_left(end, ptr) < 1) return ptr;
+                ptr[0] = '"';
+                ptr += 1;
             }
         }
     }
@@ -542,15 +487,13 @@ pub export fn mtext(arg_s: [*c]u8, arg_m: [*c]MACRO) [*c]u8 {
     _ = &first;
     var instr: c_int = 0;
     _ = &instr;
-    var e: [*c]u8 = domtext(m, s, &first, &instr);
+    // Reserve one byte at the end for the closing quote / NUL.
+    const limit: [*c]u8 = s + 1023;
+    var e: [*c]u8 = domtext_b(m, s, limit, &first, &instr);
     _ = &e;
-    if (instr != 0) {
-        (blk: {
-            const ref = &e;
-            const tmp = ref.*;
-            ref.* += 1;
-            break :blk tmp;
-        }).* = '"';
+    if (instr != 0 and room_left(limit, e) >= 1) {
+        e[0] = '"';
+        e += 1;
     }
     e.* = 0;
     return s;
@@ -1260,7 +1203,6 @@ pub export fn uuarg(arg_w: [*c]W, arg_c: c_int) c_int {
     negarg = 0;
     if (((c >= @as(c_int, '0')) and (c <= @as(c_int, '9'))) or (c == @as(c_int, '-'))) return douarg(w, c, null, null) else if (mkqwna(w, my_gettext("Repeat"), slen(my_gettext("Repeat")), douarg, null, null, null) != null) return 0 else return -@as(c_int, 1);
 }
-
 
 comptime {
     if (@sizeOf(struct_macro) != 48) @compileError("MACRO size mismatch");

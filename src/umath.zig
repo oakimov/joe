@@ -5,6 +5,10 @@
 const std = @import("std");
 const ptrdiff_t = c_long;
 
+// stdbuf must match the real definition (gapbuffer/intern.zig); size comes from
+// gap_types.stdsiz so the extern view can never silently disagree again.
+const gap_types = @import("gapbuffer/types.zig");
+
 const TYPETW: c_int = 0x0100;
 const TYPEPW: c_int = 0x0200;
 const M_PI: f64 = 3.14159265358979323846;
@@ -398,7 +402,7 @@ pub extern var dostaupd: c_int;
 pub extern var leave: c_int;
 pub extern var maint: [*c]Screen;
 pub extern var errbuf: [*c]B;
-pub extern var stdbuf: [8192]u8;
+pub extern var stdbuf: [gap_types.stdsiz]u8;
 pub extern var locale_map: [*c]struct_charmap;
 pub extern var recmac: [*c]struct_recmac;
 pub extern var markb: [*c]P;

@@ -28,11 +28,13 @@ entity/list-marker conceal coverage (Phase 2), the native `cursor-dark` color
 scheme (Phase 3), a flanking-delimiter-rule fix for emphasis (Phase 4),
 click-to-open links via OSC 8 and the mouse (Phase 5), and autolink styling,
 table header/border colors, and setext headings (`Text\n===`/`Text\n---`)
-(Phase 6). User-facing
+(Phase 6). Landed after the Phase 7 gate: image chrome and nested per-language
+syntax highlighting inside fenced code blocks (`plans/future-roadmap.md`
+Features 2.5/2.6). User-facing
 docs: `docs/man.md` "Markdown viewmode" section (deviations from OpenCode,
 known limitations). Plan/status: `plans/markdown-wysiwyg-feasibility.md` +
 `plans/TODO.md` (OpenCode-style rich viewmode; self-contained Zig — no
-vendored markdown libs).
+vendored markdown libs) + `plans/future-roadmap.md` (post-Phase-7 work).
 
 ## Current state (read this first)
 
@@ -85,7 +87,7 @@ sudo zig build -Doptimize=ReleaseFast --prefix /usr/local
 ```sh
 cp -f zig-out/bin/joe joe/joe
 ./runtests
-# Expect: Ran 222 tests ... OK
+# Expect: Ran 237 tests ... OK
 ```
 
 Do **not** use `pytest`. Root `./runtests` (or `cd tests && python3 -m unittest …` per project habit) only.
@@ -150,7 +152,7 @@ for-loop `switch` in `while (true)` such that Zig `continue` restarts the while
    (undersized fakes smash stacks — see Path A `ufile` history).
 5. **translate-c footguns:** `sc("...")` lengths, `while(true)+continue`, fake libc
    types, `return undefined`. Prefer hand-fixing control flow after translate-c.
-6. **Always soak** (`./runtests` → 222/222) before “done.”
+6. **Always soak** (`./runtests` → 237/237) before “done.”
 7. **Commits:** focused messages; update `plans/zig-rewrite-architecture.md` when
    finishing a phase-sized chunk.
 8. **Parallelism:** independent modules/tests can use subagents; keep one soak gate
@@ -158,7 +160,7 @@ for-loop `switch` in `while (true)` such that Zig `continue` restarts the while
 
 ## Post-change review checklist
 
-- Soak **222/222** (and relevant `zig build *-test` if you touched those trees)
+- Soak **237/237** (and relevant `zig build *-test` if you touched those trees)
 - No new unbounded `[*c]` writes; check help/status/paint paths manually if UI chrome
 - SELinux/GPM remain no-ops unless Linux + `-D` flags
 - Do not reintroduce linked `joe/*.c`
@@ -175,8 +177,13 @@ schemes were removed; `-colors default` still resolves via an embedded builtin f
 `src/render/md_event.zig` holds the CommonMark flanking-rule classifier and link-safety/
 reference-resolution helpers, kept there specifically so they're covered by `zig build
 render-test` (`src/bw_lgen.zig` itself isn't part of that target). Setext headings
-(`Text\n===`/`Text\n---`) get heading styling too (`docs/man.md` "Markdown viewmode" has
-the full user-facing list of remaining known limitations).
+(`Text\n===`/`Text\n---`) get heading styling too, and images get a `▣` chrome glyph
+(`plans/future-roadmap.md` Feature 2.6) so a concealed image reads differently from a
+concealed plain link. Fenced code blocks with a recognized language tag (`applyFenceSyntaxHighlight`,
+`src/bw_lgen.zig`) get real per-language syntax highlighting via `load_syntax` +
+a second `parse` pass over `attr_buf`, single-line state only (Feature 2.5 —
+`docs/man.md` "Markdown viewmode" has the full user-facing list of remaining
+known limitations).
 
 ## Classic Autoconf (reference only)
 

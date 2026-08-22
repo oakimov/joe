@@ -36,7 +36,7 @@ pub fn pnext_(p: *P) c_int {
         p.ofst = gsize_(p.hdr.?);
         return 0;
     }
-    p.hdr = @as(*H, @alignCast(@ptrCast(p.hdr.?.link.next)));
+    p.hdr = @as(*H, @ptrCast(@alignCast(p.hdr.?.link.next)));
     p.ofst = 0;
     vunlock_page(p.ptr);
     p.ptr = vlock(intern.vmem, p.hdr.?.seg);
@@ -48,7 +48,7 @@ pub fn pprev_(p: *P) c_int {
         p.ofst = 0;
         return 0;
     }
-    p.hdr = @as(*H, @alignCast(@ptrCast(p.hdr.?.link.prev)));
+    p.hdr = @as(*H, @ptrCast(@alignCast(p.hdr.?.link.prev)));
     p.ofst = gsize_(p.hdr.?);
     vunlock_page(p.ptr);
     p.ptr = vlock(intern.vmem, p.hdr.?.seg);
@@ -152,9 +152,13 @@ pub fn pdup_(p: *P, tr: [*c]const u8) *P {
 // Exported pointer API
 // ═══════════════════════════════════════════════════════════════════════
 
-pub export fn pset(n: ?*P, p: ?*P) ?*P { return @ptrCast(pset_(n.?, p.?)); }
+pub export fn pset(n: ?*P, p: ?*P) ?*P {
+    return @ptrCast(pset_(n.?, p.?));
+}
 
-pub export fn pdup(p: ?*P, tr: [*c]const u8) ?*P { return @ptrCast(pdup_(p.?, tr)); }
+pub export fn pdup(p: ?*P, tr: [*c]const u8) ?*P {
+    return @ptrCast(pdup_(p.?, tr));
+}
 
 pub export fn pdupown(p: ?*P, owner: ?*?*P, tr: [*c]const u8) ?*P {
     const pp = p.?;
@@ -180,12 +184,24 @@ pub export fn prm(p: ?*P) void {
     pfree(pp);
 }
 
-pub export fn pnext(p: ?*P) c_int { return pnext_(p.?); }
-pub export fn pprev(p: ?*P) c_int { return pprev_(p.?); }
-pub export fn pgetb(p: ?*P) c_int { return pgetb_(p.?); }
-pub export fn prgetb(p: ?*P) c_int { return prgetb_(p.?); }
-pub export fn brc(p: ?*P) c_int { return brc_(p.?); }
-pub export fn brch(p: ?*P) c_int { return brch_(p.?); }
+pub export fn pnext(p: ?*P) c_int {
+    return pnext_(p.?);
+}
+pub export fn pprev(p: ?*P) c_int {
+    return pprev_(p.?);
+}
+pub export fn pgetb(p: ?*P) c_int {
+    return pgetb_(p.?);
+}
+pub export fn prgetb(p: ?*P) c_int {
+    return prgetb_(p.?);
+}
+pub export fn brc(p: ?*P) c_int {
+    return brc_(p.?);
+}
+pub export fn brch(p: ?*P) c_int {
+    return brch_(p.?);
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // pgetc — return current char and advance (UTF-8 / ANSI / CRLF aware)
@@ -317,7 +333,9 @@ pub fn pgetc_(p: *P) c_int {
     }
 }
 
-pub export fn pgetc(p: ?*P) c_int { return pgetc_(p.?); }
+pub export fn pgetc(p: ?*P) c_int {
+    return pgetc_(p.?);
+}
 
 pub fn prgetc_(p: *P) c_int {
     const o = p.b.?.o;
@@ -344,7 +362,9 @@ pub fn prgetc_(p: *P) c_int {
     return cc;
 }
 
-pub export fn prgetc(p: ?*P) c_int { return prgetc_(p.?); }
+pub export fn prgetc(p: ?*P) c_int {
+    return prgetc_(p.?);
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // poffline / ponline / boffline / bonline
@@ -363,8 +383,12 @@ pub fn ponline_(p: *P) *P {
     return p;
 }
 
-pub export fn poffline(p: ?*P) ?*P { return @ptrCast(poffline_(p.?)); }
-pub export fn ponline(p: ?*P) ?*P { return @ptrCast(ponline_(p.?)); }
+pub export fn poffline(p: ?*P) ?*P {
+    return @ptrCast(poffline_(p.?));
+}
+pub export fn ponline(p: ?*P) ?*P {
+    return @ptrCast(ponline_(p.?));
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // Position predicates
@@ -394,7 +418,9 @@ pub fn piseol_(p: *P) c_int {
     return 0;
 }
 
-pub export fn piseol(p: ?*P) c_int { return piseol_(p.?); }
+pub export fn piseol(p: ?*P) c_int {
+    return piseol_(p.?);
+}
 
 pub export fn pisbol(p: ?*P) c_int {
     const pp = p.?;
@@ -527,8 +553,12 @@ pub fn pbkwd_(p: *P, n: i64) ?*P {
     return p;
 }
 
-pub export fn pfwrd(p: ?*P, n: i64) ?*P { return @ptrCast(pfwrd_(p.?, n)); }
-pub export fn pbkwd(p: ?*P, n: i64) ?*P { return @ptrCast(pbkwd_(p.?, n)); }
+pub export fn pfwrd(p: ?*P, n: i64) ?*P {
+    return @ptrCast(pfwrd_(p.?, n));
+}
+pub export fn pbkwd(p: ?*P, n: i64) ?*P {
+    return @ptrCast(pbkwd_(p.?, n));
+}
 
 pub export fn pgoto(p: ?*P, loc: i64) ?*P {
     const pp = p.?;
@@ -549,8 +579,12 @@ pub export fn pfcol(p: ?*P) ?*P {
 // p_goto_* / pnextl / pprevl / pline
 // ═══════════════════════════════════════════════════════════════════════
 
-pub export fn p_goto_bof(p: ?*P) ?*P { return pset_(p.?, p.?.b.?.bof.?); }
-pub export fn p_goto_eof(p: ?*P) ?*P { return pset_(p.?, p.?.b.?.eof.?); }
+pub export fn p_goto_bof(p: ?*P) ?*P {
+    return pset_(p.?, p.?.b.?.bof.?);
+}
+pub export fn p_goto_eof(p: ?*P) ?*P {
+    return pset_(p.?, p.?.b.?.eof.?);
+}
 
 pub export fn p_goto_bol(p: ?*P) ?*P {
     const pp = p.?;
@@ -648,8 +682,12 @@ pub fn pprevl_(p: *P) ?*P {
     return p;
 }
 
-pub export fn pnextl(p: ?*P) ?*P { return @ptrCast(pnextl_(p.?)); }
-pub export fn pprevl(p: ?*P) ?*P { return @ptrCast(pprevl_(p.?)); }
+pub export fn pnextl(p: ?*P) ?*P {
+    return @ptrCast(pnextl_(p.?));
+}
+pub export fn pprevl(p: ?*P) ?*P {
+    return @ptrCast(pprevl_(p.?));
+}
 
 pub export fn pline(p: ?*P, line: i64) ?*P {
     const pp = p.?;
@@ -698,7 +736,9 @@ pub fn pcol_(p: *P, goalcol: i64) ?*P {
     return p;
 }
 
-pub export fn pcol(p: ?*P, goalcol: i64) ?*P { return pcol_(p.?, goalcol); }
+pub export fn pcol(p: ?*P, goalcol: i64) ?*P {
+    return pcol_(p.?, goalcol);
+}
 
 pub export fn pcolwse(p: ?*P, goalcol: i64) ?*P {
     const pp = p.?;
@@ -801,7 +841,7 @@ pub export fn brmem(p: ?*P, blk: ?*anyopaque, size: isize) ?*anyopaque {
     const q = pdup_(pp, "brmem");
     while (remain > 0) {
         const pt = vlock(intern.vmem, q.hdr.?.seg);
-        const available = @as(isize, @intCast(gsize_(q.hdr.?)));
+        const available = @as(isize, @intCast(gsize_(q.hdr.?) - q.ofst));
         const copy = @min(remain, available);
         if (copy <= 0) {
             vunlock_page(pt);

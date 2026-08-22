@@ -84,9 +84,9 @@ extern fn fileno(f: ?*anyopaque) c_int;
 extern fn fflush(f: ?*anyopaque) c_int;
 extern fn fprintf(f: ?*anyopaque, fmt: [*c]const u8, ...) c_int;
 extern fn fputs(s: [*c]const u8, f: ?*anyopaque) c_int;
-extern fn fstat(fd: c_int, buf: ?*anyopaque) c_int;
-extern fn stat(path: [*c]const u8, buf: ?*anyopaque) c_int;
-extern fn lstat(path: [*c]const u8, buf: ?*anyopaque) c_int;
+extern fn fstat(fd: c_int, buf: *struct_stat) c_int;
+extern fn stat(path: [*c]const u8, buf: *struct_stat) c_int;
+extern fn lstat(path: [*c]const u8, buf: *struct_stat) c_int;
 extern fn fchmod(fd: c_int, mode: c_uint) c_int;
 extern fn access(path: [*c]const u8, mode: c_int) c_int;
 extern fn symlink(target: [*c]const u8, linkpath: [*c]const u8) c_int;
@@ -102,7 +102,30 @@ extern fn execlp(file: [*c]const u8, arg: [*c]const u8, ...) c_int;
 extern fn wait(s: [*c]c_int) c_int;
 extern fn signrm() void;
 extern fn getenv(name: [*c]const u8) ?*anyopaque;
-extern fn getpwnam(name: [*c]const u8) ?*anyopaque;
+extern fn getpwnam(name: [*c]const u8) ?*struct_passwd;
+const struct_passwd = switch (builtin.os.tag) {
+    .macos => extern struct {
+        pw_name: [*c]u8 = null,
+        pw_passwd: [*c]u8 = null,
+        pw_uid: c_uint = 0,
+        pw_gid: c_uint = 0,
+        pw_change: time_t_joe = 0,
+        pw_class: [*c]u8 = null,
+        pw_gecos: [*c]u8 = null,
+        pw_dir: [*c]u8 = null,
+        pw_shell: [*c]u8 = null,
+        pw_expire: time_t_joe = 0,
+    },
+    else => extern struct {
+        pw_name: [*c]u8 = null,
+        pw_passwd: [*c]u8 = null,
+        pw_uid: c_uint = 0,
+        pw_gid: c_uint = 0,
+        pw_gecos: [*c]u8 = null,
+        pw_dir: [*c]u8 = null,
+        pw_shell: [*c]u8 = null,
+    },
+};
 
 extern fn utf16_init(sm: ?*anyopaque) void;
 extern fn utf16_decode(sm: ?*anyopaque, w: c_int) c_int;
@@ -110,7 +133,6 @@ extern fn utf16r_decode(sm: ?*anyopaque, w: c_int) c_int;
 extern fn utf8_encode(buf: [*c]u8, c: c_int) isize;
 extern fn utf16_encode(buf: [*c]u8, c: c_int) isize;
 extern fn utf16r_encode(buf: [*c]u8, c: c_int) isize;
-
 
 extern fn zcmp(a: ?*const anyopaque, b: ?*const anyopaque) c_int;
 extern fn match_default_security_context(from_file: [*c]const u8) c_int;
@@ -121,6 +143,8 @@ extern fn skip_digits(s: [*c]const u8) [*c]const u8;
 extern fn vsncpy(a: ?*anyopaque, pos: isize, s: ?*const anyopaque, len: isize) ?*anyopaque;
 extern fn vsmk(len: isize) ?*anyopaque;
 extern fn vsrm(s: ?*anyopaque) void;
+extern fn vsadd(a: ?*anyopaque, c: u8) ?*anyopaque;
+extern fn slen(s: ?*const anyopaque) isize;
 extern fn dirprt(path: ?*const anyopaque) ?*anyopaque;
 extern fn namprt(path: ?*const anyopaque) ?*anyopaque;
 extern fn joesep(s: ?*const anyopaque) void;
@@ -148,6 +172,61 @@ const S_IWUSR: c_uint = 0x80;
 const ENOENT: c_int = 2;
 const EEXIST: c_int = 17;
 
+// Typed stat/passwd layouts matching the OS ABI (verified via offsetof probe:
+// Darwin struct stat is 144 bytes with st_mtimespec.tv_sec at offset 48;
+// struct passwd.pw_dir sits at offset 48). Undersized fakes smash stacks when
+// passed to libc fstat/lstat/stat — keep these in sync per-platform.
+const time_t_joe = i64;
+const struct_timespec_joe = extern struct {
+    tv_sec: time_t_joe = 0,
+    tv_nsec: c_long = 0,
+};
+const struct_stat = switch (builtin.os.tag) {
+    .macos => extern struct {
+        st_dev: c_uint = 0,
+        st_mode: c_ushort = 0,
+        st_nlink: c_ushort = 0,
+        st_ino: u64 = 0,
+        st_uid: c_uint = 0,
+        st_gid: c_uint = 0,
+        st_rdev: c_uint = 0,
+        st_atimespec: struct_timespec_joe = .{},
+        st_mtimespec: struct_timespec_joe = .{},
+        st_ctimespec: struct_timespec_joe = .{},
+        st_birthtimespec: struct_timespec_joe = .{},
+        st_size: i64 = 0,
+        st_blocks: i64 = 0,
+        st_blksize: c_int = 0,
+        st_flags: c_uint = 0,
+        st_gen: c_uint = 0,
+        st_lspare: c_int = 0,
+        st_qspare: [2]i64 = .{ 0, 0 },
+    },
+    else => extern struct {
+        st_dev: u64 = 0,
+        st_ino: u64 = 0,
+        st_nlink: u64 = 0,
+        st_mode: c_uint = 0,
+        st_uid: c_uint = 0,
+        st_gid: c_uint = 0,
+        __pad0: c_int = 0,
+        st_rdev: u64 = 0,
+        st_size: i64 = 0,
+        st_blksize: c_long = 0,
+        st_blocks: i64 = 0,
+        st_atim: struct_timespec_joe = .{},
+        st_mtim: struct_timespec_joe = .{},
+        st_ctim: struct_timespec_joe = .{},
+        __unused: [3]c_long = .{ 0, 0, 0 },
+    },
+};
+fn stat_mtime(sbuf: *const struct_stat) i64 {
+    return if (builtin.os.tag == .macos)
+        sbuf.st_mtimespec.tv_sec
+    else
+        sbuf.st_mtim.tv_sec;
+}
+
 // Darwin: __error() returns int*; Linux: __errno_location().
 // Declaring __error as a variable (old bug) never yields real errno, so ENOENT
 // on a missing path was misreported as "Error opening file" instead of "New File".
@@ -170,11 +249,16 @@ fn errno_() c_int {
     return errno_fn.get();
 }
 
-
 // Cast an opaque C string pointer to [*c]const u8 for libc calls.
-fn dq(s: ?*const anyopaque) [*c]const u8 { return @ptrCast(dequote(s)); }
-fn C(p: ?*anyopaque) [*c]const u8 { return @ptrCast(p); }
-fn Cm(p: ?*anyopaque) [*c]u8 { return @ptrCast(p); }
+fn dq(s: ?*const anyopaque) [*c]const u8 {
+    return @ptrCast(dequote(s));
+}
+fn C(p: ?*anyopaque) [*c]const u8 {
+    return @ptrCast(p);
+}
+fn Cm(p: ?*anyopaque) [*c]u8 {
+    return @ptrCast(p);
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // bkread — read up to `size` bytes, set berror
@@ -265,11 +349,11 @@ pub export fn bread(fi: c_int, max: i64, binary: c_int) ?*B {
         const amnt = bkread_(fi, &inbuf, @as(isize, @intCast(to_read)));
         if (berror.* != 0 and amnt == 0) {
             done = true;
-        } else if (detect_utf16(@alignCast(@ptrCast(&inbuf)), amnt >> 1) != 0) {
+        } else if (detect_utf16(@ptrCast(@alignCast(&inbuf)), amnt >> 1) != 0) {
             type_ = 2;
             recode_utf16(fi, &inbuf, amnt, seg, &l, &total, &lines, &max_rem, false, &anchor);
             done = true;
-        } else if (detect_utf16r(@alignCast(@ptrCast(&inbuf)), amnt >> 1) != 0) {
+        } else if (detect_utf16r(@ptrCast(@alignCast(&inbuf)), amnt >> 1) != 0) {
             type_ = 3;
             recode_utf16(fi, &inbuf, amnt, seg, &l, &total, &lines, &max_rem, true, &anchor);
             done = true;
@@ -320,7 +404,7 @@ pub export fn bread(fi: c_int, max: i64, binary: c_int) ?*B {
 
     if (total == 0) return bmk(null);
 
-    const result_h = link2H(@alignCast(@ptrCast(anchor.link.next.?)));
+    const result_h = link2H(@ptrCast(@alignCast(anchor.link.next.?)));
     deque_(Hlink(&anchor));
     const b = bmkchn(result_h, null, total, lines);
 
@@ -374,7 +458,7 @@ fn recode_utf16(
     while (berror.* == 0 and amnt > 0) {
         var x: isize = 0;
         while (x + 1 < amnt) : (x += 2) {
-            const wp = @as([*]const u16, @alignCast(@ptrCast(@as([*]const u8, @ptrCast(&inbuf_local)) + @as(usize, @intCast(x)))));
+            const wp = @as([*]const u16, @ptrCast(@alignCast(@as([*]const u8, @ptrCast(&inbuf_local)) + @as(usize, @intCast(x)))));
             const c = if (rev) utf16r_decode(@ptrCast(&sm), @as(c_int, wp[0])) else utf16_decode(@ptrCast(&sm), @as(c_int, wp[0]));
             if (c >= 0) y += utf8_encode(@ptrCast(&outbuf[@as(usize, @intCast(y))]), c);
             if (y >= SEGSIZ) {
@@ -481,8 +565,8 @@ pub export fn canonical(n_in: ?*anyopaque, flags: c_int) ?*anyopaque {
                 const pw = getpwnam(@ptrCast(&n[@as(usize, @intCast(y + 1))]));
                 n[@as(usize, @intCast(x))] = '/';
                 if (pw) |p| {
-                    // pw_dir extraction is platform-dependent; pass through opaque.
-                    var z = vsncpy(vsmk(0), 0, p, intern.zlen(p));
+                    const dir = p.pw_dir orelse return n_in;
+                    var z = vsncpy(vsmk(0), 0, dir, intern.zlen(dir));
                     z = vsncpy(z, intern.zlen(z), @ptrCast(&n[@as(usize, @intCast(x))]), intern.zlen(@ptrCast(&n[@as(usize, @intCast(x))])));
                     vsrm(@ptrCast(n));
                     return z;
@@ -500,18 +584,15 @@ pub export fn canonical(n_in: ?*anyopaque, flags: c_int) ?*anyopaque {
 
 pub export fn dequote(s_in: ?*const anyopaque) ?*anyopaque {
     var s = @as([*c]const u8, @ptrCast(s_in));
-    var buf: [1024]u8 = undefined;
-    var p: usize = 0;
+    var buf: ?*anyopaque = vsmk(32);
     while (s[0] != 0) {
         if (s[0] == '\\') s += 1;
         if (s[0] != 0) {
-            buf[p] = s[0];
-            p += 1;
+            buf = vsadd(buf, s[0]);
             s += 1;
         }
     }
-    buf[p] = 0;
-    return zdup(@ptrCast(&buf));
+    return buf;
 }
 
 pub export fn hack_check(name: [*c]const u8) c_int {
@@ -567,7 +648,7 @@ pub export fn bload(s_in: [*c]const u8) ?*B {
     var binary: c_int = 0;
     var nowrite: c_int = 0;
     var mod_time: i64 = 0;
-    var sbuf: [144]u8 = undefined; // struct stat (stat buf)
+    var sbuf: struct_stat = .{};
     berror.* = 0;
     const s = s_in;
 
@@ -595,7 +676,7 @@ pub export fn bload(s_in: [*c]const u8) ?*B {
         fi = fopen(dq(@ptrCast(np)), "r");
         if (fi == null) nowrite = 0;
         if (fi) |f| {
-            if (fstat(fileno(f), @ptrCast(&sbuf)) == 0) {
+            if (fstat(fileno(f), &sbuf) == 0) {
                 mod_time = read_mtime(&sbuf);
             }
         }
@@ -631,9 +712,8 @@ pub export fn bload(s_in: [*c]const u8) ?*B {
     return bload_finish(b, n, s, mod_time, binary, skip, amnt, nowrite);
 }
 
-fn read_mtime(sbuf: *const [144]u8) i64 {
-    _ = sbuf;
-    return 0;
+fn read_mtime(sbuf: *const struct_stat) i64 {
+    return stat_mtime(sbuf);
 }
 
 fn bload_finish(b_in: ?*B, n: ?*anyopaque, s: [*c]const u8, mod_time: i64, binary: c_int, skip: i64, amnt: i64, nowrite: c_int) ?*B {
@@ -705,8 +785,8 @@ pub export fn bfind(s: [*c]const u8) ?*B {
         b.er = berror.*;
         return b;
     }
-    var b = link2B(@alignCast(@ptrCast(intern.bufs.link.next.?)));
-    while (!ptrEq(b, &intern.bufs)) : (b = link2B(@alignCast(@ptrCast(b.link.next.?)))) {
+    var b = link2B(@ptrCast(@alignCast(intern.bufs.link.next.?)));
+    while (!ptrEq(b, &intern.bufs)) : (b = link2B(@ptrCast(@alignCast(b.link.next.?)))) {
         if (b.name != null and strcmp(@ptrCast(b.name), s) == 0) {
             if (b.orphan == 0) b.count += 1 else b.orphan = 0;
             berror.* = 0;
@@ -730,8 +810,8 @@ pub export fn bfind_scratch(s: [*c]const u8) ?*B {
         b.er = berror.*;
         return b;
     }
-    var b = link2B(@alignCast(@ptrCast(intern.bufs.link.next.?)));
-    while (!ptrEq(b, &intern.bufs)) : (b = link2B(@alignCast(@ptrCast(b.link.next.?)))) {
+    var b = link2B(@ptrCast(@alignCast(intern.bufs.link.next.?)));
+    while (!ptrEq(b, &intern.bufs)) : (b = link2B(@ptrCast(@alignCast(b.link.next.?)))) {
         if (b.scratch != 0 and b.name != null and strcmp(@ptrCast(b.name), s) == 0) {
             if (b.orphan == 0) b.count += 1 else b.orphan = 0;
             berror.* = 0;
@@ -759,8 +839,8 @@ pub export fn bfind_reload(s: [*c]const u8) ?*B {
 pub export fn bcheck_loaded(s: [*c]const u8) ?*B {
     _ = intern.ensureBufs();
     if (s[0] == 0) return null;
-    var b = link2B(@alignCast(@ptrCast(intern.bufs.link.next.?)));
-    while (!ptrEq(b, &intern.bufs)) : (b = link2B(@alignCast(@ptrCast(b.link.next.?)))) {
+    var b = link2B(@ptrCast(@alignCast(intern.bufs.link.next.?)));
+    while (!ptrEq(b, &intern.bufs)) : (b = link2B(@ptrCast(@alignCast(b.link.next.?)))) {
         if (b.name != null and strcmp(@ptrCast(b.name), s) == 0) return b;
     }
     return null;
@@ -769,8 +849,8 @@ pub export fn bcheck_loaded(s: [*c]const u8) ?*B {
 pub export fn getbufs() ?*anyopaque {
     _ = intern.ensureBufs();
     var result: ?*anyopaque = null;
-    var b = link2B(@alignCast(@ptrCast(intern.bufs.link.next.?)));
-    while (!ptrEq(b, &intern.bufs)) : (b = link2B(@alignCast(@ptrCast(b.link.next.?)))) {
+    var b = link2B(@ptrCast(@alignCast(intern.bufs.link.next.?)));
+    while (!ptrEq(b, &intern.bufs)) : (b = link2B(@ptrCast(@alignCast(b.link.next.?)))) {
         if (b.name != null and b.internal == 0) {
             const tmp = vsncpy(vsmk(0), 0, b.name, intern.zlen(b.name));
             result = @import("../va.zig").vaadd(result, tmp);
@@ -842,8 +922,9 @@ fn bsavefd_utf16(p: ?*P, fd: c_int, size: i64, rev: c_int) c_int {
 }
 
 pub export fn bsave(p: ?*P, as: [*c]const u8, size_in: i64, flag: c_int) c_int {
-    var sbuf: [144]u8 = undefined;
+    var sbuf: struct_stat = .{};
     var have_stat: c_int = 0;
+    var norm: c_int = 0;
     var skip: i64 = 0;
     var amnt: i64 = 0;
     var binary: c_int = 0;
@@ -868,15 +949,16 @@ pub export fn bsave(p: ?*P, as: [*c]const u8, size_in: i64, flag: c_int) c_int {
     } else if (skip != 0 or amnt != MAXOFF) {
         f = fopen(dq(@ptrCast(s)), "r+");
     } else {
-        have_stat = if (stat(dq(@ptrCast(s)), @ptrCast(&sbuf)) == 0) 1 else 0;
+        have_stat = if (stat(dq(@ptrCast(s)), &sbuf) == 0) 1 else 0;
+        if (have_stat == 0) sbuf.st_mode = 0o666;
         if (break_links.* != 0 or break_symlinks.* != 0) {
-            var lsbuf: [144]u8 = undefined;
-            if (lstat(dq(@ptrCast(s)), @ptrCast(&lsbuf)) == 0) {
+            var lsbuf: struct_stat = .{};
+            if (lstat(dq(@ptrCast(s)), &lsbuf) == 0) {
                 // Preserve SELinux label across unlink+creat (C b.c used getfilecon/
                 // setfilecon; helpers are no-ops when SELinux is off).
                 _ = match_default_security_context(dq(@ptrCast(s)));
                 _ = unlink(dq(@ptrCast(s)));
-                const g = creat(dq(@ptrCast(s)), 0o666);
+                const g = creat(dq(@ptrCast(s)), @intCast(sbuf.st_mode & ~@as(c_uint, 0o6000)));
                 _ = close(g);
                 _ = reset_default_security_context();
             } else {
@@ -884,6 +966,7 @@ pub export fn bsave(p: ?*P, as: [*c]const u8, size_in: i64, flag: c_int) c_int {
             }
         }
         f = fopen(dq(@ptrCast(s)), "w");
+        norm = 1;
     }
 
     joesep(@ptrCast(s));
@@ -914,8 +997,23 @@ pub export fn bsave(p: ?*P, as: [*c]const u8, size_in: i64, flag: c_int) c_int {
         prm(q);
     }
 
-    _ = flag;
-    return bsave_err(f, s);
+    // Restore setuid/setgid/sticky bits (creat dropped them).
+    if (berror.* == 0 and have_stat != 0) {
+        _ = fchmod(fileno(f), @intCast(sbuf.st_mode));
+    }
+
+    const rv = bsave_err(f, s);
+
+    // Update original date of file (when the buffer was written under its own
+    // name, so change notifications compare against the right timestamp).
+    if (berror.* == 0 and norm != 0 and flag != 0 and
+        (pp.b.?.name == null or flag == 2 or strcmp(s, @ptrCast(pp.b.?.name)) != 0))
+    {
+        if (stat(dq(@ptrCast(s)), &sbuf) == 0)
+            pp.b.?.mod_time = stat_mtime(&sbuf);
+    }
+
+    return rv;
 }
 
 fn bsave_err(f: ?*anyopaque, s: [*c]const u8) c_int {
@@ -953,8 +1051,8 @@ pub export fn ttsig(sig: c_int) void {
     if (nodeadjoe.* == 0) {
         var tmpfd = open("DEADJOE", O_RDWR | O_EXCL | O_CREAT, @as(c_uint, 0o600));
         if (tmpfd < 0) {
-            var sbuf: [144]u8 = undefined;
-            if (lstat("DEADJOE", @ptrCast(&sbuf)) < 0) _exit(1);
+            var sbuf: struct_stat = .{};
+            if (lstat("DEADJOE", &sbuf) < 0) _exit(1);
             tmpfd = open("DEADJOE", O_RDWR | O_APPEND);
             if (tmpfd < 0) _exit(1);
             if (fchmod(tmpfd, S_IRUSR | S_IWUSR) < 0) _exit(1);
@@ -974,8 +1072,8 @@ pub export fn ttsig(sig: c_int) void {
         }
         _ = fflush(ttsig_f);
 
-        var b = link2B(@alignCast(@ptrCast(intern.bufs.link.next.?)));
-        while (!ptrEq(b, &intern.bufs)) : (b = link2B(@alignCast(@ptrCast(b.link.next.?)))) {
+        var b = link2B(@ptrCast(@alignCast(intern.bufs.link.next.?)));
+        while (!ptrEq(b, &intern.bufs)) : (b = link2B(@ptrCast(@alignCast(b.link.next.?)))) {
             if (b.changed != 0) {
                 if (b.name) |nm| {
                     _ = fprintf(ttsig_f, "\n*** File '%s'\n", @as([*c]const u8, @ptrCast(nm)));
@@ -989,7 +1087,10 @@ pub export fn ttsig(sig: c_int) void {
     }
 
     if (sig != 0) ttclsn();
-    { const m = "\n*** JOE aborted\n"; _ = joe_write(2, @ptrCast(m), m.len); }
+    {
+        const m = "\n*** JOE aborted\n";
+        _ = joe_write(2, @ptrCast(m), m.len);
+    }
     _exit(1);
 }
 
@@ -1045,14 +1146,14 @@ pub export fn plain_file(b: ?*B) c_int {
 pub export fn check_mod(b: ?*B) c_int {
     const bp = b.?;
     if (plain_file(bp) == 0) return 0;
-    var sbuf: [144]u8 = undefined;
-    if (stat(@ptrCast(bp.name), @ptrCast(&sbuf)) == 0) {
+    var sbuf: struct_stat = .{};
+    if (stat(@ptrCast(bp.name), &sbuf) == 0) {
         if (read_mtime(&sbuf) > bp.mod_time) return 1;
     }
     return 0;
 }
 
 pub export fn file_exists(path: [*c]const u8) c_int {
-    var sbuf: [144]u8 = undefined;
-    return @intFromBool(stat(path, @ptrCast(&sbuf)) == 0);
+    var sbuf: struct_stat = .{};
+    return @intFromBool(stat(path, &sbuf) == 0);
 }

@@ -8,7 +8,7 @@
 > **Invariant:** viewmode never mutates buffer text.
 >
 > **Task list:** `plans/TODO.md`
-> **Deferred (images, nested fence HL):** `plans/future-roadmap.md`
+> **Deferred (row-count-changing layout):** `plans/future-roadmap.md`
 > **References:** conceal + layout from OpenCode (`~/Projects/opencode-research`, §2);
 > **all colours from Cursor Dark** (`cursor-official-themes-0.0.5.vsix`, §6.2)
 
@@ -16,9 +16,10 @@ This document **replaces** the old C-era feasibility essay as the active plan. P
 (§9) ship on the Zig paint path: zero-width conceal, full link/image/entity/list-marker
 coverage, the native Cursor Dark color scheme, a CommonMark flanking-rule fix for emphasis,
 click-to-open links, and autolink styling + table header/border colors. Setext headings
-(§Phase 6) are a known, documented gap. Phase 7 (docs) is this pass. See `plans/TODO.md`
-for the authoritative, item-by-item status — this document is the design rationale, not the
-live tracker.
+(§Phase 6), image chrome, and nested per-language syntax highlighting inside fenced code
+blocks (`plans/future-roadmap.md` Features 2.6/2.5) landed after the Phase 7 gate. Phase 7
+(docs) is this pass. See `plans/TODO.md` for the authoritative, item-by-item status — this
+document is the design rationale, not the live tracker.
 
 ---
 
@@ -652,7 +653,7 @@ large enough to hide a regression.
 
 - Inline `[a](u)` and `[a](u "title")` → `a`: conceal brackets, destination, and title.
 - Reference `[a][r]`, collapsed `[a][]`, shortcut `[a]` → `a`.
-- Image `![alt](u)` → `alt` only (still no image chrome; see roadmap 2.6).
+- Image `![alt](u)` → `alt` only (chrome glyph landed later; see roadmap 2.6, done).
 - Autolinks and bare URLs stay visible and styled — do **not** conceal (§3.2).
 - HTML entity substitutions (`&nbsp;`, `&lt;`, `&gt;`, `&amp;`, `&quot;`, `&ensp;`, `&emsp;`).
 - List markers: normalise `*`/`+`/`-` → `-`; right-align ordered `N.` to the list's widest marker.

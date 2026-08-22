@@ -2763,8 +2763,15 @@ What viewmode conceals or substitutes:
   the same heading color/weight as ATX headings — neither line is
   concealed (there's no delimiter to hide), only styled
 * Emphasis delimiters: `**bold**`, `*em*`, `~~strike~~`, `` `code` ``
-* Fenced code block backtick/tilde fences and the language tag
-* Link and image syntax — see the deviation from OpenCode below
+* Fenced code block backtick/tilde fences (the marker run only — the
+  language tag after it, e.g. `python` in ` ```python `, stays visible;
+  it doubles as a label for the syntax highlighting below)
+* Link and image syntax — see the deviation from OpenCode below. An image's
+  leading `!` substitutes to `⬚` followed by a padding space, rather than
+  concealing, so a concealed image reads differently from a concealed
+  plain link (the padding space is real, not zero-width — some terminal
+  fonts render the glyph slightly wider than one cell, so it has
+  somewhere harmless to overflow into)
 * Blockquote `>` → `│`; task list `[ ]`/`[x]` → `☐`/`☑`; thematic break
   `---`/`***`/`___` → a full-width `─` rule
 * List markers `*`/`+`/`-` normalise to `-` (both modes; this is a
@@ -2774,6 +2781,16 @@ What viewmode conceals or substitutes:
 
 Markdown tables render as a padded, box-drawn grid in viewmode; in edit
 mode the raw `|`-delimited source is shown unchanged.
+
+In viewmode, a fenced code block whose language tag matches (or aliases)
+one of JOE's own `syntax/*.jsf` files — `python`, `js`/`javascript`, `c`,
+`go`, `rust`/`rs`, and most other common tags — gets real syntax
+highlighting for that language inside the block (edit mode keeps the plain
+code-block tint, same as an unrecognized language). Each line highlights
+independently (no state carried from the line above), so a comment or
+string that spans multiple lines within the block may mis-highlight partway
+through. This is unrelated to the buffer's own `-syntax` setting — it only
+affects fenced regions inside `.md` files.
 
 Left-click a link, image, or reference-style link destination in viewmode
 to open it (see "Xterm Mouse support" above); autolinks and bare URLs are

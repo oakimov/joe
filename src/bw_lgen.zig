@@ -87,7 +87,7 @@ const Charmap = extern struct {
     next: ?*Charmap = null,
     name: ?[*:0]u8 = null,
     /// Non-zero ⇒ UTF-8 (JOE `charmap->type`). Truncated layout; only first fields used.
-    @"type": c_int = 0,
+    type: c_int = 0,
 };
 const HighSyntax = opaque {};
 
@@ -110,6 +110,8 @@ export var vwsmask: c_int = ~(DIM | FG_MASK);
 export var dspasis: c_int = 0;
 
 extern fn parse(syntax: ?*HighSyntax, line: ?*P, h_state: HighlightState, charmap: ?*Charmap) HighlightState;
+extern fn load_syntax(name: [*c]const u8) ?*HighSyntax;
+extern fn find_state(syntax: ?*HighSyntax, name: [*c]u8) ?*anyopaque;
 extern fn pdup(p: ?*P, tr: [*:0]const u8) ?*P;
 extern fn pdupown(p: ?*P, owner: ?*?*P, tr: [*:0]const u8) ?*P;
 extern fn prm(p: ?*P) void;
@@ -162,6 +164,35 @@ fn bwReadLine(anchor: ?*P, line: i64, buf: ?[*]u8, buf_cap: c_int) c_int {
         ll += 1;
     }
     return ll;
+}
+
+/// Read one line from `p`'s *current* position (must already be at a
+/// line's bol) without reseeking, then leave `p` positioned at the next
+/// line's bol (`pgetb`'s own `\n` handling already does that — see
+/// `pgetb_` in `gapbuffer/pointer.zig`). Used by sequential multi-line
+/// scans (`zig_bw_fence_detect`) so a whole window can be walked with one
+/// `pdup`/`pline` seek instead of `bwReadLine`'s reseek-per-line, which
+/// made those scans cost O(window²) instead of O(window). Unlike
+/// `bwReadLine`, a too-long line is still drained to its `\n` (bytes past
+/// `buf_cap` are discarded, not just abandoned) before returning `-2`, so
+/// the shared `p` stays correctly aligned with line boundaries for the
+/// next call — `bwReadLine` can skip that because its `p` is a throwaway
+/// duplicate discarded after one read.
+fn readLineFromCurrent(p: ?*P, buf: ?[*]u8, buf_cap: c_int) c_int {
+    const scan_max: c_int = 16 * 1024;
+    var ll: c_int = 0;
+    var truncated = false;
+    while (true) {
+        const ch = pgetb(p);
+        if (ch == NO_MORE_DATA or ch == '\n') break;
+        if (ll >= scan_max or ll >= buf_cap) {
+            truncated = true;
+            continue;
+        }
+        buf.?[@intCast(ll)] = @intCast(ch);
+        ll += 1;
+    }
+    return if (truncated) -2 else ll;
 }
 export var opt_mid: c_int = 0;
 export var opt_left: c_int = 8;
@@ -262,8 +293,6 @@ pub export fn zig_bw_gennum(
     return 0;
 }
 
-
-
 /// Feature 2.1/2.2 table region detect → Zig `table.layoutAt`.
 ///
 /// Fills `out_*` the same way C's scan fills its statics. Returns:
@@ -316,10 +345,21 @@ pub export fn zig_bw_table_detect(
     var lens: std.ArrayList(usize) = .empty;
     defer lens.deinit(alloc);
 
+    // Single pdup + one pline seek to back_lim, then sequential pgetb reads
+    // only (readLineFromCurrent) — not a fresh pdup+pline reseek per probed
+    // line like the old bwReadLine-per-li loop, which made this O(window²)
+    // (same class of bug fixed in zig_bw_fence_detect above; this window is
+    // even larger — up to 250 lines — so it's the more expensive of the two
+    // in practice).
+    const scan_p = pdup(anchor, "zig_bw_table_detect_scan") orelse return -1;
+    defer prm(scan_p);
+    zig_c_bw_pline(scan_p, back_lim);
+    zig_c_bw_p_goto_bol(scan_p);
+
     var li: i64 = back_lim;
     while (li <= fwd_lim) : (li += 1) {
         var tmp: [16 * 1024]u8 = undefined;
-        const rc = bwReadLine(anchor, li, &tmp, @intCast(tmp.len));
+        const rc = readLineFromCurrent(scan_p, &tmp, @intCast(tmp.len));
         const slice: []const u8 = blk: {
             if (rc == -2) {
                 // Too long: not a table line (breaks regions), store non-pipe marker.
@@ -412,17 +452,52 @@ fn matchFenceClose(line: []const u8, open_ch: u8, open_len: usize) bool {
     return true;
 }
 
+/// One open/close state transition for a single line — the same shape as
+/// `zig_bw_fence_detect`'s scan loop body, factored out so
+/// `zig_bw_lgen_view`'s forward-adjacency fast path can step fence state
+/// one line at a time (O(1) per step) instead of paying a full
+/// `zig_bw_fence_detect` window rescan on every row of a top-to-bottom
+/// repaint. `open_ch == 0` means "not currently inside a fence".
+fn fenceStepLine(line: []const u8, open_ch: *u8, open_len: *usize, region_start: *i64, this_line: i64) void {
+    if (open_ch.* == 0) {
+        if (matchFenceOpen(line)) |m| {
+            open_ch.* = m.ch;
+            open_len.* = m.len;
+            region_start.* = this_line;
+        }
+    } else if (matchFenceClose(line, open_ch.*, open_len.*)) {
+        open_ch.* = 0;
+        open_len.* = 0;
+        region_start.* = -1;
+    }
+}
+
 /// Bounded backward-then-forward scan window for fence-body detection, in
-/// the same style and order of magnitude as the table detector's 50-back /
-/// 199-forward window (each `bwReadLine` call reseeks from `anchor`, so
-/// total cost is the same class of pointer walk as table detection — not
-/// `readLineBytesAdvance`'s single-pass `pgetb` walk, which corrupted an
-/// unrelated `P`'s state on multi-line scans; see git history for that
-/// attempt and revert reasoning). Fences beyond this window in either
-/// direction are a documented limitation (plan §4.2.1), not a correctness
-/// bug: body lines outside the window fall back to being parsed as ordinary
-/// markdown, same as before this feature existed.
+/// the same order of magnitude as the table detector's 50-back /
+/// 199-forward window. Walked with a single `pdup`'d cursor + one `pline`
+/// seek to `back_lim`, then sequential `pgetb` reads only (`readLineFromCurrent`)
+/// — not a fresh reseek per probed line — so the scan is O(window), not
+/// O(window²). (An earlier single-pass attempt, `readLineBytesAdvance`, was
+/// reverted for corrupting an unrelated `P`'s state; that was an aliasing
+/// bug in that implementation — it mutated a shared `P` — not a problem
+/// with sequential scanning itself. `zig_bw_fence_detect` avoids it the
+/// same way `bwReadLine` avoids clobbering callers: its own private,
+/// `prm`'d-when-done `pdup`, just one for the whole scan instead of one per
+/// probe.) Fences beyond this window in either direction are a documented
+/// limitation (plan §4.2.1), not a correctness bug: body lines outside the
+/// window fall back to being parsed as ordinary markdown, same as before
+/// this feature existed.
 const fence_scan_window_lines: i64 = 300;
+
+/// `fence_region_end` sentinel meaning "still open as of `vm_fence_scan_line`,
+/// real close not yet observed" — written only by `zig_bw_lgen_view`'s
+/// forward-adjacency fast path (never by `zig_bw_fence_detect`, which always
+/// resolves a real, bounded end). The plain membership check
+/// (`buf_line >= region_start and buf_line < region_end`) must NOT trust
+/// this sentinel for any `buf_line` beyond `vm_fence_scan_line` — unlike a
+/// real resolved end, it says nothing about lines not yet stepped through,
+/// so such a `buf_line` still needs its own fast-path step (or fallback).
+const fence_region_end_open_sentinel: i64 = std.math.maxInt(i64);
 
 /// Feature 4.2.1 fence-body region detect (plan R1). Simulates fence
 /// open/close state **forward** from a bounded window before `buf_line`
@@ -435,12 +510,19 @@ const fence_scan_window_lines: i64 = 300;
 /// `out_start`/`out_end` are `-1` when `buf_line` is not inside a fence body
 /// (ordinary text, or is itself the opening/closing delimiter line — the
 /// caller's existing single-line check handles delimiter lines directly).
+/// `out_open_ch`/`out_open_len`, when non-null, are also filled with the
+/// open fence's marker (`0`/`0` when not open) — lets a caller seed the
+/// incremental forward-adjacency tracker (`vm_fence_scan_*` in
+/// `zig_bw_lgen_view`) from a full-scan result without re-reading and
+/// re-matching `fence_region_start`'s line itself.
 /// Returns `0` always; Path A owns fence detection (no C fallback).
 pub export fn zig_bw_fence_detect(
     anchor: ?*P,
     buf_line: i64,
     out_start: ?*i64,
     out_end: ?*i64,
+    out_open_ch: ?*u8,
+    out_open_len: ?*usize,
 ) c_int {
     if (anchor == null or out_start == null or out_end == null) return -1;
     if (buf_line < 0) return -1;
@@ -449,10 +531,17 @@ pub export fn zig_bw_fence_detect(
     if (eof_line < 0 or buf_line > eof_line) {
         out_start.?.* = -1;
         out_end.?.* = -1;
+        if (out_open_ch) |c| c.* = 0;
+        if (out_open_len) |l| l.* = 0;
         return 0;
     }
 
     const back_lim: i64 = @max(@as(i64, 0), buf_line - fence_scan_window_lines);
+
+    const scan_p = pdup(anchor, "zig_bw_fence_detect_scan") orelse return -1;
+    defer prm(scan_p);
+    zig_c_bw_pline(scan_p, back_lim);
+    zig_c_bw_p_goto_bol(scan_p);
 
     var tmp: [16 * 1024]u8 = undefined;
     var open: ?FenceOpen = null;
@@ -460,7 +549,7 @@ pub export fn zig_bw_fence_detect(
 
     var li: i64 = back_lim;
     while (li < buf_line) : (li += 1) {
-        const rc = bwReadLine(anchor, li, &tmp, @intCast(tmp.len));
+        const rc = readLineFromCurrent(scan_p, &tmp, @intCast(tmp.len));
         if (rc >= 0) {
             const slice = tmp[0..@intCast(rc)];
             if (open) |o| {
@@ -473,20 +562,28 @@ pub export fn zig_bw_fence_detect(
                 region_start = li;
             }
         }
-        // rc < 0 (too long, or unreadable): not a fence delimiter; continue.
+        // rc < 0 (too long): not a fence delimiter, but readLineFromCurrent
+        // still drained it to the next line's bol, so scan_p stays aligned.
     }
 
     if (open == null) {
         out_start.?.* = -1;
         out_end.?.* = -1;
+        if (out_open_ch) |c| c.* = 0;
+        if (out_open_len) |l| l.* = 0;
         return 0;
     }
 
     const o = open.?;
+    if (out_open_ch) |c| c.* = o.ch;
+    if (out_open_len) |l| l.* = o.len;
     const fwd_lim: i64 = @min(eof_line, buf_line + fence_scan_window_lines);
+    // scan_p is already sitting at buf_line's bol here — the backward loop
+    // above (0 or more iterations) always ends there — so the forward scan
+    // continues on the same walking cursor with no extra seek.
     var lj: i64 = buf_line;
     while (lj <= fwd_lim) : (lj += 1) {
-        const rc = bwReadLine(anchor, lj, &tmp, @intCast(tmp.len));
+        const rc = readLineFromCurrent(scan_p, &tmp, @intCast(tmp.len));
         if (rc >= 0) {
             const slice = tmp[0..@intCast(rc)];
             if (matchFenceClose(slice, o.ch, o.len)) {
@@ -502,6 +599,87 @@ pub export fn zig_bw_fence_detect(
     out_start.?.* = region_start;
     out_end.?.* = fwd_lim + 1;
     return 0;
+}
+
+/// Feature 2.5: markdown fence info-string language tag → JOE syntax name
+/// (`syntax/<name>.jsf`). Only remaps tags that don't already match a
+/// filename 1:1 (`python`, `c`, `rust`, `go`, ... fall through the `return
+/// tag` default and load directly); unrecognized tags fall through to
+/// `load_syntax` trying the raw tag, which safely returns null for
+/// anything without a matching `.jsf` file (Feature 2.5.4's "unknown
+/// language" fallback — no alias table entry needed for that case).
+fn fenceSyntaxAlias(tag: []const u8) []const u8 {
+    if (eqlIC(tag, "js") or eqlIC(tag, "javascript")) return "js";
+    if (eqlIC(tag, "ts") or eqlIC(tag, "typescript")) return "typescript";
+    if (eqlIC(tag, "py") or eqlIC(tag, "python")) return "python";
+    if (eqlIC(tag, "rb") or eqlIC(tag, "ruby")) return "ruby";
+    if (eqlIC(tag, "rs") or eqlIC(tag, "rust")) return "rust";
+    if (eqlIC(tag, "sh") or eqlIC(tag, "bash") or eqlIC(tag, "shell") or eqlIC(tag, "zsh")) return "sh";
+    if (eqlIC(tag, "cs") or eqlIC(tag, "csharp")) return "csharp";
+    return tag;
+}
+
+fn eqlIC(a: []const u8, b: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(a, b);
+}
+
+/// Feature 2.5: extract the language tag from a fence's opening delimiter
+/// line's info string — the first whitespace-delimited word after the
+/// fence run (CommonMark; e.g. "python" from "```python", "```python
+/// linenos", or "~~~ python").
+fn fenceInfoLang(open_line: []const u8) ?[]const u8 {
+    const m = matchFenceOpen(open_line) orelse return null;
+    var i = m.start + m.len;
+    while (i < open_line.len and (open_line[i] == ' ' or open_line[i] == '\t')) : (i += 1) {}
+    const start = i;
+    while (i < open_line.len and open_line[i] != ' ' and open_line[i] != '\t') : (i += 1) {}
+    if (i == start) return null;
+    return open_line[start..i];
+}
+
+/// Feature 2.5: re-parse `buf_line` (a fence body line) with the fence's
+/// language syntax instead of `md`, overwriting the plain code-block tint
+/// the caller's earlier `md.jsf` pass already left in the shared, aliased
+/// `attr_buf` (see `zig_bw_lgen_view_entry`'s own `parse` call and its
+/// comment on `attr_buf` — `parse` always starts writing at `attr_buf[0]`,
+/// so a second call for the same line cleanly overwrites the first
+/// call's results in place, no extra bookkeeping needed).
+///
+/// Single-line state only: each body line restarts from a fresh initial
+/// state (`state = 0`, matching `lattr.zig`'s `clearState`) rather than
+/// carrying state from the previous body line, so a construct spanning
+/// multiple lines (a block comment, a triple-quoted string) may
+/// mis-highlight mid-construct — a deliberate scope tradeoff, not an
+/// oversight; see `plans/future-roadmap.md` Feature 2.5. No-op (existing
+/// plain tint kept) when the language is unknown, has no matching
+/// `syntax/<name>.jsf`, or the fence's opening line can't be read.
+fn applyFenceSyntaxHighlight(
+    anchor: ?*P,
+    fence_open_line: i64,
+    buf_line: i64,
+    charmap: ?*Charmap,
+) void {
+    if (fence_open_line < 0) return;
+    var tmp: [1024]u8 = undefined;
+    const ll = bwReadLine(anchor, fence_open_line, &tmp, @intCast(tmp.len));
+    if (ll < 0) return;
+    const tag = fenceInfoLang(tmp[0..@intCast(ll)]) orelse return;
+    if (tag.len == 0 or tag.len > 24) return;
+
+    var lower: [24]u8 = undefined;
+    for (tag, 0..) |c, i| lower[i] = std.ascii.toLower(c);
+    const mapped = fenceSyntaxAlias(lower[0..tag.len]);
+
+    var namebuf: [24:0]u8 = undefined;
+    @memcpy(namebuf[0..mapped.len], mapped);
+    namebuf[mapped.len] = 0;
+    const foreign = load_syntax(&namebuf) orelse return;
+
+    const scratch = pdup(anchor, "zig_bw_fence_syntax_hl") orelse return;
+    defer prm(scratch);
+    zig_c_bw_pline(scratch, buf_line);
+    zig_c_bw_p_goto_bol(scratch);
+    _ = parse(foreign, scratch, .{ .stack = null, .delim_stack = null, .saved_s = null, .state = 0 }, charmap);
 }
 
 test "matchFenceOpen recognizes backtick and tilde runs" {
@@ -899,6 +1077,42 @@ fn setextHeadingLevel(bol_cursor: ?*P, buf_line: i64, line: []const u8) u8 {
     return setextUnderlineLevel(tmp[0..@intCast(ll)]);
 }
 
+/// Feature 4.2.1(d) fix: is `buf_line` (content `line`) a *valid* indented
+/// code block line — i.e., does walking backward from it reach a blank
+/// line (or buffer start) while every line in between still looks like
+/// indented code (`render.looksLikeIndentedCode`)? `render.analyzeLineStart`
+/// is pure/single-line and can't answer this itself (see its doc comment);
+/// this resolves the CommonMark rule it's missing: an indented code block
+/// only *starts* right after a blank line, so an ordinarily-indented
+/// list-item continuation line (aligned under its marker, not preceded by
+/// a blank line) must NOT be treated as one — that misclassification was
+/// dropping markdown processing (emphasis, etc.) for such lines entirely.
+/// Bounded backward walk (`fence_scan_window_lines`, matching the fence
+/// detector's precedent); a block whose start lies beyond that window
+/// falls back to the old, permissive behavior (allowed) rather than being
+/// misclassified as ordinary text — false positives here are rarer than
+/// the continuation-line case this function exists to fix, and this is
+/// the direction that was already correct before this fix, so the bounded
+/// fallback doesn't introduce a *new* wrong case, only fails to fix an
+/// already-rare, already-pre-existing edge case.
+fn isIndentedCodeAllowed(anchor: ?*P, buf_line: i64, line: []const u8, tab: u16) bool {
+    if (!render.looksLikeIndentedCode(line, tab)) return true; // shape check fails anyway; irrelevant
+    if (buf_line <= 0) return true;
+
+    var tmp: [1024]u8 = undefined;
+    const back_lim: i64 = @max(0, buf_line - fence_scan_window_lines);
+    var li: i64 = buf_line - 1;
+    while (li >= back_lim) : (li -= 1) {
+        const ll = bwReadLine(anchor, li, &tmp, @intCast(tmp.len));
+        if (ll < 0) return true; // unreadable: don't newly misclassify, keep old behavior
+        const prev = tmp[0..@intCast(ll)];
+        if (prev.len == 0) return true; // blank line: valid region start
+        if (!render.looksLikeIndentedCode(prev, tab)) return false; // non-blank, non-code: continuation of that line's block
+        // prev also looks like indented code: keep walking back through the run
+    }
+    return true; // exceeded scan window: fall back to old, permissive behavior
+}
+
 /// Path A `lgen_view` line-start chrome: heading/fence/blockquote/HR/task.
 /// Returns:
 /// - `1` — line fully handled (`goto done`); col_map filled
@@ -915,6 +1129,7 @@ pub export fn zig_bw_view_line_start(
     col_map_len: c_int,
     tab: c_int,
     is_setext_underline: c_int,
+    allow_indented_code: c_int,
 ) c_int {
     if (line_ptr == null or hide == null or subst == null or col_map == null) return -1;
     if (line_len < 0) return -1;
@@ -954,7 +1169,7 @@ pub export fn zig_bw_view_line_start(
     tables.bindScratch(hide_slice, subst_scratch, url_scratch, col_scratch, n);
 
     const tab_u: u16 = if (tab <= 0) 8 else @intCast(tab);
-    const done = render.analyzeLineStart(&tables, line, tab_u);
+    const done = render.analyzeLineStart(&tables, line, tab_u, allow_indented_code != 0);
 
     var si: usize = 0;
     while (si < clear_n) : (si += 1) {
@@ -1090,7 +1305,6 @@ pub export fn zig_bw_view_inline(
     }
     return 0;
 }
-
 
 /// Plan R5: given `off` is a hidden byte in `hide`, return the corrected
 /// offset — forward-skip to the next visible byte if one exists before end
@@ -1488,6 +1702,7 @@ pub export fn zig_bw_lgen_view(
     palette: ?[*]c_int,
     palette_len: c_int,
     utf8: c_int,
+    syntax: ?*HighSyntax,
 ) c_int {
     if (line_ptr == null or hide == null or subst == null or col_map == null or col_map_line == null) return -1;
     if (cursor == null or p == null) return -1;
@@ -1506,6 +1721,11 @@ pub export fn zig_bw_lgen_view(
     if (urls == null or urls_len < @as(c_int, @intCast(clear_n))) return -1;
     if (atr == null or atr_len <= 0) return -1;
 
+    // `cur_line_slice` is needed by the fence fast path below (it's this
+    // row's already-read text — the last line of a forward hop needs no
+    // extra buffer I/O) as well as by Feature 6.2/4.2.1(d) further down.
+    const cur_line_slice: []const u8 = if (line_len > 0) line_ptr.?[0..@intCast(line_len)] else &.{};
+
     // 0) Fence-body region cache + gate (plan §4.2.1 / R1). Body lines skip
     // every markdown analyzer below — including the line-start dispatch —
     // so a code comment that starts with `#` or contains `**`/`~~~` is
@@ -1515,21 +1735,101 @@ pub export fn zig_bw_lgen_view(
     // `zig_bw_view_line_start`, which already recognizes them correctly
     // without needing region context.
     if (fence_cached_for_line.?.* != buf_line) {
-        if (buf_line >= fence_region_start.?.* and buf_line < fence_region_end.?.*) {
+        if (buf_line >= fence_region_start.?.* and buf_line < fence_region_end.?.* and
+            (fence_region_end.?.* != fence_region_end_open_sentinel or buf_line <= vm_fence_scan_line))
+        {
+            // Already-known region covers buf_line: O(1), and note the
+            // marker (open_ch/open_len) is constant across a single
+            // region's whole span, so `vm_fence_scan_*` — wherever it was
+            // last set for *this* region — stays valid without touching it
+            // here; only `vm_fence_scan_line` (the fast-path high-water
+            // mark) can lag behind while scrolling through a long body,
+            // which just means the next miss may fall back to a bounded
+            // rescan instead of an O(1) step — still correct, not the
+            // O(window²) this whole change removes.
+            fence_cached_for_line.?.* = buf_line;
+        } else if (vm_fence_scan_line != -1 and buf_line > vm_fence_scan_line and
+            buf_line - vm_fence_scan_line <= fence_scan_window_lines)
+        {
+            // Forward-adjacency fast path. `bwGetto`'s doc comment already
+            // establishes paint walks top→bottom, so within one repaint
+            // this covers every row after the first, and it also covers a
+            // repaint's first row whenever the previous repaint left off
+            // no more than a window away (e.g. scrolling down) — steps the
+            // same open/close transition `zig_bw_fence_detect` uses, one
+            // line at a time, instead of a full window rescan per row.
+            var open_ch = vm_fence_scan_open_ch;
+            var open_len = vm_fence_scan_open_len;
+            var region_start = vm_fence_scan_region_start;
+            var step_p: ?*P = null;
+            defer if (step_p) |sp| prm(sp);
+            var scan_line = vm_fence_scan_line;
+            while (scan_line < buf_line) {
+                scan_line += 1;
+                var tmp: [16 * 1024]u8 = undefined;
+                const slice: []const u8 = blk: {
+                    if (scan_line == buf_line) break :blk cur_line_slice;
+                    if (step_p == null) {
+                        const sp = pdup(p, "zig_bw_lgen_view_fence_step") orelse break :blk @as([]const u8, &.{});
+                        zig_c_bw_pline(sp, scan_line);
+                        zig_c_bw_p_goto_bol(sp);
+                        step_p = sp;
+                    }
+                    const rc = readLineFromCurrent(step_p.?, &tmp, @intCast(tmp.len));
+                    break :blk if (rc >= 0) tmp[0..@intCast(rc)] else @as([]const u8, &.{});
+                };
+                fenceStepLine(slice, &open_ch, &open_len, &region_start, scan_line);
+            }
+            vm_fence_scan_line = buf_line;
+            vm_fence_scan_open_ch = open_ch;
+            vm_fence_scan_open_len = open_len;
+            vm_fence_scan_region_start = region_start;
+            if (open_ch == 0) {
+                fence_region_start.?.* = -1;
+                fence_region_end.?.* = -1;
+            } else {
+                fence_region_start.?.* = region_start;
+                // Real end unknown without a forward scan; the sentinel
+                // means "still open as of buf_line" — safe for classifying
+                // *this* buf_line (the `in_fence_body` check below only
+                // tests `buf_line < fence_region_end - 1`, which any real
+                // buf_line satisfies), but the membership check above
+                // special-cases this sentinel so it's never trusted as a
+                // shortcut for any *later* buf_line without a fresh step.
+                fence_region_end.?.* = fence_region_end_open_sentinel;
+            }
             fence_cached_for_line.?.* = buf_line;
         } else {
             // No negative-cache shortcut here (unlike the table detector's
             // `±10` window): a delimiter line correctly reporting "not in a
             // body" says nothing about whether the NEXT line is body — that
             // would require caching a state transition point, not a single
-            // query result. Always re-detect on a region miss; each call is
-            // a single bounded forward pass (`fence_scan_window_lines`),
-            // not the quadratic-ish cost this shortcut exists to avoid.
+            // query result. Fall back to a full bounded scan (O(window),
+            // not the O(window²) the old per-probe reseek cost) and seed
+            // the forward-adjacency tracker above from its result, so the
+            // overwhelmingly likely next call — a small forward hop — can
+            // resume the fast path instead of hitting this branch again.
             fence_region_start.?.* = -1;
             fence_region_end.?.* = -1;
-            const zfd = zig_bw_fence_detect(p, buf_line, fence_region_start, fence_region_end);
+            var open_ch: u8 = 0;
+            var open_len: usize = 0;
+            const zfd = zig_bw_fence_detect(p, buf_line, fence_region_start, fence_region_end, &open_ch, &open_len);
             if (zfd < 0) return -1;
             fence_cached_for_line.?.* = buf_line;
+            // zig_bw_fence_detect answers "is buf_line inside a fence
+            // opened *strictly before* buf_line" (delimiter lines are
+            // classified separately by the caller, so its own scan window
+            // deliberately excludes buf_line's own content). The tracker
+            // instead needs the state *including* buf_line — so the next
+            // line (buf_line+1) starts from the right place even when
+            // buf_line itself is an opening or closing delimiter — so
+            // apply buf_line's own transition once more before seeding it.
+            var region_start_for_scan: i64 = if (open_ch != 0) fence_region_start.?.* else -1;
+            fenceStepLine(cur_line_slice, &open_ch, &open_len, &region_start_for_scan, buf_line);
+            vm_fence_scan_line = buf_line;
+            vm_fence_scan_open_ch = open_ch;
+            vm_fence_scan_open_len = open_len;
+            vm_fence_scan_region_start = region_start_for_scan;
         }
     }
 
@@ -1537,6 +1837,13 @@ pub export fn zig_bw_lgen_view(
         buf_line > fence_region_start.?.* and buf_line < fence_region_end.?.* - 1;
 
     if (in_fence_body) {
+        // Feature 2.5: nested syntax highlighting — re-parse this body
+        // line with the fence's language syntax (from its opening
+        // delimiter's info string) if one is recognized, overwriting the
+        // plain code-block tint `md.jsf` already assigned. No-op (tint
+        // kept) for an unknown language.
+        applyFenceSyntaxHighlight(p, fence_region_start.?.*, buf_line, charmap);
+
         // Force a fresh col_map build below: hide/subst are all-zero here
         // (no analyzer has touched them), but `col_map_line` may still hold
         // some earlier, unrelated line's index. Setting it to `buf_line`
@@ -1567,8 +1874,46 @@ pub export fn zig_bw_lgen_view(
     // Feature 6.2: resolve setext-underline ambiguity (a `-` run also
     // matches Feature 1.8's thematic break) with a single bounded look at
     // the previous line, before the normal dispatch runs.
-    const cur_line_slice: []const u8 = if (line_len > 0) line_ptr.?[0..@intCast(line_len)] else &.{};
     const is_setext_underline: c_int = if (isSetextUnderline(p, buf_line, cur_line_slice)) 1 else 0;
+    // Feature 4.2.1(d) fix: resolve the blank-line-starts-a-region rule
+    // `analyzeLineStart` can't check itself (single-line, no lookback).
+    const tab_u_scan: u16 = if (tab <= 0) 8 else @intCast(tab);
+    const looks_like_indented_shape = render.looksLikeIndentedCode(cur_line_slice, tab_u_scan);
+    const allow_indented_code_bool = isIndentedCodeAllowed(p, buf_line, cur_line_slice, tab_u_scan);
+    const allow_indented_code: c_int = if (allow_indented_code_bool) 1 else 0;
+    // A line whose shape matches "indented code" but whose region isn't a
+    // valid start (an ordinary list-item continuation line, not preceded
+    // by a blank line) was *also* misparsed by the buffer's own earlier
+    // `md.jsf` DFA pass — that pass has the same "4+ leading whitespace"
+    // shape check, with the same missing list-context awareness, and it
+    // already ran (writing into `atr`/`attr_buf`) before this function was
+    // called, via `:line_start`'s dispatch into the indented-code counting
+    // chain. Re-parse the line from `:idle` instead of blindly resetting
+    // to `defatr`: `:idle` has no special leading-whitespace handling, so
+    // the line gets parsed as ordinary paragraph content — plain text
+    // comes out plain, but inline constructs within it (code spans,
+    // emphasis, links) still get their own correct classification, which
+    // a flat reset would have erased too (a code span colored the same as
+    // its surrounding text is just as wrong as the whole line being
+    // code-tinted). Falls back to the flat reset if `:idle` can't be
+    // found (defensive only — `md.jsf` always defines it).
+    if (looks_like_indented_shape and !allow_indented_code_bool) {
+        var reset_done = false;
+        if (mdIdleStateNo(syntax)) |idle_no| {
+            if (pdup(p, "zig_bw_lgen_view_idle_reparse")) |idle_scratch| {
+                defer prm(idle_scratch);
+                zig_c_bw_pline(idle_scratch, buf_line);
+                zig_c_bw_p_goto_bol(idle_scratch);
+                _ = parse(syntax, idle_scratch, .{ .stack = null, .delim_stack = null, .saved_s = null, .state = idle_no }, charmap);
+                reset_done = true;
+            }
+        }
+        if (!reset_done and atr != null and n > 0) {
+            const alen: usize = @intCast(atr_len);
+            var ri: usize = 0;
+            while (ri < n and ri < alen) : (ri += 1) atr.?[ri] = defatr;
+        }
+    }
     const zls = zig_bw_view_line_start(
         line_ptr,
         line_len,
@@ -1580,6 +1925,7 @@ pub export fn zig_bw_lgen_view(
         col_map_len,
         tab,
         is_setext_underline,
+        allow_indented_code,
     );
     if (zls < 0) return -1;
     if (zls == 1) {
@@ -1808,6 +2154,23 @@ var vm_table_col_align: [vm_max_table_cols]c_int = [_]c_int{0} ** vm_max_table_c
 var vm_fence_region_start: i64 = -1;
 var vm_fence_region_end: i64 = -1;
 var vm_fence_cached_for_line: i64 = -1;
+// Content generation observed by the current region caches. Any edit bumps
+// `gapbuffer.buffer.vm_content_generation`; on mismatch every cached region
+// below is dropped before paint (line numbers may have shifted under them).
+var vm_cache_generation: u64 = 0;
+// Forward-adjacency incremental tracker: paint walks top→bottom
+// (`bwGetto`'s doc comment), so within one repaint `buf_line` increases
+// row over row, and consecutive repaints while scrolling down start only a
+// few lines apart. `vm_fence_scan_line` is the last buf_line whose fence
+// state was resolved (by any path); `vm_fence_scan_open_ch`/`_open_len`/
+// `_region_start` are that state (`open_ch == 0` means not inside a
+// fence). A small forward hop from `vm_fence_scan_line` can step this
+// state one line at a time instead of paying a full `zig_bw_fence_detect`
+// window rescan — see the fast path in `zig_bw_lgen_view`.
+var vm_fence_scan_line: i64 = -1;
+var vm_fence_scan_open_ch: u8 = 0;
+var vm_fence_scan_open_len: usize = 0;
+var vm_fence_scan_region_start: i64 = -1;
 var vm_ready: c_int = 0;
 var vm_last_bw: ?*BW = null;
 
@@ -1843,8 +2206,32 @@ pub export fn zig_bw_vm_prepare(bw: ?*BW, need: c_int) c_int {
         vm_fence_region_start = -1;
         vm_fence_region_end = -1;
         vm_fence_cached_for_line = -1;
+        vm_fence_scan_line = -1;
+        vm_fence_scan_open_ch = 0;
+        vm_fence_scan_open_len = 0;
+        vm_fence_scan_region_start = -1;
         vm_col_map_line = -1;
         vm_last_bw = bw;
+        vm_cache_generation = gapbuffer_mod.vm_content_generation;
+    } else if (vm_cache_generation != gapbuffer_mod.vm_content_generation) {
+        // Buffer content changed since the caches were built (edit/undo/
+        // replace): line numbers in cached regions may have shifted. Drop
+        // every cross-paint cache; per-line state is rebuilt on demand.
+        vm_table_region_start = -1;
+        vm_table_region_end = -1;
+        vm_table_separator_line = -1;
+        vm_table_cached_for_line = -1;
+        vm_table_no_region_line = -1;
+        vm_table_col_count = 0;
+        vm_fence_region_start = -1;
+        vm_fence_region_end = -1;
+        vm_fence_cached_for_line = -1;
+        vm_fence_scan_line = -1;
+        vm_fence_scan_open_ch = 0;
+        vm_fence_scan_open_len = 0;
+        vm_fence_scan_region_start = -1;
+        vm_col_map_line = -1;
+        vm_cache_generation = gapbuffer_mod.vm_content_generation;
     }
 
     if (vm_hide == null or vm_hide_size < need) {
@@ -2027,11 +2414,13 @@ pub export fn zig_bw_vm_cleanup() void {
     vm_fence_region_start = -1;
     vm_fence_region_end = -1;
     vm_fence_cached_for_line = -1;
+    vm_fence_scan_line = -1;
+    vm_fence_scan_open_ch = 0;
+    vm_fence_scan_open_len = 0;
+    vm_fence_scan_region_start = -1;
     vm_ready = 0;
     vm_last_bw = null;
 }
-
-
 
 // Match C bg_* / curlinmask (BG_COLOR is identity in scrn.h).
 extern var bg_text: c_int;
@@ -2287,7 +2676,7 @@ pub export fn zig_bw_lgen_view_entry(
 
     const buf_line = top_line + y - win_y;
     const defatr = viewDefatr(bw, buf_line);
-    const utf8: c_int = if (charmap.@"type" != 0) 1 else 0;
+    const utf8: c_int = if (charmap.type != 0) 1 else 0;
 
     const z = zig_bw_lgen_view(
         t,
@@ -2330,6 +2719,7 @@ pub export fn zig_bw_lgen_view_entry(
         palette,
         pal_len,
         utf8,
+        syntax,
     );
     if (z < 0) {
         zig_bw_vm_after(line_len);
@@ -2377,7 +2767,6 @@ pub export fn zig_bw_table_simple(
     return 0;
 }
 
-
 /// C `struct high_syntax` prefix — only `name` is needed for viewmode dispatch.
 const HighSyntaxRec = extern struct {
     next: ?*HighSyntaxRec,
@@ -2389,6 +2778,34 @@ fn syntaxNameIsMd(syn: ?*HighSyntax) bool {
     const rec: *const HighSyntaxRec = @ptrCast(@alignCast(syn.?));
     const name = rec.name orelse return false;
     return std.mem.eql(u8, std.mem.span(name), "md");
+}
+
+/// C `struct high_state` prefix — only `no` (the state's own index into
+/// `syntax.states[]`, what a `HighlightState.state` value actually is)
+/// needed here.
+const HighStateRec = extern struct {
+    no: isize,
+};
+
+/// Feature B.3/B.6 fix, corrected: `md.jsf`'s `:idle` state index, looked
+/// up by name rather than hardcoded — state indices are assigned by
+/// declaration order in the `.jsf` file, so hardcoding one would silently
+/// break if `md.jsf` is ever reordered. `:idle` (not `:line_start`, state
+/// 0) is the point: `:line_start`'s own dispatch is *why* a 4+-space line
+/// gets wrongly routed into the indented-code counting chain
+/// (`maybe_code`→...→`indented_code`) in the first place — `:idle` has no
+/// such special-casing for leading whitespace, so re-parsing from there
+/// for a line that's *shape*-like indented code but isn't a *valid*
+/// indented-code start (see `isIndentedCodeAllowed`) processes it as
+/// ordinary paragraph content instead: plain text stays plain, and inline
+/// constructs within it (code spans, emphasis, links) get their normal,
+/// correct classification — unlike a blind reset to `defatr`, which would
+/// erase those too, not just the wrong code-block tint.
+fn mdIdleStateNo(syn: ?*HighSyntax) ?isize {
+    var idle_name: [5]u8 = "idle\x00".*;
+    const st = find_state(syn, @ptrCast(&idle_name)) orelse return null;
+    const rec: *const HighStateRec = @ptrCast(@alignCast(st));
+    return rec.no;
 }
 
 fn pathAAbort(comptime msg: []const u8) noreturn {
@@ -2680,8 +3097,6 @@ fn paintOneRow(ctx: anytype, y: isize, p_in: ?*P) ?*P {
     );
     return p;
 }
-
-
 
 extern fn markv(r: c_int) c_int;
 extern var markb: ?*P;
@@ -3045,7 +3460,6 @@ pub export fn zig_bw_bwgenh_entry(w: ?*BW) c_int {
     );
 }
 
-
 /// Feature 2.2 padded table row → Zig `table.paintRow` → hybrid `outatr`.
 ///
 /// C still detects the table region and computes `widths`/`aligns`/`row_type`.
@@ -3075,7 +3489,7 @@ pub export fn zig_bw_table_row(
     if (t == null or screen == null or attr_row == null) return -1;
     if (line == null or line_len < 0) return -1;
     if (x1 <= x0) return -1;
-    if (charmap == null or charmap.?.@"type" == 0) return -1;
+    if (charmap == null or charmap.?.type == 0) return -1;
     if (ncols <= 0 or widths == null or aligns == null) return -1;
     if (ncols > render.table.max_cols) return -1;
 
@@ -3223,7 +3637,7 @@ pub export fn zig_bw_lgen(
     if (t == null or screen == null or attr_row == null or p == null) return -1;
     if (x1 <= x0) return -1;
     if (charmap == null) return -1;
-    const byte_mode = charmap.?.@"type" == 0;
+    const byte_mode = charmap.?.type == 0;
 
     const win_w_isize = x1 - x0;
     if (win_w_isize <= 0 or win_w_isize > 10000) return -1;
@@ -3254,6 +3668,50 @@ pub export fn zig_bw_lgen(
         const parse_tmp = pdup(p, "zig_bw_lgen_parse") orelse return -1;
         defer prm(parse_tmp);
         _ = parse(syntax, parse_tmp, st, charmap);
+
+        // Edit-mode counterpart of the Feature 4.2.1(d) fix in
+        // `zig_bw_lgen_view` (`isIndentedCodeAllowed`): `md.jsf`'s own DFA
+        // has the identical "4+ leading whitespace" shape check with no
+        // cross-line context (its `line_start` dispatch is memoryless —
+        // every line re-decides independently, see the state chain
+        // `maybe_code`→`maybe_code2`→`maybe_code3`→`maybe_code4`), so it
+        // *also* wrongly tints an ordinary list-item continuation line as
+        // an indented code block. Unlike viewmode, nothing runs after this
+        // `parse` call to correct it here, so the fix has to happen at
+        // this shared, generic call site — gated strictly to markdown
+        // syntax so no other language's highlighting is touched. Re-parses
+        // from `:idle` (see `mdIdleStateNo`'s doc comment) rather than a
+        // flat `defatr` reset, so inline constructs within the line (code
+        // spans, emphasis, links) still get their own correct
+        // classification instead of being flattened to plain text too.
+        if (syntaxNameIsMd(syntax)) {
+            const buf_line = zig_c_bw_pline_no(p);
+            var edit_tmp: [1024]u8 = undefined;
+            const rl = bwReadLine(p, buf_line, &edit_tmp, @intCast(edit_tmp.len));
+            if (rl >= 0) {
+                const cur_line: []const u8 = edit_tmp[0..@intCast(rl)];
+                const tab_u_edit: u16 = if (tab <= 0) 8 else @intCast(tab);
+                if (render.looksLikeIndentedCode(cur_line, tab_u_edit) and
+                    !isIndentedCodeAllowed(p, buf_line, cur_line, tab_u_edit))
+                {
+                    var reset_done = false;
+                    if (mdIdleStateNo(syntax)) |idle_no| {
+                        if (pdup(p, "zig_bw_lgen_idle_reparse")) |idle_scratch| {
+                            defer prm(idle_scratch);
+                            zig_c_bw_pline(idle_scratch, buf_line);
+                            zig_c_bw_p_goto_bol(idle_scratch);
+                            _ = parse(syntax, idle_scratch, .{ .stack = null, .delim_stack = null, .saved_s = null, .state = idle_no }, charmap);
+                            reset_done = true;
+                        }
+                    }
+                    if (!reset_done and attr_buf != null and attr_size > 0) {
+                        const reset_n: usize = @min(@as(usize, @intCast(rl)), @as(usize, @intCast(attr_size)));
+                        var ri: usize = 0;
+                        while (ri < reset_n) : (ri += 1) attr_buf[ri] = defatr;
+                    }
+                }
+            }
+        }
     }
 
     const copy_tmp = pdup(p, "zig_bw_lgen_copy") orelse return -1;
@@ -3517,7 +3975,7 @@ pub export fn zig_bw_lgen(
         // Wide-continuation cells (cp==0) are filled by `outatr_complete`.
         if (cell.cp == 0) continue;
 
-        if (preparsed) current_url = emitOsc8Link(current_url, cell.url);
+        if (preparsed) current_url = emitOsc8Link(t, current_url, cell.url);
 
         const atr: c_int = attributeToHybridOrDef(cell.attr, &tc_pal, defatr);
         const xx: isize = x0 + @as(isize, @intCast(cx));
@@ -3545,7 +4003,7 @@ pub export fn zig_bw_lgen(
             );
         }
     }
-    if (preparsed) _ = emitOsc8Link(current_url, null);
+    if (preparsed) _ = emitOsc8Link(t, current_url, null);
     outatr_complete(t);
 
     // Advance caller's P to next line (JOE lgen contract).
@@ -3679,13 +4137,25 @@ fn fillTableColMap(col_map: [*]i64, col_map_size: usize, line: []const u8, layou
 }
 
 /// JOE `out_osc8_link` shaped — content equality (C uses pointer equality on shared URLs).
-fn emitOsc8Link(old: ?[]const u8, new_url: ?[]const u8) ?[]const u8 {
+///
+/// `outatr` (UTF-8 path) doesn't write a character immediately — it stages
+/// it in `outatr_build` and only flushes on the *next* `outatr` call (or an
+/// explicit `outatr_complete`), so a character painted right before a link
+/// transition is still pending when this function's `ttputs` calls run.
+/// Without flushing first, the OSC 8 escape bytes land in the output stream
+/// ahead of that still-buffered character instead of wrapping it — the link
+/// opens, a stale/off-by-one character flushes, then the link closes before
+/// the character it was meant to wrap is even written. `outatr_complete(t)`
+/// forces that flush first so the escape always brackets the right glyph.
+fn emitOsc8Link(t: ?*SCRN, old: ?[]const u8, new_url: ?[]const u8) ?[]const u8 {
     const same = blk: {
         if (old == null and new_url == null) break :blk true;
         if (old == null or new_url == null) break :blk false;
         break :blk std.mem.eql(u8, old.?, new_url.?);
     };
     if (same) return old;
+
+    outatr_complete(t);
 
     if (old != null) ttputs("\x1b]8;;\x1b\\");
     if (new_url) |url| {
@@ -4035,7 +4505,7 @@ test "stripAnsiEscapes compacts attrs with escapes" {
 
 test "emitOsc8Link no-op when unchanged" {
     const u = "http://example.com";
-    try std.testing.expectEqual(@as(?[]const u8, u), emitOsc8Link(u, u));
+    try std.testing.expectEqual(@as(?[]const u8, u), emitOsc8Link(null, u, u));
 }
 
 test "formatLinum trailing cols matches JOE gennum" {
@@ -4063,6 +4533,9 @@ test "bwgen square mark line scope matches C" {
 }
 
 const gap_types = @import("gapbuffer/types.zig");
+/// Direct import (same module graph, no cycle: buffer.zig doesn't import
+/// bw_lgen.zig) so paint can watch `vm_content_generation` for cache drops.
+const gapbuffer_mod = @import("gapbuffer/buffer.zig");
 const GapB = gap_types.B;
 const GapP = gap_types.P;
 const GapOptions = gap_types.OPTIONS;
@@ -4503,7 +4976,7 @@ fn zig_c_bw_get_highlight_state(w: ?*BW, p: ?*P, line: i64) HighlightState {
 }
 fn zig_c_bw_locale_utf8() c_int {
     const lm = locale_map orelse return 0;
-    return if (lm.@"type" != 0) 1 else 0;
+    return if (lm.type != 0) 1 else 0;
 }
 fn zig_c_bw_from_uni(cp: c_int) c_int {
     return if (locale_map) |lm| from_uni(lm, cp) else -1;
@@ -5004,7 +5477,6 @@ pub export fn zig_bw_init_visiblews() c_int {
     }
     return 0;
 }
-
 
 // ---------------------------------------------------------------------------
 // Public JOE C ABI for `joe/bw.h` (formerly abort-wrappers in `joe/bw.c`).

@@ -360,7 +360,7 @@ export fn vlock(vfile: ?*VFILE, addr: i64) ?*anyopaque {
 
     // ── 3. Allocate a fresh batch of pages. ─────────────────────────
     if (vp == null and curvalloc + @as(c_long, PGSIZE) <= maxvalloc) {
-        const pages = @as(?*VPAGE, @alignCast(@ptrCast(joe_malloc(@sizeOf(VPAGE) * INC))));
+        const pages = @as(?*VPAGE, @ptrCast(@alignCast(joe_malloc(@sizeOf(VPAGE) * INC))));
         if (pages) |pgs| {
             // Allocate page-aligned data for all INC pages at once.
             const data = memAlign(PGSIZE, PGSIZE * INC);
@@ -419,7 +419,7 @@ export fn vlock(vfile: ?*VFILE, addr: i64) ?*anyopaque {
                 }
 
                 // Link pages[1..INC-1] into the free list.
-                const vh_arr: [*c]?*VPAGE = @alignCast(@ptrCast(vheaders));
+                const vh_arr: [*c]?*VPAGE = @ptrCast(@alignCast(vheaders));
                 const b_addr_final = @intFromPtr(vbase);
                 const pg_arr: [*]VPAGE = @ptrCast(pgs);
 
@@ -491,14 +491,16 @@ export fn vlock(vfile: ?*VFILE, addr: i64) ?*anyopaque {
         const pgsz: i64 = PGSIZE;
         if (pg_addr + pgsz > file.size) {
             const remain = file.size - pg_addr;
-            _ = joe_read(file.fd, page.data, @as(isize, @intCast(remain)));
+            if (joe_read(file.fd, page.data, @as(isize, @intCast(remain))) < 0)
+                ttsig(-2);
             _ = mset(
                 @ptrFromInt(@intFromPtr(page.data) + @as(usize, @intCast(remain))),
                 0,
                 PGSIZE - @as(isize, @intCast(remain)),
             );
         } else {
-            _ = joe_read(file.fd, page.data, PGSIZE);
+            if (joe_read(file.fd, page.data, PGSIZE) < 0)
+                ttsig(-2);
         }
     } else {
         _ = mset(page.data, 0, PGSIZE);
@@ -511,7 +513,7 @@ export fn vlock(vfile: ?*VFILE, addr: i64) ?*anyopaque {
 /// temporary name on disk only when pages must be evicted.
 export fn vtmp() ?*VFILE {
     const vh = joe_malloc(@sizeOf(VFILE)) orelse return null;
-    const newf = @as(*VFILE, @alignCast(@ptrCast(vh)));
+    const newf = @as(*VFILE, @ptrCast(@alignCast(vh)));
     newf.* = VFILE{
         .link = .{ .next = undefined, .prev = undefined },
         .size = 0,
@@ -538,7 +540,7 @@ export fn vclose(vfile: ?*VFILE) void {
 
     if (file.vpage) |vp| {
         // vunlock via the C macro: decrement count on the page header.
-        const vh_arr: [*c]?*VPAGE = @alignCast(@ptrCast(vheaders));
+        const vh_arr: [*c]?*VPAGE = @ptrCast(@alignCast(vheaders));
         if (vh_arr != null) {
             const idx = (@intFromPtr(vp) - @intFromPtr(vbase)) >> LPGSIZE;
             if (vh_arr[idx]) |hdr| {
@@ -547,7 +549,7 @@ export fn vclose(vfile: ?*VFILE) void {
         }
     }
     if (file.vpage1) |vp1| {
-        const vh_arr: [*c]?*VPAGE = @alignCast(@ptrCast(vheaders));
+        const vh_arr: [*c]?*VPAGE = @ptrCast(@alignCast(vheaders));
         if (vh_arr != null) {
             const idx = (@intFromPtr(vp1) - @intFromPtr(vbase)) >> LPGSIZE;
             if (vh_arr[idx]) |hdr| {
@@ -610,7 +612,7 @@ export fn my_valloc(vfile: ?*VFILE, size: i64) i64 {
     const start = vsize(file);
     file.alloc = start + size;
     if (file.lv != 0) {
-        const vh_arr: [*c]?*VPAGE = @alignCast(@ptrCast(vheaders));
+        const vh_arr: [*c]?*VPAGE = @ptrCast(@alignCast(vheaders));
         const idx = (@intFromPtr(file.vpage) - @intFromPtr(vbase)) >> LPGSIZE;
         const hdr = vh_arr[idx] orelse return start;
         if (hdr.addr + PGSIZE > file.alloc) {
@@ -634,7 +636,7 @@ fn vheaderLookup(page_data: ?*anyopaque) ?*VPAGE {
     const vh = vheaders orelse return null;
     const base = vbase orelse return null;
     const idx = (@intFromPtr(page_data) - @intFromPtr(base)) >> @as(u64, @intCast(LPGSIZE_VAL));
-    const arr: [*c]?*VPAGE = @alignCast(@ptrCast(vh));
+    const arr: [*c]?*VPAGE = @ptrCast(@alignCast(vh));
     return arr[idx];
 }
 

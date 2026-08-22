@@ -136,7 +136,7 @@ pub fn analyzeLine(tables: *ViewTables, line: []const u8, attrs: ?[]Attribute) !
         tables.len = line.len;
     }
 
-    if (analyzeLineStart(tables, line, 8)) return;
+    if (analyzeLineStart(tables, line, 8, true)) return;
 
     // Feature 1.4: Bold/italic/strikethrough — hide delimiters (skip list markers + code spans)
     applyEmphasis(tables, line);
@@ -156,9 +156,43 @@ pub fn analyzeLine(tables: *ViewTables, line: []const u8, attrs: ?[]Attribute) !
     buildColMap(tables, line, 8);
 }
 
+/// Feature 4.2.1(d) shape check: does `line` start with 4+ display columns
+/// of leading whitespace followed by non-whitespace that isn't itself a
+/// bullet marker (`*`/`-`/`+` + space/tab)? Exposed (not just inlined into
+/// `analyzeLineStart` below) so a caller with adjacent-line access
+/// (`src/bw_lgen.zig`) can walk lines above to resolve the CommonMark rule
+/// this single-line function can't: an indented code block only *starts*
+/// right after a blank line (or buffer start).
+pub fn looksLikeIndentedCode(line: []const u8, tab: u16) bool {
+    const tab_u: u16 = if (tab == 0) 8 else tab;
+    var i: usize = 0;
+    var col: u16 = 0;
+    while (i < line.len and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {
+        col += if (line[i] == '\t') tab_u - (col % tab_u) else 1;
+    }
+    if (col < 4 or i >= line.len) return false;
+    const c = line[i];
+    const next_is_ws = i + 1 < line.len and (line[i + 1] == ' ' or line[i + 1] == '\t');
+    const looks_like_bullet = (c == '*' or c == '-' or c == '+') and next_is_ws;
+    return !looks_like_bullet;
+}
+
 /// Line-start Feature 1.3/1.5/1.7/1.8 (+ task 1.7.4). Returns true when the
 /// line is fully handled (JOE `goto done`); false to continue with tables/inline.
-pub fn analyzeLineStart(tables: *ViewTables, line: []const u8, tab: u16) bool {
+///
+/// `allow_indented_code`: whether Feature 4.2.1(d)'s 4+-space check may
+/// treat this line as an indented code block. This function is pure and
+/// single-line (no adjacent-line access), so the caller must resolve the
+/// CommonMark rule that an indented code block only *starts* right after a
+/// blank line (or buffer start) — a plain callers passing `true`
+/// unconditionally would misclassify an ordinarily-indented list-item
+/// continuation line (e.g. `- item\n      more text`, 6-space aligned
+/// under the marker) as code, dropping its markdown processing entirely.
+/// Callers without adjacent-line context (e.g. `analyzeLine`, used for
+/// single-line click resolution) should pass `true` to preserve the prior,
+/// simpler per-line-only behavior; the live paint path
+/// (`zig_bw_view_line_start` in `src/bw_lgen.zig`) computes the real value.
+pub fn analyzeLineStart(tables: *ViewTables, line: []const u8, tab: u16, allow_indented_code: bool) bool {
     const tab_u: u16 = if (tab == 0) 8 else tab;
     // Feature 1.3: Heading — hide # run and trailing space
     {
@@ -239,8 +273,11 @@ pub fn analyzeLineStart(tables: *ViewTables, line: []const u8, tab: u16) bool {
                 tables.substitute[after] = if (checked) @as(u21, 0x2611) else @as(u21, 0x2610);
                 tables.hide[after + 1] = 1;
                 tables.hide[after + 2] = 1;
-                if (after + 3 < line.len and line[after + 3] == ' ')
-                    tables.hide[after + 3] = 1;
+                // The space right after `]` stays visible (unlike a
+                // heading's `#` + space, which collapses entirely): the
+                // checkbox glyph itself still occupies a display column,
+                // so hiding this too left the glyph touching the item
+                // text with no gap at all (`☑Checked task`).
             }
         }
     }
@@ -273,24 +310,14 @@ pub fn analyzeLineStart(tables: *ViewTables, line: []const u8, tab: u16) bool {
 
     // Feature 4.2.1(d): Indented code block — 4+ display columns of leading
     // whitespace, not otherwise recognized above (headings/fences/quotes/
-    // tasks/HR already returned). No block-context (blank-line-before)
-    // tracking; single line-start test only, unlike fenced regions which
-    // need `zig_bw_fence_detect`. Skip a plain bullet marker so a deeply
-    // nested list item's content isn't misread as code.
+    // tasks/HR already returned). `allow_indented_code` (caller-resolved;
+    // see doc comment above) gates this so an ordinary list-item
+    // continuation line — indented to align under its marker, but not
+    // preceded by a blank line — isn't misclassified as a code block.
     {
-        var i: usize = 0;
-        var col: u16 = 0;
-        while (i < line.len and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {
-            col += if (line[i] == '\t') tab_u - (col % tab_u) else 1;
-        }
-        if (col >= 4 and i < line.len) {
-            const c = line[i];
-            const next_is_ws = i + 1 < line.len and (line[i + 1] == ' ' or line[i + 1] == '\t');
-            const looks_like_bullet = (c == '*' or c == '-' or c == '+') and next_is_ws;
-            if (!looks_like_bullet) {
-                buildColMap(tables, line, tab_u);
-                return true;
-            }
+        if (allow_indented_code and looksLikeIndentedCode(line, tab_u)) {
+            buildColMap(tables, line, tab_u);
+            return true;
         }
     }
 
@@ -357,7 +384,17 @@ fn applyEmphasis(tables: *ViewTables, line: []const u8) void {
     if (j < line.len and (line[j] == '*' or line[j] == '-' or line[j] == '+') and
         j + 1 < line.len and (line[j + 1] == ' ' or line[j + 1] == '\t'))
     {
-        return; // list marker — skip inline emphasis
+        // List marker: step past just the marker character, not the rest
+        // of the line — a bare `return` here (this block's previous form)
+        // discarded emphasis processing for the entire line, so
+        // `- **bold** text` never concealed its `**` at all. Only the
+        // marker itself needs protecting from being misread as an
+        // emphasis delimiter, and the flanking-rule gate right below
+        // already does that correctly on its own (the marker's `*` is
+        // immediately followed by whitespace, so `can_open` is false) —
+        // this `j += 1` is belt-and-suspenders documentation of intent,
+        // not load-bearing.
+        j += 1;
     }
 
     while (j < line.len) {
@@ -553,8 +590,28 @@ fn hideSpan(tables: *ViewTables, start: usize, end: usize) void {
 /// Autolinks (`<u>`) and bare URLs have no label to fall back on, so they
 /// are handled elsewhere (styled, never concealed) and never reach here.
 fn applyLinks(tables: *ViewTables, line: []const u8, attrs: ?[]Attribute) void {
+    if (line.len == 0) return;
+    var in_code_buf: [4096]u8 = undefined;
+    var heap_code: ?[]u8 = null;
+    defer if (heap_code) |h| tables.allocator.free(h);
+    const in_code: []u8 = blk: {
+        if (line.len <= in_code_buf.len) break :blk in_code_buf[0..line.len];
+        const h = tables.allocator.alloc(u8, line.len) catch return;
+        heap_code = h;
+        break :blk h;
+    };
+    markCodeSpans(in_code, line);
+
     var i: usize = 0;
     while (i < line.len) {
+        // CommonMark: a code span's content is literal text — no link or
+        // image syntax recognized inside it (matches `applyEmphasis`'s
+        // same `in_code` guard, mirrored here rather than shared/threaded
+        // through since each inline function already computes it locally).
+        if (in_code[i] != 0) {
+            i += 1;
+            continue;
+        }
         const bang = line[i] == '!' and i + 1 < line.len and line[i + 1] == '[';
         if (line[i] != '[' and !bang) {
             i += 1;
@@ -573,8 +630,19 @@ fn applyLinks(tables: *ViewTables, line: []const u8, attrs: ?[]Attribute) void {
             var k = j + 2;
             while (k < line.len and line[k] != ')') : (k += 1) {}
             if (k < line.len) {
-                if (bang) tables.hide[i] = 1;
-                tables.hide[bracket_start] = 1;
+                if (bang) {
+                    tables.substitute[i] = image_chrome;
+                    // Padding space between the chrome glyph and the alt
+                    // text (using the `[` byte, which would otherwise
+                    // conceal to zero width): some terminal fonts render
+                    // symbol-block glyphs slightly wider than one cell, so
+                    // a real space here gives that overhang somewhere
+                    // harmless to land instead of overlapping the first
+                    // letter of `alt`.
+                    tables.substitute[bracket_start] = ' ';
+                } else {
+                    tables.hide[bracket_start] = 1;
+                }
                 tables.hide[j] = 1;
                 tables.hide[j + 1] = 1;
                 hideSpan(tables, j + 2, k);
@@ -595,8 +663,12 @@ fn applyLinks(tables: *ViewTables, line: []const u8, attrs: ?[]Attribute) void {
             var k = j + 2;
             while (k < line.len and line[k] != ']') : (k += 1) {}
             if (k < line.len) {
-                if (bang) tables.hide[i] = 1;
-                tables.hide[bracket_start] = 1;
+                if (bang) {
+                    tables.substitute[i] = image_chrome;
+                    tables.substitute[bracket_start] = ' '; // see inline-link branch above
+                } else {
+                    tables.hide[bracket_start] = 1;
+                }
                 tables.hide[j] = 1;
                 tables.hide[j + 1] = 1;
                 hideSpan(tables, j + 2, k);
@@ -631,6 +703,23 @@ fn isAutolinkSchemeChar(c: u8) bool {
     return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or
         c == '+' or c == '.' or c == '-';
 }
+
+/// Feature 2.6: image chrome — `⬚` (U+2B1A DOTTED SQUARE) marks a concealed
+/// `![alt](url)`/`![alt][ref]` as an image rather than a plain link, since
+/// after conceal both would otherwise render as identical plain colored
+/// text (alt vs. link-text color is the only other distinguishing signal,
+/// and `md.jsf`'s `MdImageAlt` already supplies that). No inline bitmap
+/// rendering (Sixel/Kitty) — text-only.
+///
+/// Originally `▣` (U+25A3, Geometric Shapes block) — replaced after a
+/// real terminal-overlap report: U+25A3 has Unicode East Asian Width
+/// **Ambiguous**, so some terminals render it 2 columns wide while JOE's
+/// own width table (and this codebase's other substitutes) treat it as 1,
+/// causing the next character to be painted into what the terminal
+/// thought was still the glyph's second cell. `☐`/`☑` (U+2610/U+2611,
+/// already shipped, no overlap reports) are EAW **Neutral** — universally
+/// narrow, no ambiguity — and U+2B1A shares that property.
+const image_chrome: u21 = 0x2B1A;
 
 /// CommonMark explicit autolink: `<scheme:rest>`, scheme
 /// `[a-zA-Z][a-zA-Z0-9+.-]{1,31}`, no space/`<` before the closing `>`.
@@ -1010,12 +1099,12 @@ test "view inline link with title hides destination and title" {
     );
 }
 
-test "view image hides bang/brackets/destination, leaves alt visible" {
+test "view image shows chrome glyph + alt, hides brackets/destination" {
     var tables = ViewTables.init(testing.allocator);
     defer tables.deinit();
     const line = "![alt](http://x.png) end";
     try analyzeLine(&tables, line, null);
-    try expectRendered(testing.allocator, line, "  alt                end");
+    try expectRendered(testing.allocator, line, "\u{2B1A} alt                end");
     // Images aren't styled as clickable link text (no underline/color).
     try testing.expectEqualStrings("http://x.png", tables.linkAt(2).?);
 }

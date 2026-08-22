@@ -482,6 +482,93 @@ language HL (roadmap 2.5), block margins, dropped fence lines, wrapped table cel
 
 ---
 
+## Post-Phase-7 bug fixes (found via plans/future-roadmap.md rendering itself)
+
+Opening `plans/future-roadmap.md` in viewmode (and, for B.5/B.6, edit mode) after landing Feature
+2.5/2.6 surfaced five real bugs, all in code Phases 1–6 already shipped (not new regressions from
+2.5/2.6) — its own task list (`- [x] **2.7.1** ...`, 6-space-aligned continuation lines, inline
+code spans describing image syntax) happened to be the first content in this repo shaped exactly
+right to trigger all of them.
+
+- [x] **B.1** `applyEmphasis`'s list-marker guard (`src/render/view.zig`) used to `return`
+      outright on seeing a leading `- `/`* `/`+ ` shape, discarding emphasis processing for the
+      *rest of the line*, not just protecting the marker character — `- **bold** text` rendered
+      with literal, unconcealed `**`. Changed to skip past just the marker; the flanking-rule gate
+      right below already correctly leaves a marker's `*` unable to open emphasis (it's followed
+      by whitespace) on its own, so the guard's own special-casing turned out to be redundant
+      with logic that already existed, not load-bearing.
+- [x] **B.2** Task checkbox substitution (`src/render/view.zig`) hid the space right after `]`,
+      same as a heading's `#` + space. For headings that's right (the whole marker vanishes, text
+      should sit flush left); for checkboxes it left the *visible* ☐/☑ glyph touching the
+      following text with no gap (`☑Checked task`). Stopped hiding that one space.
+- [x] **B.3** `analyzeLineStart`'s Feature 4.2.1(d) indented-code check (`src/render/view.zig`,
+      pure/single-line by design) had no way to apply CommonMark's rule that an indented code
+      block only *starts* right after a blank line — every ordinarily-indented list-item
+      continuation line (aligned under its marker, never preceded by a blank line) was
+      misclassified as code, silently dropping markdown processing for it. Added an
+      `allow_indented_code: bool` parameter (default `true` for callers without adjacent-line
+      context, e.g. click resolution) resolved by a new bounded backward scan in
+      `src/bw_lgen.zig` (`isIndentedCodeAllowed`, same window/precedent as `zig_bw_fence_detect`).
+      Root cause runs one layer deeper than just viewmode, too: the buffer's own earlier `md.jsf`
+      DFA pass has the *same* naive "4+ leading spaces" shape check baked into the grammar, so it
+      *also* tinted such lines as code — before `zig_bw_view_line_start` runs, `zig_bw_lgen_view`
+      corrects `attr_buf` for a line that looks code-shaped but fails the new backward-scan check
+      (see B.8 — superseded a first version that reset to `defatr` outright, which fixed the
+      base tint but wrongly flattened inline code spans on the same line too).
+- [x] **B.4** `tests/viewmode.py`: 3 new regression tests
+      (`test_viewmode_list_marker_followed_by_bold`,
+      `test_viewmode_task_checkbox_followed_by_bold`,
+      `test_viewmode_list_continuation_line_processes_markdown`); the 3 existing checkbox tests
+      updated for B.2's added space. `zig build render-test` unaffected (no existing unit test
+      relied on the old, buggy behavior in any of these three cases). Soak 228 → 231.
+- [x] **B.5** `applyLinks` (`src/render/view.zig`) was the one inline function of the four
+      (`applyEmphasis`/`applyLinks`/`applyAutolinks`/`applyEntities`) missing a code-span guard —
+      the other three already skip positions `markCodeSpans` marks as inside a code span, matching
+      CommonMark's rule that a code span's content is literal text, no other inline construct
+      recognized within it. `` `![alt](url)` `` (describing image syntax *as text*, inside
+      backticks) was wrongly treated as a real image: backticks/brackets/destination concealed,
+      chrome glyph substituted for `!`, landing directly against the *next* concealed image with
+      no gap — the "icons overlap" symptom. Added the same `markCodeSpans`/`in_code` guard the
+      other three already have.
+- [x] **B.6** Edit-mode counterpart of B.3 — `md.jsf`'s DFA misclassifying a list-item
+      continuation line as indented code (B.3's root cause) affects *edit mode* too, since it's
+      the buffer's own DFA doing it, independent of viewmode entirely; B.3's fix only corrected
+      `attr_buf` inside `zig_bw_lgen_view` (viewmode's paint path), which edit mode never reaches
+      (`zig_c_bw_lgen` dispatches viewmode+md to `bwLgenView`, everything else — including
+      edit-mode markdown — to the generic `bwLgenCore`/`zig_bw_lgen`). Added the identical
+      backward-scan-gated fix (see B.8) to `zig_bw_lgen`'s own `parse` call site, strictly gated
+      on `syntaxNameIsMd(syntax)` so no other language's highlighting is touched. Considered fixing
+      `md.jsf` itself instead (the real root cause — its `line_start` dispatch is memoryless,
+      `maybe_code`→`maybe_code2`→`maybe_code3`→`maybe_code4` just counts 4 leading whitespace chars
+      with zero cross-line context) but that needs threading a "was the previous line blank"
+      distinction through essentially every state's `"\n"` transition in a hand-authored DFA
+      grammar used by every markdown file, edit mode and viewmode alike — judged too wide a blast
+      radius for this pass; the Zig-side fix, already proven correct for viewmode, was the bounded
+      one. Verified with a clean baseline-vs-fixed `.fg` comparison on the exact bug content (cyan
+      before, default after, same default color scheme both times).
+      *Separately confirmed pre-existing, unrelated, not fixed here:* a literal `**` inside a
+      **genuine** indented code block renders bold instead of staying code-tinted (reproduces on
+      unmodified `634c0a00`) — flagged as a follow-up task, root cause not yet found.
+- [x] **B.7** `tests/viewmode.py`: 2 more regression tests
+      (`test_viewmode_image_syntax_inside_code_span_stays_literal`,
+      `test_edit_mode_list_continuation_not_code_tinted`). Soak 231 → 233.
+- [x] **B.8** B.3/B.6's first cut reset the *whole* misclassified line's `attr_buf` to `defatr` —
+      fixed the wrong code-block tint, but a continuation line often has its *own* real inline
+      constructs (code spans, emphasis, links), and a blind reset erased their correct coloring
+      too, flattening everything to plain text. Corrected to *re-parse* the line through `md.jsf`'s
+      `:idle` state instead of resetting: `:idle` (unlike `:line_start`) has no special leading-
+      whitespace handling, so it can never re-enter the buggy indented-code counting chain, but it
+      *does* correctly recognize a `` `code span` `` or `**bold**` within the line and classify it
+      properly. Needed `find_state` (`src/syntax.zig`) exported (`pub fn` → `pub export fn`, a
+      pure visibility change, zero behavior difference) to look up `:idle`'s state index by name
+      rather than hardcoding one — state indices are declaration-order-assigned, so a hardcoded
+      index would silently break if `md.jsf` is ever reordered. `mdIdleStateNo`
+      (`src/bw_lgen.zig`) wraps that lookup; both B.3's and B.6's fix sites now call it and re-run
+      `parse` from that state instead of memsetting `attr_buf`. New regression test
+      `test_edit_mode_list_continuation_code_span_stays_colored`. Soak 233 → 234.
+
+---
+
 ## Execution notes for agents
 
 1. Read `plans/markdown-wysiwyg-feasibility.md` before coding — especially §3 (conceal

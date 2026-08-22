@@ -464,12 +464,18 @@ class ViewModeTests(joefx.JoeTestBase):
         self.assertExited()
 
     def test_viewmode_image_alt_text_only(self):
-        """Image ![alt](u) shows only alt text in viewmode; edit mode reveals the source"""
+        """Image ![alt](u) shows a chrome glyph + alt text in viewmode
+        (Feature 2.6 -- distinguishes it from a plain concealed link, which
+        gets no such marker); edit mode reveals the source. A real padding
+        space sits between the glyph and the alt text (not just conceal's
+        usual zero-width collapse) so a font that renders the glyph
+        slightly wider than one cell has somewhere harmless to overflow
+        into, instead of overlapping the first letter of the alt text."""
         self.workdir.fixtureData("test.md", "![a diagram](http://x.com/d.png) end\n")
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("a diagram end", x=0)
+        self.assertTextAt("⬚ a diagram end", x=0)
         row = self.joe.readLine(0, 0, self.joe.size.X)
         self.assertNotIn("http://x.com/d.png", row)
         self.mode("viewmode")
@@ -543,7 +549,7 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("- \u2610Unchecked task", x=0)
+        self.assertTextAt("- \u2610 Unchecked task", x=0)
         self.exitJoe()
         self.assertExited()
 
@@ -553,7 +559,7 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("- \u2611Checked task", x=0)
+        self.assertTextAt("- \u2611 Checked task", x=0)
         self.exitJoe()
         self.assertExited()
 
@@ -563,7 +569,122 @@ class ViewModeTests(joefx.JoeTestBase):
         self.startup.args = ("test.md",)
         self.startJoe()
         self.mode("viewmode")
-        self.assertTextAt("- \u2611Checked task", x=0)
+        self.assertTextAt("- \u2611 Checked task", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_list_marker_followed_by_bold(self):
+        """Regression: a bullet marker immediately followed by real
+        emphasis must still conceal that emphasis -- applyEmphasis's
+        list-marker guard used to `return` on sight of a leading `- `/`* `/
+        `+ ` shape, discarding emphasis processing for the *entire* line,
+        not just protecting the marker character itself. `- **bold** x`
+        rendered as literal `- **bold** x` instead of `- bold x`."""
+        self.workdir.fixtureData("test.md", "- **bold** text\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("- bold text", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_task_checkbox_followed_by_bold(self):
+        """Same regression as above, combined with a task checkbox (the
+        shape task-list items in plans/*.md actually use, e.g.
+        `- [x] **2.6.1** ...`)."""
+        self.workdir.fixtureData("test.md", "- [x] **bold** text\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("- \u2611 bold text", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_list_continuation_line_processes_markdown(self):
+        """Regression: a list item's continuation line (indented to align
+        under its marker, not preceded by a blank line) must not be
+        misclassified as an indented code block -- that dropped its
+        markdown processing entirely, so `**bold**`/`` `code` `` stayed
+        literal instead of concealing. Uses the exact shape
+        plans/future-roadmap.md's task list items use (6-space-aligned
+        continuation under `- [x] **N.N** `)."""
+        content = "- [x] **2.6.1** some text here\n      more **bold** and `code` text\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("- \u2611 2.6.1 some text here", x=0, y=1)
+        self.assertTextAt("more bold and code text", x=6, y=2)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_image_syntax_inside_code_span_stays_literal(self):
+        """CommonMark: a code span's content is literal text -- no other
+        inline construct (including images/links) is recognized inside it.
+        `applyLinks` was the one inline function missing this guard
+        (`applyEmphasis`/`applyAutolinks`/`applyEntities` already had it),
+        so `` `![alt](url)` `` inside backticks was wrongly treated as a
+        real image -- concealing its syntax and showing the image chrome
+        glyph instead of the literal source text describing it."""
+        content = "See `![alt](url)`/`![alt][ref]` here.\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("See ![alt](url)/![alt][ref] here.", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_edit_mode_list_continuation_not_code_tinted(self):
+        """The md.jsf-level counterpart of the continuation-line fix above
+        (plans/TODO.md B.3): `md.jsf`'s own DFA has the identical "4+
+        leading whitespace" shape check with no cross-line context, so --
+        independent of viewmode entirely -- it also tinted an ordinary
+        list-item continuation line as an indented code block (cyan, in
+        this suite's default scheme). Edit mode never concealed anything
+        here, so this is a pure color check, confirmed against a live
+        before/after comparison on this exact content (cyan before the
+        fix, default after)."""
+        content = ("- [x] **2.6.1** stuff here\n"
+                   "      more text on a continuation line\n")
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        # Edit mode: no self.mode("viewmode") call.
+        self.assertTextAt("more text on a continuation line", x=6, y=2)
+        self.assertTrue(
+            self.joe.expect(lambda: self.joe.term.buffer[2][6].fg == "default"),
+            "list continuation line text must render in the normal text color, not the indented-code-block tint",
+        )
+        self.exitJoe()
+        self.assertExited()
+
+    def test_edit_mode_list_continuation_code_span_stays_colored(self):
+        """Follow-up to B.6: the fix must not just remove the wrong
+        code-block tint from a continuation line, it must preserve
+        correct classification *within* it too. The first version of the
+        fix reset the whole line's attributes to `defatr`, which fixed the
+        plain-text tint but also flattened genuine inline code spans on
+        that same line to plain-text color -- wrong in the other
+        direction. Re-parsing from `md.jsf`'s `:idle` state (instead of a
+        blind reset) fixes both: plain text plain, code spans still
+        colored."""
+        content = "- [x] item\n      see `some_code` here\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        # Edit mode: no self.mode("viewmode") call.
+        self.assertTextAt("see `some_code` here", x=6, y=2)
+
+        def settled():
+            # x=6 is 's' of "see" (plain text); x=11 is 's' of "some_code"
+            # (inside the code span) -- they must differ once painted.
+            return self.joe.term.buffer[2][11].fg != self.joe.term.buffer[2][6].fg
+
+        self.assertTrue(
+            self.joe.expect(settled),
+            "an inline code span on a list continuation line must keep its own distinct color",
+        )
         self.exitJoe()
         self.assertExited()
 
@@ -826,6 +947,77 @@ class ViewModeTests(joefx.JoeTestBase):
         self.assertTextAt("line one", x=0, y=2)
         self.assertTextAt("~~~", x=0, y=3)
         self.assertTextAt("line two", x=0, y=4)
+        self.exitJoe()
+        self.assertExited()
+
+    # --- Feature 2.5: nested syntax highlighting in fenced code blocks ---
+
+    def test_viewmode_fence_syntax_highlight_python(self):
+        """A recognized language tag gets real syntax highlighting on the
+        fence body (plan future-roadmap.md Feature 2.5), not just the
+        plain code-block tint -- checked here via the 'class' keyword's
+        bold attribute, since text-only assertions would pass identically
+        whether or not this feature ran at all (the text was already
+        visible before Feature 2.5; only its styling is new)."""
+        content = "```python\nclass Foo:\n```\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("class Foo:", x=0, y=2)
+        self.assertTrue(self.joe.expect(lambda: self.joe.term.buffer[2][0].bold), "'class' keyword should be bold")
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_fence_syntax_highlight_javascript(self):
+        """Language tag matching a syntax file 1:1 (js.jsf's own base name
+        is 'js', but the CommonMark-conventional tag is 'javascript')."""
+        content = "```javascript\nfunction foo() {\n```\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("function foo() {", x=0, y=2)
+        self.assertTrue(self.joe.expect(lambda: self.joe.term.buffer[2][0].bold), "'function' keyword should be bold")
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_fence_syntax_highlight_c(self):
+        content = "```c\nint main() {\n```\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("int main() {", x=0, y=2)
+        self.assertTrue(self.joe.expect(lambda: self.joe.term.buffer[2][0].bold), "'int' keyword should be bold")
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_fence_syntax_highlight_tilde_c(self):
+        """Same as the backtick case, but for a ~~~ fence -- Feature 2.5
+        hooks into the same fence-body region cache Feature 1.0 uses,
+        which doesn't distinguish fence character."""
+        content = "~~~c\nint main() {\n~~~\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("int main() {", x=0, y=2)
+        self.assertTrue(self.joe.expect(lambda: self.joe.term.buffer[2][0].bold), "'int' keyword should be bold")
+        self.exitJoe()
+        self.assertExited()
+
+    def test_viewmode_fence_syntax_highlight_unknown_language_falls_back(self):
+        """Plan 2.5.4: a language with no matching syntax/<name>.jsf falls
+        back to the plain code-block tint -- text renders unchanged, no
+        crash, and (unlike a recognized language) nothing goes bold."""
+        content = "```unknown\nsome unknown code\n```\n"
+        self.workdir.fixtureData("test.md", content)
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("some unknown code", x=0, y=2)
+        self.assertFalse(self.joe.term.buffer[2][0].bold, "unknown language should not be bolded")
         self.exitJoe()
         self.assertExited()
 
@@ -1200,6 +1392,23 @@ class ViewModeTests(joefx.JoeTestBase):
         self.joe.write("\x1b[<0;6;2m")
         self.joe.expect(lambda: False)
         self.assertTextAt("See docs here", x=0)
+        self.exitJoe()
+        self.assertExited()
+
+    def test_click_image_alt_does_not_crash(self):
+        """Feature 2.6.3: an image's destination is concealed the same way
+        as a link's, so it shares the same click-to-open wiring (link_url
+        set on the alt-text span) -- clicking the alt text must not crash,
+        same unsafe-scheme-no-op pattern as the link click tests above."""
+        self.workdir.fixtureData("test.md", "See ![x](javascript:alert1) here\n")
+        self.startup.args = ("test.md",)
+        self.startJoe()
+        self.mode("viewmode")
+        self.assertTextAt("See ⬚ x here", x=0)
+        self.joe.write("\x1b[<0;7;2M")
+        self.joe.write("\x1b[<0;7;2m")
+        self.joe.expect(lambda: False)
+        self.assertTextAt("See ⬚ x here", x=0)
         self.exitJoe()
         self.assertExited()
 

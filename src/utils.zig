@@ -26,7 +26,9 @@ extern fn fprintf(f: ?*anyopaque, fmt: [*c]const u8, ...) c_int;
 extern fn fputc(c: c_int, f: ?*anyopaque) c_int;
 extern fn exit(status: c_int) noreturn;
 extern fn __error() [*c]c_int;
-fn errno_() c_int { return __error().*; }
+fn errno_() c_int {
+    return __error().*;
+}
 const EINTR: c_int = 4;
 
 extern fn ttsig(sig: c_int) void;
@@ -44,7 +46,7 @@ const CharmapFn = ?*const fn (?*anyopaque, c_int) callconv(.c) c_int;
 const Charmap = extern struct {
     next: ?*anyopaque,
     name: ?*const anyopaque,
-    @"type": c_int,
+    type: c_int,
     _pad: c_int,
     is_punct: CharmapFn,
     is_print: CharmapFn,
@@ -55,12 +57,12 @@ const Charmap = extern struct {
     to_upper: CharmapFn,
 };
 fn joe_isalpha_(map: ?*anyopaque, c: c_int) c_int {
-    const m = @as(*const Charmap, @alignCast(@ptrCast(map orelse return 0)));
+    const m = @as(*const Charmap, @ptrCast(@alignCast(map orelse return 0)));
     if (m.is_alpha_) |f| return f(map, c);
     return 0;
 }
 fn joe_isalnum_(map: ?*anyopaque, c: c_int) c_int {
-    const m = @as(*const Charmap, @alignCast(@ptrCast(map orelse return 0)));
+    const m = @as(*const Charmap, @ptrCast(@alignCast(map orelse return 0)));
     if (m.is_alnum_) |f| return f(map, c);
     return 0;
 }
@@ -78,14 +80,30 @@ const Cclass = extern struct {
 // min / max
 // ═══════════════════════════════════════════════════════════════════════
 
-export fn uns_min(a: c_uint, b: c_uint) c_uint { return if (a < b) a else b; }
-export fn int_min(a: c_int, b: c_int) c_int { return if (a < b) a else b; }
-export fn long_max(a: c_long, b: c_long) c_long { return if (a > b) a else b; }
-export fn long_min(a: c_long, b: c_long) c_long { return if (a < b) a else b; }
-export fn off_max(a: i64, b: i64) i64 { return if (a > b) a else b; }
-export fn off_min(a: i64, b: i64) i64 { return if (a < b) a else b; }
-export fn diff_max(a: isize, b: isize) isize { return if (a > b) a else b; }
-export fn diff_min(a: isize, b: isize) isize { return if (a < b) a else b; }
+export fn uns_min(a: c_uint, b: c_uint) c_uint {
+    return if (a < b) a else b;
+}
+export fn int_min(a: c_int, b: c_int) c_int {
+    return if (a < b) a else b;
+}
+export fn long_max(a: c_long, b: c_long) c_long {
+    return if (a > b) a else b;
+}
+export fn long_min(a: c_long, b: c_long) c_long {
+    return if (a < b) a else b;
+}
+export fn off_max(a: i64, b: i64) i64 {
+    return if (a > b) a else b;
+}
+export fn off_min(a: i64, b: i64) i64 {
+    return if (a < b) a else b;
+}
+export fn diff_max(a: isize, b: isize) isize {
+    return if (a > b) a else b;
+}
+export fn diff_min(a: isize, b: isize) isize {
+    return if (a < b) a else b;
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // joe_read / joe_write / joe_ioctl — retry on EINTR
@@ -292,12 +310,24 @@ export fn ztoo(s_in: [*c]const u8) i64 {
     return if (flg != 0) -val else val;
 }
 
-export fn ztol(s: [*c]const u8) c_long { return @intCast(ztoo(s)); }
-export fn ztoi(s: [*c]const u8) c_int { return @intCast(ztoo(s)); }
-export fn ztodiff(s: [*c]const u8) isize { return @intCast(ztoo(s)); }
-export fn zhtol(s: [*c]const u8) c_long { return @intCast(zhtoo(s)); }
-export fn zhtoi(s: [*c]const u8) c_int { return @intCast(zhtoo(s)); }
-export fn zhtodiff(s: [*c]const u8) isize { return @intCast(zhtoo(s)); }
+export fn ztol(s: [*c]const u8) c_long {
+    return @intCast(ztoo(s));
+}
+export fn ztoi(s: [*c]const u8) c_int {
+    return @intCast(ztoo(s));
+}
+export fn ztodiff(s: [*c]const u8) isize {
+    return @intCast(ztoo(s));
+}
+export fn zhtol(s: [*c]const u8) c_long {
+    return @intCast(zhtoo(s));
+}
+export fn zhtoi(s: [*c]const u8) c_int {
+    return @intCast(zhtoo(s));
+}
+export fn zhtodiff(s: [*c]const u8) isize {
+    return @intCast(zhtoo(s));
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // Z-string (int) utilities
@@ -394,7 +424,7 @@ export fn Zdup(bf: [*c]const c_int) [*c]c_int {
     const size = (1 + Zlen(bf)) * @sizeOf(c_int);
     const p = joe_malloc(@intCast(size)) orelse return null;
     _ = memcpy(p, bf, @intCast(size));
-    return @alignCast(@ptrCast(p));
+    return @ptrCast(@alignCast(p));
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -403,10 +433,15 @@ export fn Zdup(bf: [*c]const c_int) [*c]c_int {
 
 const Sigaction = extern struct {
     sa_handler: ?*const fn (c_int) callconv(.c) void,
-    sa_mask: [128]u8 align(8),
+    sa_mask: c_uint,
     sa_flags: c_int,
-    _pad: c_int = 0,
 };
+
+comptime {
+    if (@sizeOf(Sigaction) != 16) @compileError("sigaction layout mismatch");
+    if (@offsetOf(Sigaction, "sa_mask") != 8) @compileError("sigaction mask offset mismatch");
+    if (@offsetOf(Sigaction, "sa_flags") != 12) @compileError("sigaction flags offset mismatch");
+}
 
 extern fn sigaction(signum: c_int, act: ?*const Sigaction, old: ?*Sigaction) c_int;
 
@@ -703,7 +738,7 @@ export fn parse_class(pp: [*c][*c]const u8, array: [*c]?*Interval, size: [*c]isi
     if (p[0] == 0) return -1;
     const a = escape(1, &p, null, &cat);
     if (a == -256 and cat != null) {
-        const c = @as(*Cclass, @alignCast(@ptrCast(cat.?)));
+        const c = @as(*Cclass, @ptrCast(@alignCast(cat.?)));
         array.* = c.intervals;
         size.* = c.len;
         pp.* = p;

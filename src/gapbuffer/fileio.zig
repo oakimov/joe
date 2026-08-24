@@ -161,14 +161,16 @@ extern fn ttclsn() void;
 extern fn ttopnn() void;
 extern var maint: ?*anyopaque;
 
-const O_RDWR: c_int = 2;
-const O_CREAT: c_int = 0x40;
-const O_EXCL: c_int = 0x80;
-const O_APPEND: c_int = 0x400;
+const O_RDWR: c_int = 0x2;
+const O_CREAT: c_int = if (builtin.os.tag == .macos) 0x200 else 0x40;
+const O_EXCL: c_int = if (builtin.os.tag == .macos) 0x800 else 0x80;
+const O_APPEND: c_int = if (builtin.os.tag == .macos) 0x8 else 0x400;
 const MAXOFF: i64 = std.math.maxInt(u64) / 2 - 1;
 const CANFLAG_NORESTART: c_int = 1;
 const S_IRUSR: c_uint = 0x100;
 const S_IWUSR: c_uint = 0x80;
+const S_IFMT: c_uint = 0o170000;
+const S_IFREG: c_uint = 0o100000;
 const ENOENT: c_int = 2;
 const EEXIST: c_int = 17;
 
@@ -225,6 +227,10 @@ fn stat_mtime(sbuf: *const struct_stat) i64 {
         sbuf.st_mtimespec.tv_sec
     else
         sbuf.st_mtim.tv_sec;
+}
+
+fn deadjoe_existing_file_allowed(sbuf: *const struct_stat, euid: c_uint) bool {
+    return (@as(c_uint, sbuf.st_mode) & S_IFMT) == S_IFREG and sbuf.st_uid == euid;
 }
 
 // Darwin: __error() returns int*; Linux: __errno_location().
@@ -1041,6 +1047,18 @@ fn bsave_opnerr(s: [*c]const u8) c_int {
 
 var ttsig_handled: c_int = 0;
 
+test "DEADJOE existing path requires owned regular file" {
+    var sbuf: struct_stat = .{};
+    sbuf.st_mode = @intCast(S_IFREG);
+    sbuf.st_uid = 42;
+    try std.testing.expect(deadjoe_existing_file_allowed(&sbuf, 42));
+    try std.testing.expect(!deadjoe_existing_file_allowed(&sbuf, 43));
+
+    sbuf.st_mode = @intCast(0o120000);
+    sbuf.st_uid = 42;
+    try std.testing.expect(!deadjoe_existing_file_allowed(&sbuf, 42));
+}
+
 pub export fn ttsig(sig: c_int) void {
     const tim = time(null);
     if (ttsig_handled != 0) _exit(1);
@@ -1053,6 +1071,7 @@ pub export fn ttsig(sig: c_int) void {
         if (tmpfd < 0) {
             var sbuf: struct_stat = .{};
             if (lstat("DEADJOE", &sbuf) < 0) _exit(1);
+            if (!deadjoe_existing_file_allowed(&sbuf, geteuid())) _exit(1);
             tmpfd = open("DEADJOE", O_RDWR | O_APPEND);
             if (tmpfd < 0) _exit(1);
             if (fchmod(tmpfd, S_IRUSR | S_IWUSR) < 0) _exit(1);

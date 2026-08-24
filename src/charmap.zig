@@ -72,7 +72,7 @@ const PredFn = *const fn (?*Charmap, c_int) callconv(.c) c_int;
 const Charmap = extern struct {
     next: ?*Charmap,
     name: ?[*:0]const u8,
-    @"type": c_int, // 0=byte, 1=UTF-8
+    type: c_int, // 0=byte, 1=UTF-8
     is_punct: ?PredFn,
     is_print: ?PredFn,
     is_space: ?PredFn,
@@ -129,6 +129,10 @@ export fn to_uni(cset: ?*Charmap, c_in: c_int) c_int {
     const map = cset orelse return -1;
     var c = c_in;
     if (c < 0) c += 256;
+    // `to_map` has one entry per byte; codepoints above the byte range (e.g.
+    // viewmode-synthesized glyphs like U+2500 `─`) have no mapping — report
+    // "unmappable", which callers already treat as '?'.
+    if (c < 0 or c > 255) return -1;
     const to_map = map.to_map orelse return -1;
     return to_map[@intCast(c)];
 }
@@ -175,8 +179,8 @@ export fn from_utf8(map: ?*Charmap, s: [*c]const u8) c_int {
 // ═══════════════════════════════════════════════════════════════════════
 
 fn pairCmp(a: ?*const anyopaque, b: ?*const anyopaque) callconv(.c) c_int {
-    const pa = @as(*const Pair, @alignCast(@ptrCast(a.?)));
-    const pb = @as(*const Pair, @alignCast(@ptrCast(b.?)));
+    const pa = @as(*const Pair, @ptrCast(@alignCast(a.?)));
+    const pb = @as(*const Pair, @ptrCast(@alignCast(b.?)));
     if (pa.first > pb.first) return 1;
     if (pa.first < pb.first) return -1;
     return 0;
@@ -253,11 +257,11 @@ fn setBit(map: *[32]u8, n: c_int) void {
 }
 
 fn processBuiltinNamed(name: [*:0]const u8, to_table: *const [256]c_int) ?*Charmap {
-    const map = @as(*Charmap, @alignCast(@ptrCast(joe_malloc(@sizeOf(Charmap)) orelse return null)));
+    const map = @as(*Charmap, @ptrCast(@alignCast(joe_malloc(@sizeOf(Charmap)) orelse return null)));
     @memset(@as([*]u8, @ptrCast(map))[0..@sizeOf(Charmap)], 0);
 
     map.name = @ptrCast(zdup(name));
-    map.@"type" = 0;
+    map.type = 0;
     map.is_punct = byteIspunct;
     map.is_print = byteIsprint;
     map.is_space = byteIsspace;
@@ -342,10 +346,10 @@ fn processBuiltinData(builtin: *const data.BuiltinCharmap) ?*Charmap {
 
 fn loadBuiltins() void {
     {
-        const map = @as(*Charmap, @alignCast(@ptrCast(joe_malloc(@sizeOf(Charmap)) orelse return)));
+        const map = @as(*Charmap, @ptrCast(@alignCast(joe_malloc(@sizeOf(Charmap)) orelse return)));
         @memset(@as([*]u8, @ptrCast(map))[0..@sizeOf(Charmap)], 0);
         map.name = "utf-8";
-        map.@"type" = 1;
+        map.type = 1;
         map.is_punct = joe_iswpunct;
         map.is_print = joe_iswprint;
         map.is_space = joe_iswspace;
@@ -358,10 +362,10 @@ fn loadBuiltins() void {
         utf8_map = map;
     }
     {
-        const map = @as(*Charmap, @alignCast(@ptrCast(joe_malloc(@sizeOf(Charmap)) orelse return)));
+        const map = @as(*Charmap, @ptrCast(@alignCast(joe_malloc(@sizeOf(Charmap)) orelse return)));
         @memset(@as([*]u8, @ptrCast(map))[0..@sizeOf(Charmap)], 0);
         map.name = "utf-16";
-        map.@"type" = 1;
+        map.type = 1;
         map.is_punct = joe_iswpunct;
         map.is_print = joe_iswprint;
         map.is_space = joe_iswspace;
@@ -374,10 +378,10 @@ fn loadBuiltins() void {
         utf16_map = map;
     }
     {
-        const map = @as(*Charmap, @alignCast(@ptrCast(joe_malloc(@sizeOf(Charmap)) orelse return)));
+        const map = @as(*Charmap, @ptrCast(@alignCast(joe_malloc(@sizeOf(Charmap)) orelse return)));
         @memset(@as([*]u8, @ptrCast(map))[0..@sizeOf(Charmap)], 0);
         map.name = "utf-16r";
-        map.@"type" = 1;
+        map.type = 1;
         map.is_punct = joe_iswpunct;
         map.is_print = joe_iswprint;
         map.is_space = joe_iswspace;
@@ -394,7 +398,7 @@ fn loadBuiltins() void {
 fn parseCharmap(name: [*c]const u8, f: ?*anyopaque) ?*BuiltinCharmap {
     if (f == null) return null;
 
-    const b = @as(*BuiltinCharmap, @alignCast(@ptrCast(joe_malloc(@sizeOf(BuiltinCharmap)) orelse return null)));
+    const b = @as(*BuiltinCharmap, @ptrCast(@alignCast(joe_malloc(@sizeOf(BuiltinCharmap)) orelse return null)));
     b.name = @ptrCast(zdup(name));
     var x: usize = 0;
     while (x != 256) : (x += 1) b.to_uni[x] = -1;
@@ -596,8 +600,8 @@ export fn my_iconv(dest_in: [*c]u8, destsiz_in: isize, dest_map: ?*Charmap, src_
         return;
     }
 
-    if (sm.@"type" != 0) {
-        if (dm.@"type" != 0) {
+    if (sm.type != 0) {
+        if (dm.type != 0) {
             _ = zlcpy(dest, destsiz, src);
         } else {
             destsiz -= 1;
@@ -617,7 +621,7 @@ export fn my_iconv(dest_in: [*c]u8, destsiz_in: isize, dest_map: ?*Charmap, src_
             dest[0] = 0;
         }
     } else {
-        if (dm.@"type" == 0) {
+        if (dm.type == 0) {
             destsiz -= 1;
             while (src[0] != 0 and destsiz != 0) {
                 const c = to_uni(sm, src[0]);
@@ -658,7 +662,7 @@ export fn my_iconv1(dest_in: [*c]u8, destsiz_in: isize, dest_map: ?*Charmap, src
     var destsiz = destsiz_in;
     var p = src;
 
-    if (dm.@"type" != 0) {
+    if (dm.type != 0) {
         _ = Ztoutf8(dest, destsiz, p);
     } else {
         destsiz -= 1;
@@ -691,7 +695,7 @@ export fn guess_map(buf: [*c]const u8, len: isize) ?*Charmap {
 
     if (flag != 0 and c >= 0) {
         const lm = locale_map orelse return utf8_map;
-        if (lm.@"type" != 0 or guess_utf8 == 0) return locale_map;
+        if (lm.type != 0 or guess_utf8 == 0) return locale_map;
         return utf8_map;
     }
 

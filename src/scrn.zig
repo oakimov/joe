@@ -213,6 +213,24 @@ pub extern fn sprintf(buf: [*c]u8, fmt: [*c]const u8, ...) c_int;
 pub extern fn zicmp(a: [*c]const u8, b: [*c]const u8) c_int;
 pub extern fn ztoi(s: [*c]const u8) c_int;
 pub extern fn unictrl(c: c_int) c_int;
+/// Guard for the `xlata`/`xlatc` downconversion tables in `outatr`: they are
+/// indexed by character and only defined for the byte range. The markdown
+/// viewmode paints synthetic Unicode glyphs (U+2500 `─`, U+2502 `│`,
+/// U+2610/2611 checkboxes, ...) whose codepoints exceed 255; on a byte-typed
+/// charmap those are "not printable" and would index far out of bounds.
+fn xlat_in_range(c: c_int) bool {
+    return c >= 0 and c < 256;
+}
+
+fn xlat_or_replace(c: *c_int, a: *c_int) void {
+    if (xlat_in_range(c.*)) {
+        a.* ^= xlata[@intCast(c.*)];
+        c.* = xlatc[@intCast(c.*)];
+    } else {
+        a.* ^= UNDERLINE;
+        c.* = '?';
+    }
+}
 pub extern fn utf8_putc(c: c_int) void;
 pub const struct_utf8_sm = extern struct {
     buf: [8]u8 = std.mem.zeroes([8]u8),
@@ -1229,8 +1247,7 @@ pub export fn outatr(arg_map: [*c]struct_charmap, arg_t: [*c]SCRN, arg_scrn_1: [
             }
         }
         if (!(locale_map.*.is_print.?(locale_map, c) != 0) and !((dspasis != 0) and (c >= @as(c_int, 128)))) {
-            a ^= xlata[@bitCast(@as(isize, @intCast(c)))];
-            c = xlatc[@bitCast(@as(isize, @intCast(c)))];
+            xlat_or_replace(&c, &a);
         }
         if ((scrn_1[0][0] == c) and (attrf.* == a)) return;
         scrn_1[0][0] = c;
@@ -1261,8 +1278,7 @@ pub export fn outatr(arg_map: [*c]struct_charmap, arg_t: [*c]SCRN, arg_scrn_1: [
         t.*.x += 1;
     } else if (!(locale_map.*.type != 0)) {
         if (!(locale_map.*.is_print.?(locale_map, c) != 0) and !((dspasis != 0) and (c >= @as(c_int, 128)))) {
-            a ^= xlata[@bitCast(@as(isize, @intCast(c)))];
-            c = xlatc[@bitCast(@as(isize, @intCast(c)))];
+            xlat_or_replace(&c, &a);
         }
         if ((scrn_1[0][0] == c) and (attrf.* == a)) return;
         scrn_1[0][0] = c;
@@ -1297,8 +1313,7 @@ pub export fn outatr(arg_map: [*c]struct_charmap, arg_t: [*c]SCRN, arg_scrn_1: [
         var wid: c_int = undefined;
         _ = &wid;
         if (!((dspasis != 0) and (c >= @as(c_int, 128))) and !(map.*.is_print.?(map, c) != 0)) {
-            a ^= xlata[@bitCast(@as(isize, @intCast(c)))];
-            c = xlatc[@bitCast(@as(isize, @intCast(c)))];
+            xlat_or_replace(&c, &a);
         }
         c = to_uni(map, c);
         if (c == -@as(c_int, 1)) {
@@ -3335,7 +3350,6 @@ pub export fn setextpal(arg_t: [*c]SCRN, arg_palette: [*c]c_int) void {
     t.*.palette = palette;
 }
 
-
 // ── Soft caret / idle blink (hybrid paint path) ───────────────────────
 
 /// From `colors.zig` — scheme `-cursor` (default INVERSE).
@@ -3509,4 +3523,35 @@ pub export fn zig_scrn_soft_cursor(arg_t: [*c]SCRN, arg_x: ptrdiff_t, arg_y: ptr
         outatr(locale_map, t, @ptrCast(cells + idx), @ptrCast(attrs + idx), x, y, mark, new_atr);
     }
     outatr_complete(t);
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────
+
+test "outatr xlat guards byte-range tables" {
+    // Regression: markdown viewmode paints synthetic Unicode glyphs
+    // (U+2500 ─ = 9472, U+2502 │, checkboxes...) whose codepoints exceed the
+    // 255-entry xlata/xlatc downconversion tables. On a byte-typed charmap
+    // they are classified "not printable" and reached the tables unchecked:
+    // `index out of bounds: index 9472, len 256` (crash while scrolling a
+    // markdown buffer). The guard must route wide codepoints to the
+    // underlined-'?' undisplayable rendering instead of indexing.
+    try std.testing.expect(xlat_in_range(0));
+    try std.testing.expect(xlat_in_range(127));
+    try std.testing.expect(xlat_in_range(255));
+    try std.testing.expect(!xlat_in_range(256));
+    try std.testing.expect(!xlat_in_range(9472)); // U+2500 ─
+    try std.testing.expect(!xlat_in_range(0x2610)); // ☐
+    try std.testing.expect(!xlat_in_range(-1));
+
+    var c: c_int = 0x2500;
+    var a: c_int = 0;
+    xlat_or_replace(&c, &a);
+    try std.testing.expectEqual(@as(c_int, '?'), c);
+    try std.testing.expectEqual(UNDERLINE, a);
+
+    c = 65;
+    a = 0;
+    xlat_or_replace(&c, &a);
+    try std.testing.expectEqual(@as(c_int, xlatc[65]), c);
+    try std.testing.expectEqual(xlata[65], a);
 }
